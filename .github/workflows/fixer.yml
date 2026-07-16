@@ -1,0 +1,22 @@
+name: Fixer
+
+# Proposer stage: scans this repo, files bugs/features as issues with confidence labels.
+# Never opens a PR, never queues for build (issue-build.yml decides that). Runs on the
+# Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN), not a metered API key.
+# Reusable workflow: SuxOS/.github/.github/workflows/fixer.yml
+
+on:
+  schedule:
+    - cron: "33 9 * * *" # feat proposer: 1/day, offset from sibling repos' fixer.yml crons
+  workflow_dispatch:
+
+jobs:
+  fixer:
+    # Default GITHUB_TOKEN perms are read-only; a reusable requesting more than the caller
+    # grants fails at startup. Grant exactly what fixer.yml needs.
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    secrets: inherit

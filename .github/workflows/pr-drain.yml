@@ -1,0 +1,29 @@
+name: PR drain (close-stale + reconcile)
+
+# CLOSE-STALE: bot PRs (`self-improve`) and human-punted ones (`needs-human`) idle past
+# STALE_DAYS get a heads-up comment and are closed (opt out with `hold`/`keep`).
+# RECONCILE: a green, mergeable PR eligible under the same predicate automerge.yml uses but
+# never armed gets native auto-merge armed — never force-merges. gh CLI + jq only, no
+# checkout. App token so mutations carry the SUX_BOT identity.
+# The org default required-gates list names checks that don't exist in this repo, so
+# override with the real check names instead of inheriting the dead default — must stay in
+# lock-step with automerge.yml's list.
+# Reusable workflow: SuxOS/.github/.github/workflows/pr-drain.yml
+
+on:
+  schedule:
+    - cron: "41 * * * *" # hourly, offset from sibling repos to spread shared-subscription load
+  workflow_dispatch:
+
+jobs:
+  drain:
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: SuxOS/.github/.github/workflows/pr-drain.yml@main
+    with:
+      required-gates: |
+        Test & build
+        security-review
+    secrets: inherit

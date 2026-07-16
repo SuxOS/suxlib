@@ -1,0 +1,19 @@
+name: Audit & SBOM
+
+# Dependency vulnerability audit + Software Bill of Materials generation. Advisory-only
+# here (not a required branch-protection check) — same posture as sux-fileops.
+# Reusable workflow: SuxOS/.github/.github/workflows/audit.yml
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    permissions:
+      contents: read
+      issues: write
+    uses: SuxOS/.github/.github/workflows/audit.yml@main
+    secrets: inherit

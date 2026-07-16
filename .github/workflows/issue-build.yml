@@ -1,0 +1,34 @@
+name: Issue build
+
+# Collate + build stage: clusters queued-for-build issues (n issues -> m PRs, never n->1;
+# confidence-pure), fans out one build session + PR per cluster. confidence:high clusters get
+# `automerge`, the rest `needs-review`. Batch schedule replaces per-issue triggering (org budget
+# redesign — see SuxOS/.github docs/design/budget-and-cadence.md); workflow_dispatch drains the
+# queue on demand. Runs on the Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN). PRs flow
+# into the existing automerge/merge-queue. suxlib has no `typecheck`/`lint` npm scripts — `npm
+# run build` is `tsc --noEmit`, doubling as the typecheck (see package.json).
+# Reusable workflow: SuxOS/.github/.github/workflows/issue-build.yml
+
+on:
+  schedule:
+    - cron: "51 * * * *" # hourly, offset from sibling repos to spread shared-subscription load
+  workflow_dispatch:
+  issues:
+    types: [labeled]  # event-driven: fires when fixer files a typed issue; reusable concurrency group serializes runs (no Opus fan-out)
+
+jobs:
+  issue-build:
+    if: github.event_name != 'issues' || contains(fromJSON('["bug","enhancement","documentation"]'), github.event.label.name)
+    # Grant exactly what issue-build.yml needs (default token is read-only → reusable would startup-fail).
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+      id-token: write
+    uses: SuxOS/.github/.github/workflows/issue-build.yml@main
+    with:
+      model-hint: sonnet  # sonnet only, no Opus escalation (operator directive)
+      gates-summary: |
+        npm test · npm run build (type-check)
+    secrets: inherit
