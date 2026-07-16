@@ -37,3 +37,22 @@ test('fieldMerge throws on empty input', async () => {
   const s = new MemoryStore()
   await expect(fieldMerge([], s)).rejects.toThrow(/empty/)
 })
+
+test('fieldMerge: rejects __proto__ key and does not pollute Object.prototype (CWE-1321)', async () => {
+  const s = new MemoryStore()
+  const attack = await putText(s, '{"__proto__": {"polluted": "yes"}, "name": "mallory"}', 'application/json')
+  const merged = JSON.parse(await resolveText(s, await fieldMerge([attack], s)))
+  expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+  expect(Object.getPrototypeOf(merged)).toBe(Object.prototype)
+  expect(merged).toEqual({ name: 'mallory' })
+})
+
+test('fieldMerge: rejects constructor/prototype keys across multiple handles', async () => {
+  const s = new MemoryStore()
+  const a = await putText(s, '{"constructor": {"prototype": {"polluted2": "yes"}}}', 'application/json')
+  const b = await putText(s, '{"prototype": {"polluted3": "yes"}, "id": "safe"}', 'application/json')
+  const merged = JSON.parse(await resolveText(s, await fieldMerge([a, b], s)))
+  expect(({} as Record<string, unknown>).polluted2).toBeUndefined()
+  expect(({} as Record<string, unknown>).polluted3).toBeUndefined()
+  expect(merged).toEqual({ id: 'safe' })
+})

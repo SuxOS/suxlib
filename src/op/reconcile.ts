@@ -30,6 +30,12 @@ export async function fieldMerge(
   const merged: Record<string, unknown> = {}
   for (const doc of docs) {
     for (const [k, v] of Object.entries(doc)) {
+      // Reject prototype-polluting keys (CWE-1321): JSON.parse assigns "__proto__" as a plain
+      // own property, but `merged[k] = v` below is a bracket assignment on a normal object —
+      // for k === '__proto__' that invokes Object.prototype's inherited setter and reassigns
+      // merged's prototype to attacker-controlled `v` instead of setting a data field. Skip
+      // this and the other well-known dangerous keys before they ever reach an assignment.
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
       const policy = opts.policy?.[k] ?? defaultPolicy
       if (policy === 'keep-first') { if (!(k in merged)) merged[k] = v; continue }
       if (policy === 'union' && Array.isArray(v)) {
