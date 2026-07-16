@@ -42,3 +42,10 @@ export async function fieldMerge(
   }
   return putText(store, JSON.stringify(merged), 'application/json')
 }
+export async function runReconcile(opts: ReconcileOpts, handles: Handle[], store: Store): Promise<Handle> {
+  switch (opts.mode) {
+    case 'faithful-union': return faithfulUnion(handles, store)
+    case 'last-write-wins': return lastWriteWins(handles)
+    case 'field-merge': return fieldMerge(handles, store, opts)
+  }
+}

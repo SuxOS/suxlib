@@ -1,5 +1,5 @@
 import type { Op, Caps } from '../op/types.js'
-import { faithfulUnion } from '../op/reconcile.js'
+import { runReconcile } from '../op/reconcile.js'
 export async function runInline(node: Op, input: any, caps: Caps): Promise<any> {
   switch (node.tag) {
     case 'leaf': return node.fn(input, caps)
@@ -13,9 +13,7 @@ export async function runInline(node: Op, input: any, caps: Caps): Promise<any> 
       }))
       return out
     }
-    case 'reconcile':
-      if (node.opts.mode !== 'faithful-union') throw new Error(`reconcile mode not yet wired: ${node.opts.mode}`)
-      return faithfulUnion(input, caps.store)
+    case 'reconcile': return runReconcile(node.opts, input, caps.store)
     case 'sink': { await Promise.all(node.targets.map(t => caps.sinks[t].write(input, caps))); return input }
     case 'ask': return input // inline mode: no human pause; proceed with the piped value
   }
