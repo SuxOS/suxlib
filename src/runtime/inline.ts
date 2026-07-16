@@ -13,7 +13,9 @@ export async function runInline(node: Op, input: any, caps: Caps): Promise<any> 
       }))
       return out
     }
-    case 'reconcile': return faithfulUnion(input, caps.store)
+    case 'reconcile':
+      if (node.opts.mode !== 'faithful-union') throw new Error(`reconcile mode not yet wired: ${node.opts.mode}`)
+      return faithfulUnion(input, caps.store)
     case 'sink': { await Promise.all(node.targets.map(t => caps.sinks[t].write(input, caps))); return input }
     case 'ask': return input // inline mode: no human pause; proceed with the piped value
   }
