@@ -106,10 +106,11 @@ export function zipCreate(files: ArchiveFile[]): Uint8Array {
   return zipSync(record, { level: 6 })
 }
 
-export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {
+/** unzipSync with the same MAX_ENTRIES/MAX_UNPACK_BYTES bomb guard — every zip-reading callsite must route through this rather than calling unzipSync directly. */
+function unzipGuarded(bytes: Uint8Array): Record<string, Uint8Array> {
   let count = 0
   let declared = 0
-  const files = unzipSync(bytes, {
+  return unzipSync(bytes, {
     filter(f) {
       if (++count > MAX_ENTRIES) throw new Error(`archive has more than ${MAX_ENTRIES} entries (bomb guard).`)
       declared += f.originalSize
@@ -117,6 +118,10 @@ export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {
       return true
     },
   })
+}
+
+export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {
+  const files = unzipGuarded(bytes)
   return Object.entries(files).map(([name, data]) => decodeEntry(name, data))
 }
 
@@ -296,7 +301,7 @@ export const ARCHIVE_MIME: Record<ArchiveFormat, string> = {
 // zipExtract, since it operates on Handles (claim-check) rather than raw bytes.
 export const unzip: LeafFn = async (zipHandle, caps) => {
   const bytes = await resolve(caps.store, zipHandle)
-  const files = unzipSync(bytes)
+  const files = unzipGuarded(bytes)
   return Promise.all(
     Object.entries(files).map(([name, data]) =>
       putBytes(caps.store, data, name.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream'),

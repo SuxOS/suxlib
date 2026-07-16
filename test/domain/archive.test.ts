@@ -79,6 +79,13 @@ test('zipExtract fails a zip bomb whose declared entry size exceeds the cap', ()
   expect(() => zipExtract(bomb)).toThrow(/bomb guard/)
 })
 
+test('unzip leaf fails a zip bomb whose declared entry size exceeds the cap', async () => {
+  const store = new MemoryStore()
+  const bomb = zipSync({ 'big.bin': new Uint8Array(21_000_000) }, { level: 9 })
+  const zh = await putBytes(store, bomb, 'application/zip')
+  await expect(unzip(zh, { store } as any)).rejects.toThrow(/bomb guard/)
+})
+
 test('gzipExtract fails a gzip bomb instead of decompressing it fully', () => {
   const bomb = gzipSync(new Uint8Array(21_000_000), { level: 9 })
   expect(() => gzipExtract(bomb)).toThrow(/bomb guard/)
