@@ -13,3 +13,9 @@ export async function faithfulUnion(handles: Handle[], store: Store): Promise<Ha
   }
   return putText(store, blocks.join('\n\n'), 'text/markdown')
 }
+export function lastWriteWins(handles: Handle[]): Handle {
+  if (handles.length === 0) throw new Error('lastWriteWins: empty input')
+  const unstamped = handles.find(h => h.producedAt === undefined)
+  if (unstamped) throw new Error(`lastWriteWins: handle ${unstamped.r2Key} has no producedAt — stamp it via stamp(handle, caps.clock) before reconciling`)
+  return handles.reduce((winner, h) => (h.producedAt! >= winner.producedAt! ? h : winner))
+}
