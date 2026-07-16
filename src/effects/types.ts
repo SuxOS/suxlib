@@ -1,4 +1,4 @@
-export interface Handle { r2Key: string; sha256: string; type: string; size: number }
+export interface Handle { r2Key: string; sha256: string; type: string; size: number; producedAt?: number }
 export interface Store { put(bytes: Uint8Array, type: string): Promise<Handle>; get(h: Handle): Promise<Uint8Array> }
 export interface Llm { markdownFromPdf(bytes: Uint8Array): Promise<string>; summarize(text: string): Promise<string> }
 export interface Clock { now(): number }
