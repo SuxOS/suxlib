@@ -1,0 +1,53 @@
+name: Workflow health check
+
+# Guards against a workflow that calls a SuxOS/.github reusable silently startup-failing on
+# a cron trigger with no human watching. Vendored inline (no `uses:` of its own, like
+# ci.yml) so a cross-repo access break that kills every `uses: SuxOS/.github/...` caller
+# can't also silently kill the thing watching for it.
+#
+# Flags, never mutates: opens/updates one rolling tracking issue when the latest run of a
+# monitored workflow concluded startup_failure. Same "flag, don't touch" posture as
+# pr-watch.yml.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check latest run of each reusable-calling workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          workflows="audit.yml automerge.yml claude-autofix.yml claude.yml fixer.yml fixer-hourly.yml issue-build.yml pr-auto-update.yml pr-drain.yml pr-unstick.yml pr-watch.yml security-review.yml"
+          failed=""
+          for wf in $workflows; do
+            conclusion=$(gh run list --workflow "$wf" --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
+            if [ "$conclusion" = "startup_failure" ]; then
+              failed="$failed $wf"
+            fi
+          done
+
+          if [ -z "$failed" ]; then
+            echo "All monitored workflows' latest runs are healthy."
+            exit 0
+          fi
+
+          title="Reusable-workflow startup failure detected"
+          body=$(printf 'Latest run of these workflows concluded `startup_failure` — likely `SuxOS/.github` cross-repo reusable-workflow access broke (the class of bug tracked in issue #51):\n%s\n\nCheck the `SuxOS/.github` repo settings under Actions → Access, and the failing runs under this repo'\''s Actions tab.' "$(printf -- '- %s\n' $failed)")
+
+          existing=$(gh issue list --search "\"Reusable-workflow startup failure detected\" in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label bug
+          fi
