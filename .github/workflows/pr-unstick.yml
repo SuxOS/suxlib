@@ -1,0 +1,28 @@
+name: PR unstick
+
+# Long-lived unstuck mechanism: periodically retries PRs stuck in `needs-human` (re-runs
+# failed checks, rebases onto main) in case the stall was transient or already fixed
+# elsewhere. Doesn't spend a fresh LLM autofix attempt — that budget is already exhausted
+# per-PR by claude-autofix.yml. Bounded by a cooldown between attempts and a hard cycle
+# cap, past which the PR waits for the operator or pr-drain.yml's close-stale backstop.
+# Reusable workflow: SuxOS/.github/.github/workflows/pr-unstick.yml
+
+on:
+  schedule:
+    - cron: "5 * * * *" # hourly, offset from sibling repos to spread shared-subscription load
+  workflow_dispatch:
+
+jobs:
+  pr-unstick:
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      checks: read
+      statuses: read
+      actions: write
+    uses: SuxOS/.github/.github/workflows/pr-unstick.yml@main
+    with:
+      cooldown-hours: "24"
+      max-cycles: "3"
+    secrets: inherit

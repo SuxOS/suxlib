@@ -1,0 +1,25 @@
+name: Stuck-PR watcher
+
+# Read-only visibility net for the autonomy pipeline. Every hour (and on demand) lists open
+# PRs and flags ones that are silently stalled (BEHIND main, a failing required check, or
+# green + mergeable but auto-merge never armed and idle > stale-hours). Never merges or
+# mutates a PR beyond a single rolling tracking issue. Defaults match this repo's needs, so
+# no overrides.
+# Reusable workflow: SuxOS/.github/.github/workflows/pr-watch.yml
+
+on:
+  schedule:
+    - cron: "47 * * * *" # hourly, offset from sibling repos to spread shared-subscription load
+  workflow_dispatch: # allow manual "Run workflow" from the Actions tab
+
+jobs:
+  watch:
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+      checks: read
+      statuses: read
+      actions: read
+    uses: SuxOS/.github/.github/workflows/pr-watch.yml@main
+    secrets: inherit

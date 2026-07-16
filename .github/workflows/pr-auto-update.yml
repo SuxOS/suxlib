@@ -1,0 +1,23 @@
+name: PR auto-update (self-drain)
+
+# The missing "auto-update-behind" limb: when branch protection is strict (a PR must be
+# up-to-date with main to merge), nothing re-bases open PRs when main moves — so every other
+# armed-auto-merge PR flips BEHIND and stalls until someone clicks "Update branch". This runs
+# `gh pr update-branch` on armed-but-BEHIND PRs so the queue self-drains. See the reusable for
+# the full rationale (no self-loop risk, App-token push).
+# Reusable workflow: SuxOS/.github/.github/workflows/pr-auto-update.yml
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *" # daily backstop only — push:main above is the real self-drain trigger
+  workflow_dispatch:
+
+jobs:
+  update-behind:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: SuxOS/.github/.github/workflows/pr-auto-update.yml@main
+    secrets: inherit

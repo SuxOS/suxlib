@@ -1,0 +1,26 @@
+name: Auto-merge
+
+# Enables GitHub NATIVE auto-merge (arms the merge queue) on eligible, trusted-author PRs;
+# never force-merges. Uses pull_request_target (base-repo context, write token) but never
+# checks out PR code — only reads the event payload and calls the API. The org default
+# required-gates list names checks that don't exist in this repo (no wrangler dry-run/
+# "npm audit & SBOM" job here), so override with the real check names instead of inheriting
+# the dead default. suxlib's CI job is named "Test & build" (not the bare "test" sux-fileops
+# uses), so that's what's listed here — see suxlib's ci.yml.
+# Reusable workflow: SuxOS/.github/.github/workflows/automerge.yml
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize, labeled, unlabeled, edited]
+
+jobs:
+  enable-automerge:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: SuxOS/.github/.github/workflows/automerge.yml@main
+    with:
+      required-gates: |
+        Test & build
+        security-review
+    secrets: inherit

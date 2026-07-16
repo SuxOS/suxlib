@@ -1,0 +1,28 @@
+name: Fixer (hourly, shallow)
+
+# Second caller of the same proposer reusable as fixer.yml, at a much tighter cadence and a
+# much shallower scan. fixer.yml's daily run is tuned for a broad sweep; this one runs
+# hourly with max-turns low enough to only catch fresh, cheap-to-spot signal (recent
+# commits/PRs, obvious TODOs) between those deep passes — not a redundant full scan.
+# Distinct workflow name -> distinct concurrency group (fixer.yml's group key is
+# `fixer-${{ github.workflow }}`), so this never blocks on or races the daily caller.
+# Safe by construction: the reusable's own throttle check (check-throttle, defer-at: yellow)
+# already stands this down under budget pressure, same as every other proposer-stage caller —
+# an hourly cadence just means it checks in more often, not that it bypasses the governor.
+# Reusable workflow: SuxOS/.github/.github/workflows/fixer.yml
+
+on:
+  schedule:
+    - cron: "55 * * * *" # hourly, shallow, offset from sibling repos to spread shared-subscription load
+  workflow_dispatch:
+
+jobs:
+  fixer:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    with:
+      max-turns: 12 # shallow: fresh/cheap signal only, not a full-repo re-sweep
+    secrets: inherit
