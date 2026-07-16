@@ -1,0 +1,90 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { registerFileopsTools } from '../../src/adapters/mcp.js'
+
+const b64 = (s: string) => btoa(s)
+
+function parseResult(result: Awaited<ReturnType<Client['callTool']>>): unknown {
+  const content = result.content as Array<{ type: string; text?: string }>
+  const text = content?.[0]?.text
+  return text ? JSON.parse(text) : undefined
+}
+
+describe('mcp adapter', () => {
+  let client: Client
+  let server: McpServer
+
+  beforeEach(async () => {
+    server = new McpServer({ name: 'test', version: '0.0.0' })
+    registerFileopsTools(server)
+    client = new Client({ name: 'test-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+  })
+
+  afterEach(async () => {
+    await client.close()
+    await server.close()
+  })
+
+  it('lists the expected tools', async () => {
+    const { tools } = await client.listTools()
+    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'sanitize_image', 'sanitize_text', 'transform'].sort())
+  })
+
+  it('transform: happy path json -> yaml', async () => {
+    const result = await client.callTool({ name: 'transform', arguments: { data: '{"a":1}', to: 'yaml' } })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ data: 'a: 1' })
+  })
+
+  it('sanitize_text: happy path redacts an email', async () => {
+    const result = await client.callTool({ name: 'sanitize_text', arguments: { text: 'contact ada@example.com' } })
+    expect(parseResult(result)).toMatchObject({ redacted: 'contact [REDACTED:email]', counts: { email: 1 } })
+  })
+
+  it('archive_create + archive_extract: happy-path round trip', async () => {
+    const created = await client.callTool({ name: 'archive_create', arguments: { format: 'zip', files: [{ name: 'a.txt', base64: b64('hello') }] } })
+    const { base64 } = parseResult(created) as { base64: string }
+    const extracted = await client.callTool({ name: 'archive_extract', arguments: { format: 'zip', base64 } })
+    const { entries } = parseResult(extracted) as { entries: Array<{ name: string; text?: string }> }
+    expect(entries[0]).toMatchObject({ name: 'a.txt', text: 'hello' })
+  })
+
+  it('pdf_shrink: happy path shrinks a valid PDF', async () => {
+    const { PDFDocument } = await import('pdf-lib')
+    const doc = await PDFDocument.create()
+    doc.addPage([300, 400])
+    const bytes = await doc.save()
+    let s = ''
+    for (const b of bytes) s += String.fromCharCode(b)
+    const result = await client.callTool({ name: 'pdf_shrink', arguments: { base64: btoa(s) } })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { mime: string; outputBytes: number }
+    expect(body.mime).toBe('application/pdf')
+    expect(body.outputBytes).toBeGreaterThan(0)
+  })
+
+  it('sanitize_image: malformed image surfaces as a tool error, not an uncaught exception', async () => {
+    const result = await client.callTool({ name: 'sanitize_image', arguments: { base64: b64('not an image') } })
+    expect(result.isError).toBe(true)
+  })
+})
+
+describe('mcp adapter: allow-listed registration', () => {
+  it('registers only the named tools when opts.allow is passed', async () => {
+    const scopedServer = new McpServer({ name: 'test-scoped', version: '0.0.0' })
+    registerFileopsTools(scopedServer, { allow: ['transform', 'sanitize_text'] })
+    const scopedClient = new Client({ name: 'test-scoped-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([scopedServer.connect(serverTransport), scopedClient.connect(clientTransport)])
+
+    const { tools } = await scopedClient.listTools()
+    expect(tools.map((t) => t.name).sort()).toEqual(['sanitize_text', 'transform'])
+
+    await scopedClient.close()
+    await scopedServer.close()
+  })
+})
