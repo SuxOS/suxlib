@@ -4,7 +4,7 @@ export interface Llm { markdownFromPdf(bytes: Uint8Array): Promise<string>; summ
 export interface Clock { now(): number }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const d = await crypto.subtle.digest('SHA-256', bytes)
+  const d = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('')
 }
 export class MemoryStore implements Store {
