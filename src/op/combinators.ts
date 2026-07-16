@@ -7,3 +7,5 @@ export const sink = Object.assign(
   (name: string): Op => ({ tag: 'sink', targets: [name] }),
   { fanout: (...names: string[]): Op => ({ tag: 'sink', targets: names }) },
 )
+export const ask = (prompt: string, o: { timeout: string; onTimeout: 'proceed' | 'fail' }): Op =>
+  ({ tag: 'ask', prompt, timeout: o.timeout, onTimeout: o.onTimeout })
