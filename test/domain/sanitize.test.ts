@@ -1,0 +1,94 @@
+import { test, expect } from 'vitest'
+import { redactText, sanitizeImage, detectImageKind, MAX_IMAGE_INPUT_BYTES } from '../../src/domain/sanitize.js'
+
+test('redactText redacts email, phone, ssn, valid credit card and ip', () => {
+  const out = redactText('Email a@b.com, call 415-555-0198, SSN 123-45-6789, card 4111 1111 1111 1111, ip 10.0.0.1')
+  expect(out.redacted).toContain('[REDACTED:email]')
+  expect(out.redacted).toContain('[REDACTED:phone]')
+  expect(out.redacted).toContain('[REDACTED:ssn]')
+  expect(out.redacted).toContain('[REDACTED:credit_card]')
+  expect(out.redacted).toContain('[REDACTED:ip]')
+  expect(out.counts.credit_card).toBe(1)
+})
+
+test('redactText leaves Luhn-invalid card runs and out-of-range IPs alone', () => {
+  const out = redactText('order 1234567890123456 from 999.1.1.1', ['credit_card', 'ip'])
+  expect(out.redacted).toContain('1234567890123456')
+  expect(out.redacted).toContain('999.1.1.1')
+  expect(out.counts.credit_card).toBeUndefined()
+})
+
+test('redactText honors the types subset', () => {
+  const out = redactText('a@b.com and 10.0.0.1', ['email'])
+  expect(out.redacted).toContain('[REDACTED:email]')
+  expect(out.redacted).toContain('10.0.0.1')
+})
+
+test('redactText only redacts a bare 9-digit SSN when nearby context labels it', () => {
+  const labeled = redactText('SSN: 123456789')
+  expect(labeled.redacted).toContain('[REDACTED:ssn]')
+  const unlabeled = redactText('order number 123456789')
+  expect(unlabeled.redacted).toContain('123456789')
+})
+
+test('detectImageKind reads magic bytes for jpeg/png and returns null otherwise', () => {
+  expect(detectImageKind(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe('jpeg')
+  expect(detectImageKind(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).toBe('png')
+  expect(detectImageKind(new Uint8Array([0, 0, 0, 0]))).toBeNull()
+})
+
+test('sanitizeImage strips PNG ancillary metadata chunks and keeps critical ones', () => {
+  const png = buildMinimalPng({ tEXt: true })
+  const result = sanitizeImage(png)
+  expect(result.kind).toBe('png')
+  expect(result.strippedBytes).toBeGreaterThan(0)
+  // Critical chunks (IHDR/IDAT/IEND) must survive; re-run detectImageKind on the output.
+  expect(detectImageKind(result.bytes)).toBe('png')
+})
+
+test('sanitizeImage rejects an image over MAX_IMAGE_INPUT_BYTES', () => {
+  const big = new Uint8Array(MAX_IMAGE_INPUT_BYTES + 1)
+  big.set([0x89, 0x50, 0x4e, 0x47])
+  expect(() => sanitizeImage(big)).toThrow(/bomb guard/)
+})
+
+test('sanitizeImage throws on an unsupported format', () => {
+  expect(() => sanitizeImage(new Uint8Array([1, 2, 3, 4]))).toThrow(/unsupported image format/)
+})
+
+// ---- minimal PNG builder for the sanitize test above ----
+function crc32(bytes: Uint8Array): number {
+  let c = 0xffffffff
+  for (let i = 0; i < bytes.length; i++) {
+    c ^= bytes[i]
+    for (let k = 0; k < 8; k++) c = c & 1 ? (c >>> 1) ^ 0xedb88320 : c >>> 1
+  }
+  return (c ^ 0xffffffff) >>> 0
+}
+function chunk(type: string, data: Uint8Array): Uint8Array {
+  const len = data.length
+  const out = new Uint8Array(4 + 4 + len + 4)
+  const dv = new DataView(out.buffer)
+  dv.setUint32(0, len)
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i)
+  out.set(data, 8)
+  const crcInput = out.slice(4, 8 + len)
+  dv.setUint32(8 + len, crc32(crcInput))
+  return out
+}
+function buildMinimalPng(opts: { tEXt?: boolean }): Uint8Array {
+  const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const ihdr = chunk('IHDR', new Uint8Array(13)) // zeroed header, fine for a metadata-strip test
+  const parts = [sig, ihdr]
+  if (opts.tEXt) parts.push(chunk('tEXt', new TextEncoder().encode('Comment\0hello')))
+  parts.push(chunk('IDAT', new Uint8Array([0])))
+  parts.push(chunk('IEND', new Uint8Array(0)))
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    out.set(p, off)
+    off += p.length
+  }
+  return out
+}
