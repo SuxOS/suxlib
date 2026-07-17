@@ -4,7 +4,7 @@
 // sux-fileops's src/core/archive.ts (itself adapted from sux's src/fns/archive.ts)
 // during the suxlib absorption of sux-fileops.
 
-import { Gunzip, gzipSync, strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
+import { Gunzip, Unzip, UnzipInflate, gzipSync, strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { isAbsolute, resolve as resolvePath, sep } from 'node:path'
 import type { LeafFn } from '../op/types.js'
 import { resolve, putBytes } from '../handles/handle.js'
@@ -106,18 +106,60 @@ export function zipCreate(files: ArchiveFile[]): Uint8Array {
   return zipSync(record, { level: 6 })
 }
 
-/** unzipSync with the same MAX_ENTRIES/MAX_UNPACK_BYTES bomb guard — every zip-reading callsite must route through this rather than calling unzipSync directly. */
+const UNZIP_STREAM_CHUNK = 65_536
+
+/**
+ * unzipSync with the same MAX_ENTRIES/MAX_UNPACK_BYTES bomb guard — every zip-reading callsite must route through
+ * this rather than calling unzipSync directly.
+ *
+ * A zip entry's declared `originalSize` is attacker-controlled (read straight off the header) and is not the actual
+ * number of bytes fflate produces when it inflates the entry — a crafted zip can declare a tiny size while its
+ * deflate stream expands to hundreds of MB. So the byte cap is enforced against *actual* decompressed output,
+ * streamed through fflate's incremental Unzip/UnzipInflate (mirroring gunzipCapped's real-byte counting) rather than
+ * trusting the header's declared value. unzipSync still runs first with every entry filtered out, purely to get its
+ * zip-structure validation (throws on malformed/non-zip input, matching prior behavior) and an entry-count guard
+ * before any inflation happens; the streaming pass re-checks MAX_ENTRIES too, since local-header entries (what the
+ * streaming pass sees) and central-directory entries (what unzipSync's filter sees) can be crafted to disagree.
+ */
 function unzipGuarded(bytes: Uint8Array): Record<string, Uint8Array> {
-  let count = 0
-  let declared = 0
-  return unzipSync(bytes, {
-    filter(f) {
-      if (++count > MAX_ENTRIES) throw new Error(`archive has more than ${MAX_ENTRIES} entries (bomb guard).`)
-      declared += f.originalSize
-      if (declared > MAX_UNPACK_BYTES) throw new Error(`archive decompresses to more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
-      return true
+  let declaredCount = 0
+  unzipSync(bytes, {
+    filter() {
+      if (++declaredCount > MAX_ENTRIES) throw new Error(`archive has more than ${MAX_ENTRIES} entries (bomb guard).`)
+      return false
     },
   })
+
+  const files: Record<string, Uint8Array> = {}
+  let count = 0
+  let total = 0
+  const unzipper = new Unzip((file) => {
+    if (++count > MAX_ENTRIES) throw new Error(`archive has more than ${MAX_ENTRIES} entries (bomb guard).`)
+    const chunks: Uint8Array[] = []
+    let entryTotal = 0
+    file.ondata = (err, chunk, final) => {
+      if (err) throw err
+      total += chunk.length
+      entryTotal += chunk.length
+      if (total > MAX_UNPACK_BYTES) throw new Error(`archive decompresses to more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
+      chunks.push(chunk)
+      if (final) {
+        const out = new Uint8Array(entryTotal)
+        let off = 0
+        for (const c of chunks) {
+          out.set(c, off)
+          off += c.length
+        }
+        files[file.name] = out
+      }
+    }
+    file.start()
+  })
+  unzipper.register(UnzipInflate)
+  for (let i = 0; i < bytes.length; i += UNZIP_STREAM_CHUNK) {
+    unzipper.push(bytes.subarray(i, i + UNZIP_STREAM_CHUNK), i + UNZIP_STREAM_CHUNK >= bytes.length)
+  }
+  return files
 }
 
 export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {

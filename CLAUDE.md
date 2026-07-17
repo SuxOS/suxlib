@@ -113,3 +113,12 @@ There is no linter in this repo. Run both locally before pushing.
   picking one side arbitrarily — take the more defensive/correct version of each
   guard (bomb caps, prototype-pollution guards, escaping) even if it means neither
   original file is byte-for-byte what ends up here.
+- fflate gotcha: `unzipSync`'s declared `originalSize`/`size` fields (central
+  directory) are attacker-controlled and are used to preallocate a fixed output
+  buffer that silently does *not* resize on overflow — trust actual streamed bytes
+  (fflate's `Unzip`/`UnzipInflate`, or `Gunzip` as `gunzipCapped` already does), never
+  the declared header value, for any bomb-guard byte accounting. Separately, `Unzip`'s
+  streaming parser (unlike `unzipSync`) does not throw on malformed/non-zip input —
+  it just silently finds zero entries — so if you touch `unzipGuarded` in
+  `src/domain/archive.ts`, keep (or replace with an equivalent) the `unzipSync`
+  validation pre-pass that gives corrupt-input callers a real error.
