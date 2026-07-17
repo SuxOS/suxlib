@@ -368,6 +368,23 @@ function collapse(node: Record<string, unknown>): unknown {
   return node
 }
 
+// Marker attribute `toXml` stamps on the sole child tag of a single-element
+// array: `<tags>a</tags>` for `{tags: ['a']}` is byte-identical to the tag
+// `toXml` would emit for the scalar field `{tags: 'a'}`, so without a marker
+// parseXml's attach() (which only promotes to an array on a *second* sighting
+// of the same tag name) silently collapses the array back to a bare scalar on
+// round-trip. Arrays of length >1 don't need this — sibling tags with the same
+// name are unambiguous. Stripped back out of the parsed node before collapse()
+// so it never leaks into the decoded value.
+const ARRAY_ITEM_ATTR = 'array-item'
+
+function takeArrayItemMarker(node: Record<string, unknown>): boolean {
+  const key = '@' + ARRAY_ITEM_ATTR
+  if (node[key] !== 'true') return false
+  delete node[key]
+  return true
+}
+
 function tagEnd(s: string, lt: number): number {
   let quote = ''
   for (let i = lt + 1; i < s.length; i++) {
@@ -411,7 +428,9 @@ export function parseXml(xml: string): unknown {
       if (closing !== expected) throw new Error(`mismatched tag: expected </${expected}>, got </${closing}>`)
       const finished = nodes.pop()!
       names.pop()
-      attach(nodes[nodes.length - 1], expected, collapse(finished))
+      const isArrayItem = takeArrayItemMarker(finished)
+      const value = collapse(finished)
+      attach(nodes[nodes.length - 1], expected, isArrayItem ? [value] : value)
       pos = gt + 1
       continue
     }
@@ -426,7 +445,9 @@ export function parseXml(xml: string): unknown {
       node['@' + key] = decodeEntities(val)
     }
     if (selfClose) {
-      attach(nodes[nodes.length - 1], name, Object.keys(node).length ? node : '')
+      const isArrayItem = takeArrayItemMarker(node)
+      const value = Object.keys(node).length ? node : ''
+      attach(nodes[nodes.length - 1], name, isArrayItem ? [value] : value)
     } else {
       nodes.push(node)
       names.push(name)
@@ -437,10 +458,14 @@ export function parseXml(xml: string): unknown {
   return collapse(root)
 }
 
-export function toXml(obj: unknown, name?: string, depth = 0): string {
+export function toXml(obj: unknown, name?: string, depth = 0, arrayItem = false): string {
   if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
-  if (obj === null || obj === undefined) return name ? `<${xmlName(name)}/>` : ''
-  if (Array.isArray(obj)) return obj.map((v) => toXml(v, name, depth + 1)).join('')
+  const arrayAttr = arrayItem ? ` ${xmlName(ARRAY_ITEM_ATTR)}="true"` : ''
+  if (obj === null || obj === undefined) return name ? `<${xmlName(name)}${arrayAttr}/>` : ''
+  if (Array.isArray(obj)) {
+    if (obj.length === 1) return toXml(obj[0], name, depth + 1, true)
+    return obj.map((v) => toXml(v, name, depth + 1)).join('')
+  }
   if (typeof obj === 'object') {
     const entries = Object.entries(obj as Record<string, unknown>)
     const attrs = entries
@@ -453,11 +478,11 @@ export function toXml(obj: unknown, name?: string, depth = 0): string {
       .join('')
     const tag = name ? xmlName(name) : name
     if (!tag) return inner
-    return inner === '' && attrs !== '' ? `<${tag}${attrs}/>` : `<${tag}${attrs}>${inner}</${tag}>`
+    return inner === '' && (attrs !== '' || arrayAttr !== '') ? `<${tag}${attrs}${arrayAttr}/>` : `<${tag}${attrs}${arrayAttr}>${inner}</${tag}>`
   }
   const esc = encodeEntitiesXml(String(obj))
   const tag = name ? xmlName(name) : name
-  return tag ? `<${tag}>${esc}</${tag}>` : esc
+  return tag ? `<${tag}${arrayAttr}>${esc}</${tag}>` : esc
 }
 
 /** Parse any supported source string into a JS value. */

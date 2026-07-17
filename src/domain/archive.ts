@@ -227,7 +227,10 @@ function tarHeader(name: string, size: number): Uint8Array {
   h.set(writeOctal(0, 8), 108) // uid
   h.set(writeOctal(0, 8), 116) // gid
   h.set(writeOctal(size, 12), 124) // size
-  h.set(writeOctal(Math.floor(Date.now() / 1000), 12), 136) // mtime
+  // Fixed epoch, not wall-clock time: src/domain/* is a pure function layer, and
+  // sampling Date.now() here would make tarCreate's output non-deterministic for
+  // identical input, breaking content-addressed dedup in the Handle/Store layer.
+  h.set(writeOctal(0, 12), 136) // mtime
   h.set(strToU8('        '), 148) // checksum placeholder (8 spaces)
   h[156] = '0'.charCodeAt(0) // typeflag: regular file
   h.set(strToU8('ustar\0'), 257) // magic

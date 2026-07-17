@@ -122,6 +122,11 @@ test('tarCreate/tarExtract round-trips multiple files and reports skipped non-re
   expect(skipped).toEqual([])
 })
 
+test('tarCreate produces byte-identical output for identical input across separate calls', () => {
+  const files = [{ name: 'a.txt', data: strToU8('AAA') }]
+  expect(tarCreate(files)).toEqual(tarCreate(files))
+})
+
 test('tarExtract throws on a truncated entry instead of silently returning a short file', () => {
   const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAAAAAAAAA') }])
   const truncated = packed.subarray(0, 512 + 5) // header intact, only 5 of the declared 10 data bytes present
