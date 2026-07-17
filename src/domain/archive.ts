@@ -16,7 +16,7 @@ export const MAX_ENTRIES = 2_000
 /** Don't inline megabytes of decoded text per entry. */
 export const MAX_TEXT = 100_000
 
-export type ArchiveFile = { name: string; data: Uint8Array }
+export type ArchiveFile = { name: string; data: Uint8Array; mtime?: number }
 export type UnpackedEntry = { name: string; bytes: number; text?: string; truncated?: boolean; data: Uint8Array }
 
 /**
@@ -236,7 +236,7 @@ function headerChecksumValid(header: Uint8Array): boolean {
   return sum === stored
 }
 
-function tarHeader(name: string, size: number): Uint8Array {
+function tarHeader(name: string, size: number, mtime: number): Uint8Array {
   const h = new Uint8Array(BLOCK)
   const nameBytes = strToU8(name.slice(0, 100))
   h.set(nameBytes, 0)
@@ -244,7 +244,7 @@ function tarHeader(name: string, size: number): Uint8Array {
   h.set(writeOctal(0, 8), 108) // uid
   h.set(writeOctal(0, 8), 116) // gid
   h.set(writeOctal(size, 12), 124) // size
-  h.set(writeOctal(Math.floor(Date.now() / 1000), 12), 136) // mtime
+  h.set(writeOctal(Math.max(0, Math.floor(mtime)), 12), 136) // mtime
   h.set(strToU8('        '), 148) // checksum placeholder (8 spaces)
   h[156] = '0'.charCodeAt(0) // typeflag: regular file
   h.set(strToU8('ustar\0'), 257) // magic
@@ -270,7 +270,7 @@ export function tarCreate(files: ArchiveFile[]): Uint8Array {
   const parts: Uint8Array[] = []
   let total = 0
   for (const f of files) {
-    const header = tarHeader(f.name, f.data.length)
+    const header = tarHeader(f.name, f.data.length, f.mtime ?? 0)
     const paddedSize = padTo(f.data.length, BLOCK)
     const body = new Uint8Array(paddedSize)
     body.set(f.data, 0)

@@ -86,6 +86,19 @@ test('toXml preserves a key whose value is an empty array instead of silently dr
   expect(parseXml(xml)).toEqual({ root: { a: '1', tags: [] } })
 })
 
+test('toXml preserves a key whose value is a single-element array, and parseXml round-trips it back to a 1-element array instead of a bare scalar', () => {
+  const obj = { tags: ['a'] }
+  const xml = toXml(obj, 'root')
+  expect(xml).toBe('<root><tags single-array="true">a</tags></root>')
+  expect(parseXml(xml)).toEqual({ root: { tags: ['a'] } })
+})
+
+test('toXml/parseXml round-trip a single-element array of objects', () => {
+  const obj = { items: [{ id: '1' }] }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
+})
+
 test('parseXml does not truncate a tag at a `>` inside a quoted attribute value', () => {
   expect(parseXml('<tag attr="a>b">text</tag>')).toEqual({ tag: { '@attr': 'a>b', '#text': 'text' } })
 })
