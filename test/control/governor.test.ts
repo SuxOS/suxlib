@@ -98,3 +98,71 @@ test('the token bucket is not consulted for pure leaves', async () => {
   expect(result).toBe('ok')
   expect(bucket.tokens).toBe(0) // untouched by the pure-leaf call
 })
+
+test('caps a half-open breaker to one in-flight probe: a concurrent second call is rejected, not raced through', async () => {
+  const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 2 })
+  breaker.onFailure(0) // -> open
+  breaker.allow(100)   // cooldown elapsed -> half-open
+
+  let inFlight = 0
+  let maxInFlight = 0
+  let releaseProbe!: () => void
+  const fn = async () => {
+    inFlight++
+    maxInFlight = Math.max(maxInFlight, inFlight)
+    await new Promise<void>(resolve => { releaseProbe = resolve })
+    inFlight--
+    return 'ok'
+  }
+
+  const first = runGoverned('leaf', { kind: 'effect' }, fn, null, caps(100), { circuitBreaker: breaker }, noSleep)
+  await new Promise(resolve => setTimeout(resolve, 0)) // let the first probe reach fn and block
+
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, async () => 'should not run', null, caps(100), { circuitBreaker: breaker }, noSleep),
+  ).rejects.toThrow(CircuitOpenError)
+
+  releaseProbe()
+  await expect(first).resolves.toBe('ok')
+  expect(maxInFlight).toBe(1)
+})
+
+test('releases the half-open probe slot after a failed attempt, so a subsequent call can probe again', async () => {
+  const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
+  breaker.onFailure(0) // -> open
+  breaker.allow(100)   // cooldown elapsed -> half-open
+
+  const failing = async () => { throw new Error('still down') }
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, failing, null, caps(100), { circuitBreaker: breaker }, noSleep),
+  ).rejects.toThrow('still down')
+  expect(breaker.state).toBe('open') // failed probe reopens the breaker
+
+  breaker.allow(300) // cooldown elapsed again -> half-open
+  const succeeding = async () => 'ok'
+  const result = await runGoverned('leaf', { kind: 'effect' }, succeeding, null, caps(300), { circuitBreaker: breaker }, noSleep)
+  expect(result).toBe('ok')
+  expect(breaker.state).toBe('closed')
+})
+
+test('passes a stable idempotencyKey to the leaf fn on every retry attempt', async () => {
+  const seen: (string | undefined)[] = []
+  let calls = 0
+  const fn = async (_input: any, _caps: any, idemKey?: string) => {
+    calls++
+    seen.push(idemKey)
+    if (calls < 3) throw new Error('flaky')
+    return 'ok'
+  }
+  const result = await runGoverned('leaf', { kind: 'effect', retries: 3 }, fn, { a: 1 }, caps(), undefined, noSleep)
+  expect(result).toBe('ok')
+  expect(seen.length).toBe(3)
+  expect(seen.every(k => typeof k === 'string' && k === seen[0])).toBe(true)
+})
+
+test('does not compute an idempotencyKey for pure leaves', async () => {
+  let seenKey: string | undefined = 'not-called'
+  const fn = async (_input: any, _caps: any, idemKey?: string) => { seenKey = idemKey; return 'ok' }
+  await runGoverned('leaf', { kind: 'pure' }, fn, { a: 1 }, caps(), undefined, noSleep)
+  expect(seenKey).toBeUndefined()
+})
