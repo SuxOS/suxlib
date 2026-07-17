@@ -74,6 +74,13 @@ test('toXml escapes attribute quotes and parseXml round-trips them', () => {
   expect(parseXml(xml)).toEqual(obj)
 })
 
+test('toXml preserves a key whose value is an empty array instead of silently dropping it, and parseXml round-trips it back to []', () => {
+  const obj = { a: 1, tags: [] as unknown[] }
+  const xml = toXml(obj, 'root')
+  expect(xml).toBe('<root><a>1</a><tags empty-array="true"/></root>')
+  expect(parseXml(xml)).toEqual({ root: { a: '1', tags: [] } })
+})
+
 test('parseXml does not truncate a tag at a `>` inside a quoted attribute value', () => {
   expect(parseXml('<tag attr="a>b">text</tag>')).toEqual({ tag: { '@attr': 'a>b', '#text': 'text' } })
 })

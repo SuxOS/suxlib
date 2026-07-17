@@ -1,5 +1,10 @@
 import { test, expect } from 'vitest'
-import { redactText, sanitizeImage, detectImageKind, MAX_IMAGE_INPUT_BYTES } from '../../src/domain/sanitize.js'
+import { redactText, sanitizeImage, detectImageKind, MAX_IMAGE_INPUT_BYTES, MAX_TEXT_INPUT_BYTES } from '../../src/domain/sanitize.js'
+
+test('redactText rejects text over MAX_TEXT_INPUT_BYTES', () => {
+  const big = 'a'.repeat(MAX_TEXT_INPUT_BYTES + 1)
+  expect(() => redactText(big)).toThrow(/bomb guard/)
+})
 
 test('redactText redacts email, phone, ssn, valid credit card and ip', () => {
   const out = redactText('Email a@b.com, call 415-555-0198, SSN 123-45-6789, card 4111 1111 1111 1111, ip 10.0.0.1')
