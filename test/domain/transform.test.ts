@@ -86,6 +86,13 @@ test('toXml preserves a key whose value is an empty array instead of silently dr
   expect(parseXml(xml)).toEqual({ root: { a: '1', tags: [] } })
 })
 
+test('toXml marks a null field distinctly from an empty string so parseXml round-trips null back to null, not \'\'', () => {
+  const obj = { a: null, b: '' }
+  const xml = toXml(obj, 'root')
+  expect(xml).toBe('<root><a nil="true"/><b></b></root>')
+  expect(parseXml(xml)).toEqual({ root: { a: null, b: {} } })
+})
+
 test('parseXml does not truncate a tag at a `>` inside a quoted attribute value', () => {
   expect(parseXml('<tag attr="a>b">text</tag>')).toEqual({ tag: { '@attr': 'a>b', '#text': 'text' } })
 })

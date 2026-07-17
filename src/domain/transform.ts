@@ -376,6 +376,13 @@ function collapse(node: Record<string, unknown>): unknown {
 // this same attribute to decode a self-closed tag back into [] rather than ''.
 const EMPTY_ARRAY_ATTR = 'empty-array'
 
+// Self-closing marker attribute `toXml` emits for a JSON key whose value is
+// `null`/`undefined` — without it, a null field and an empty-string field both
+// self-close to a bare `<a/>` with no way to tell them apart, so `parseXml`
+// silently turns `null` into `''` on round-trip. `parseXml` looks for this
+// attribute to decode a self-closed tag back into `null` rather than ''.
+const NULL_ATTR = 'nil'
+
 function tagEnd(s: string, lt: number): number {
   let quote = ''
   for (let i = lt + 1; i < s.length; i++) {
@@ -435,7 +442,8 @@ export function parseXml(xml: string): unknown {
     }
     if (selfClose) {
       const isEmptyArray = Object.keys(node).length === 1 && node['@' + EMPTY_ARRAY_ATTR] === 'true'
-      attach(nodes[nodes.length - 1], name, isEmptyArray ? [] : Object.keys(node).length ? node : '')
+      const isNull = Object.keys(node).length === 1 && node['@' + NULL_ATTR] === 'true'
+      attach(nodes[nodes.length - 1], name, isEmptyArray ? [] : isNull ? null : Object.keys(node).length ? node : '')
     } else {
       nodes.push(node)
       names.push(name)
@@ -448,7 +456,7 @@ export function parseXml(xml: string): unknown {
 
 export function toXml(obj: unknown, name?: string, depth = 0): string {
   if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
-  if (obj === null || obj === undefined) return name ? `<${xmlName(name)}/>` : ''
+  if (obj === null || obj === undefined) return name ? `<${xmlName(name)} ${NULL_ATTR}="true"/>` : ''
   if (Array.isArray(obj)) {
     if (!obj.length) return name ? `<${xmlName(name)} ${EMPTY_ARRAY_ATTR}="true"/>` : ''
     return obj.map((v) => toXml(v, name, depth + 1)).join('')
