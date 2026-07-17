@@ -285,7 +285,6 @@ export function csvToRows(text: string, delim: string): Record<string, string>[]
 export function toCsv(arr: unknown[], delim: string): string {
   delim = (delim || ',').slice(0, 1)
   if (!arr.length) return ''
-  const headers = [...new Set(arr.flatMap((o) => (o && typeof o === 'object' ? Object.keys(o as object) : [])))]
   const esc = (v: unknown): string => {
     let s = v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v)
     if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = `'${s}`
@@ -293,6 +292,12 @@ export function toCsv(arr: unknown[], delim: string): string {
     // otherwise form an out-of-order range (e.g. `["-\r\n]`) and throw.
     return new RegExp(`["${delim.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}\\r\\n]`).test(s) ? `"${s.replace(/"/g, '""')}"` : s
   }
+  // Scalars (not objects) have no keys to derive a header from — emit a
+  // single synthetic `value` column instead of silently dropping every row.
+  if (arr.every((o) => o === null || typeof o !== 'object')) {
+    return ['value', ...arr.map((v) => esc(v))].join('\n')
+  }
+  const headers = [...new Set(arr.flatMap((o) => (o && typeof o === 'object' ? Object.keys(o as object) : [])))]
   const lines = [headers.map((h) => esc(h)).join(delim)]
   for (const o of arr) lines.push(headers.map((h) => esc((o as Record<string, unknown>)?.[h])).join(delim))
   return lines.join('\n')
