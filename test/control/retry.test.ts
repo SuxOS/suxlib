@@ -10,3 +10,8 @@ test('idempotencyKey does not collide on differing nested object fields', async 
   const k2 = await idempotencyKey('x', { a: { y: 9 }, b: 2 })
   expect(k1).not.toBe(k2)
 })
+test('idempotencyKey does not collide on differing __proto__-named fields', async () => {
+  const k1 = await idempotencyKey('x', JSON.parse('{"a":1,"__proto__":{"b":2}}'))
+  const k2 = await idempotencyKey('x', JSON.parse('{"a":1,"__proto__":{"b":3}}'))
+  expect(k1).not.toBe(k2)
+})

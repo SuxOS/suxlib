@@ -5,7 +5,7 @@ function canonicalize(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(canonicalize)
   if (v && typeof v === 'object') {
     const o = v as Record<string, unknown>
-    return Object.keys(o).sort().reduce<Record<string, unknown>>((acc, k) => { acc[k] = canonicalize(o[k]); return acc }, {})
+    return Object.keys(o).sort().reduce<Record<string, unknown>>((acc, k) => { acc[k] = canonicalize(o[k]); return acc }, Object.create(null))
   }
   return v
 }
