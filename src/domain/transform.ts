@@ -297,9 +297,15 @@ export function toCsv(arr: unknown[], delim: string): string {
   if (arr.every((o) => o === null || typeof o !== 'object')) {
     return ['value', ...arr.map((v) => esc(v))].join('\n')
   }
-  const headers = [...new Set(arr.flatMap((o) => (o && typeof o === 'object' ? Object.keys(o as object) : [])))]
+  // Mixed scalar/object arrays: scalar entries have no keys either, but unlike
+  // the pure-scalar case above there are real object keys to preserve too — fold
+  // scalars into the same synthetic `value` column instead of dropping them.
+  const headers = [...new Set(arr.flatMap((o) => (o && typeof o === 'object' ? Object.keys(o as object) : ['value'])))]
   const lines = [headers.map((h) => esc(h)).join(delim)]
-  for (const o of arr) lines.push(headers.map((h) => esc((o as Record<string, unknown>)?.[h])).join(delim))
+  for (const o of arr) {
+    const row = o && typeof o === 'object' ? (o as Record<string, unknown>) : { value: o }
+    lines.push(headers.map((h) => esc(row[h])).join(delim))
+  }
   return lines.join('\n')
 }
 

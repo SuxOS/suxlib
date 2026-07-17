@@ -58,6 +58,10 @@ test('toCsv escapes a regex-metachar delimiter without throwing, and guards form
   expect(toCsv([{ n: -5 }], ',')).toBe('n\n-5')
 })
 
+test('toCsv folds scalars in a mixed scalar/object array into a synthetic value column instead of dropping them', () => {
+  expect(toCsv(['a', { b: 1 }], ',')).toBe('value,b\na,\n,1')
+})
+
 test('toCsv emits a single value column for an array of scalars instead of dropping the data', () => {
   expect(toCsv(['a', 'b', 'c'], ',')).toBe('value\na\nb\nc')
   expect(toCsv([1, 2, 3], ',')).toBe('value\n1\n2\n3')
