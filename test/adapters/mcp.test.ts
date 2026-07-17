@@ -31,7 +31,7 @@ describe('mcp adapter', () => {
 
   it('lists the expected tools', async () => {
     const { tools } = await client.listTools()
-    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'sanitize_image', 'sanitize_text', 'transform'].sort())
+    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform'].sort())
   })
 
   it('transform: happy path json -> yaml', async () => {
@@ -65,6 +65,19 @@ describe('mcp adapter', () => {
     const body = parseResult(result) as { mime: string; outputBytes: number }
     expect(body.mime).toBe('application/pdf')
     expect(body.outputBytes).toBeGreaterThan(0)
+  })
+
+  it('pdf_page_count: happy path reports the page count', async () => {
+    const { PDFDocument } = await import('pdf-lib')
+    const doc = await PDFDocument.create()
+    doc.addPage([300, 400])
+    doc.addPage([300, 400])
+    const bytes = await doc.save()
+    let s = ''
+    for (const b of bytes) s += String.fromCharCode(b)
+    const result = await client.callTool({ name: 'pdf_page_count', arguments: { base64: btoa(s) } })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ pageCount: 2 })
   })
 
   it('sanitize_image: malformed image surfaces as a tool error, not an uncaught exception', async () => {

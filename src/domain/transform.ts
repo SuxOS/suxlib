@@ -10,6 +10,10 @@
 
 export type Format = 'json' | 'yaml' | 'csv' | 'xml' | 'markdown' | 'html'
 
+/** All valid `to`/`from` values, shared by the CLI/HTTP/MCP adapters so `from`
+ *  validation can't drift out of sync between them (see mcp.ts's `z.enum`). */
+export const TRANSFORM_FORMATS = ['json', 'yaml', 'csv', 'xml', 'markdown', 'html'] as const satisfies readonly Format[]
+
 /** Cap input size before parsing/traversing it, mirroring archive.ts's MAX_UNPACK_BYTES
  *  and pdf.ts's MAX_PDF_INPUT_BYTES bomb guards. */
 export const MAX_TRANSFORM_INPUT_BYTES = 20_000_000
@@ -467,6 +471,8 @@ export function parseSource(data: string, from: 'json' | 'yaml' | 'csv' | 'xml',
       return csvToRows(data, (opts?.delimiter ?? ',').slice(0, 1) || ',')
     case 'xml':
       return parseXml(data)
+    default:
+      throw new Error(`Unsupported source format '${from}'.`)
   }
 }
 

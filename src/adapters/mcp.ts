@@ -6,16 +6,14 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { archiveCreate, archiveExtract, ARCHIVE_MIME, ARCHIVE_FORMATS, MAX_ENTRIES, MAX_UNPACK_BYTES, type ArchiveFile, type ArchiveFormat } from '../domain/archive.js'
-import { pdfShrink } from '../domain/pdf.js'
+import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES } from '../domain/sanitize.js'
-import { dispatchTransform, type Format } from '../domain/transform.js'
+import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
 }
-
-const TRANSFORM_FORMATS = ['json', 'yaml', 'csv', 'xml', 'markdown', 'html'] as const
 
 export type RegisterFileopsToolsOptions = {
   /**
@@ -96,6 +94,20 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
       async ({ base64, keepMetadata }) => {
         const result = await pdfShrink(b64ToBytes(base64), { stripMetadata: !keepMetadata })
         return textResult({ mime: 'application/pdf', inputBytes: result.inputBytes, outputBytes: result.outputBytes, savedPct: result.savedPct, base64: bytesToB64(result.bytes) })
+      },
+    )
+  }
+
+  if (enabled('pdf_page_count')) {
+    server.registerTool(
+      'pdf_page_count',
+      {
+        description: "Report a PDF's page count.",
+        inputSchema: { base64: z.string() },
+      },
+      async ({ base64 }) => {
+        const pageCount = await pdfPageCount(b64ToBytes(base64))
+        return textResult({ pageCount })
       },
     )
   }

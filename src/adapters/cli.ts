@@ -8,7 +8,7 @@ import { Command } from 'commander'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
-import { pdfShrink } from '../domain/pdf.js'
+import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, type Format } from '../domain/transform.js'
 
@@ -99,6 +99,16 @@ pdfCmd
     const result = await pdfShrink(input, { stripMetadata: !opts.keepMetadata })
     writeFileSync(opts.output, result.bytes)
     console.log(`wrote ${opts.output}: ${result.inputBytes} -> ${result.outputBytes} bytes (${result.savedPct}% saved)`)
+  })
+
+pdfCmd
+  .command('page-count')
+  .description('Report a PDF\'s page count')
+  .argument('<file>', 'input PDF')
+  .action(async (file: string) => {
+    const input = new Uint8Array(readFileSync(file))
+    const count = await pdfPageCount(input)
+    console.log(String(count))
   })
 
 // ---------- sanitize ----------
