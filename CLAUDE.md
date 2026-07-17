@@ -135,4 +135,10 @@ There is no linter in this repo. Run both locally before pushing.
   fine for `runInline`, but a durable runtime whose steps can resume in a
   different isolate will need that cap made durable too (e.g. state on the
   breaker itself, or persisted alongside the workflow run) rather than
-  inheriting the `WeakMap` as-is.
+  inheriting the `WeakMap` as-is. Update: this has been addressed at the
+  interface level — `CircuitBreaker` now owns `reserveHalfOpenProbe()`/
+  `releaseHalfOpenProbe()` (`src/control/circuit-breaker.ts`), and
+  `runGoverned` calls those instead of a WeakMap. The in-memory
+  `circuitBreaker()` still backs them with a plain in-process flag, so a
+  future `sux`-side durable `CircuitBreaker` implementation must back those
+  same two methods with persisted state to actually close the gap.

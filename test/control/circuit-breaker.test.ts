@@ -47,3 +47,17 @@ test('any failure in half-open reopens the breaker and resets the cooldown', () 
   expect(b.allow(150)).toBe(false)  // new cooldown window starts at 100, not 0
   expect(b.allow(200)).toBe(true)
 })
+
+test('reserveHalfOpenProbe caps reservations at one until released', () => {
+  const b = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 2 })
+  expect(b.reserveHalfOpenProbe()).toBe(true)
+  expect(b.reserveHalfOpenProbe()).toBe(false) // already held
+  b.releaseHalfOpenProbe()
+  expect(b.reserveHalfOpenProbe()).toBe(true) // free again after release
+})
+
+test('releaseHalfOpenProbe without a prior reservation is a harmless no-op', () => {
+  const b = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 2 })
+  b.releaseHalfOpenProbe()
+  expect(b.reserveHalfOpenProbe()).toBe(true)
+})
