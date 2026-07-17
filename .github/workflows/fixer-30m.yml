@@ -1,0 +1,24 @@
+name: Fixer (30m, bugs+feats)
+
+# Mid tier of the 3-cadence proposer (see fixer-bugs.yml 15m / fixer.yml 1h deep). Runs
+# every 30m with scope: bugs-feats. Distinct workflow name -> distinct concurrency group,
+# so this never blocks on or races the other tiers. Throttle-protected same as every other
+# proposer-stage caller.
+# Reusable workflow: SuxOS/.github/.github/workflows/fixer.yml
+
+on:
+  schedule:
+    - cron: "19,49 * * * *" # every 30m, offset from sibling repos
+  workflow_dispatch:
+
+jobs:
+  fixer:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    with:
+      max-turns: 15
+      scope: bugs-feats
+    secrets: inherit
