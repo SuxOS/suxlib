@@ -55,8 +55,16 @@ function ipv4Ok(s: string): boolean {
 
 export type RedactResult = { redacted: string; counts: Record<string, number> }
 
+/** Cap input size before running the redaction regexes over it, mirroring archive.ts's
+ *  MAX_UNPACK_BYTES, pdf.ts's MAX_PDF_INPUT_BYTES, and transform.ts's
+ *  MAX_TRANSFORM_INPUT_BYTES bomb guards. */
+export const MAX_TEXT_INPUT_BYTES = 20_000_000
+
 /** Redact PII from text, replacing each match with [REDACTED:type]. */
 export function redactText(text: string, types?: RedactType[]): RedactResult {
+  if (text.length > MAX_TEXT_INPUT_BYTES) {
+    throw new Error(`text input is larger than ${MAX_TEXT_INPUT_BYTES} bytes (bomb guard).`)
+  }
   const want = types && types.length ? new Set(types) : null
   const counts: Record<string, number> = {}
   for (const { type, re, bare } of PATTERNS) {

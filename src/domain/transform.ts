@@ -364,6 +364,14 @@ function collapse(node: Record<string, unknown>): unknown {
   return node
 }
 
+// Self-closing marker attribute `toXml` emits for a JSON key whose value is an
+// empty array — without it, `obj.map(...).join('')` over an empty array
+// produces '', and the key vanishes from the output entirely instead of
+// round-tripping (see toYaml's `[]` handling, which has no such gap since
+// yamlScalar emits an explicit '[]' for empty arrays). `parseXml` looks for
+// this same attribute to decode a self-closed tag back into [] rather than ''.
+const EMPTY_ARRAY_ATTR = 'empty-array'
+
 function tagEnd(s: string, lt: number): number {
   let quote = ''
   for (let i = lt + 1; i < s.length; i++) {
@@ -422,7 +430,8 @@ export function parseXml(xml: string): unknown {
       node['@' + key] = decodeEntities(val)
     }
     if (selfClose) {
-      attach(nodes[nodes.length - 1], name, Object.keys(node).length ? node : '')
+      const isEmptyArray = Object.keys(node).length === 1 && node['@' + EMPTY_ARRAY_ATTR] === 'true'
+      attach(nodes[nodes.length - 1], name, isEmptyArray ? [] : Object.keys(node).length ? node : '')
     } else {
       nodes.push(node)
       names.push(name)
@@ -436,7 +445,10 @@ export function parseXml(xml: string): unknown {
 export function toXml(obj: unknown, name?: string, depth = 0): string {
   if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
   if (obj === null || obj === undefined) return name ? `<${xmlName(name)}/>` : ''
-  if (Array.isArray(obj)) return obj.map((v) => toXml(v, name, depth + 1)).join('')
+  if (Array.isArray(obj)) {
+    if (!obj.length) return name ? `<${xmlName(name)} ${EMPTY_ARRAY_ATTR}="true"/>` : ''
+    return obj.map((v) => toXml(v, name, depth + 1)).join('')
+  }
   if (typeof obj === 'object') {
     const entries = Object.entries(obj as Record<string, unknown>)
     const attrs = entries

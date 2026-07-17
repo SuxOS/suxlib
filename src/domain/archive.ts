@@ -219,6 +219,23 @@ function readOctal(bytes: Uint8Array): number {
   return s ? parseInt(s, 8) || 0 : 0
 }
 
+/**
+ * Validate a USTAR header block's checksum (offset 148-155): every valid tar
+ * header stores the unsigned byte-sum of the whole 512-byte block, computed
+ * with the checksum field itself treated as 8 ASCII spaces (mirroring
+ * tarHeader's own computation above). Malformed/non-tar input essentially
+ * never produces a byte run whose stored value happens to match this sum, so
+ * this is a cheap, reliable "is this actually a tar header" gate — see
+ * CLAUDE.md's fflate gotcha note on the same asymmetry for zip vs tar input
+ * validation (tarExtract previously had none at all).
+ */
+function headerChecksumValid(header: Uint8Array): boolean {
+  const stored = readOctal(header.subarray(148, 156))
+  let sum = 0
+  for (let i = 0; i < BLOCK; i++) sum += i >= 148 && i < 156 ? 0x20 : header[i]
+  return sum === stored
+}
+
 function tarHeader(name: string, size: number): Uint8Array {
   const h = new Uint8Array(BLOCK)
   const nameBytes = strToU8(name.slice(0, 100))
@@ -292,6 +309,7 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
     const header = bytes.subarray(off, off + BLOCK)
     // Two consecutive zero blocks (or a header of all zero bytes) mark the end.
     if (header.every((b) => b === 0)) break
+    if (!headerChecksumValid(header)) throw new Error(`malformed/not a tar archive: invalid header checksum at offset ${off}.`)
     const nameBytes = header.subarray(0, 100)
     const nameEnd = nameBytes.indexOf(0)
     const name = strFromU8(nameEnd === -1 ? nameBytes : nameBytes.subarray(0, nameEnd))

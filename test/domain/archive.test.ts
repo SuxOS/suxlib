@@ -140,18 +140,28 @@ test('archiveCreate/archiveExtract dispatch by format, and ARCHIVE_MIME covers e
 
 const BLOCK = 512
 
-/** Build a minimal single-entry USTAR tar with an arbitrary typeflag (checksum is unchecked by tarExtract). */
+/** Build a minimal single-entry USTAR tar with an arbitrary typeflag and a valid header checksum. */
 function buildRawTarEntry(name: string, typeflag: string): Uint8Array {
   const header = new Uint8Array(BLOCK)
   header.set(strToU8(name.slice(0, 100)), 0)
   header.set(strToU8('0000000000\0'), 124) // size octal: 0
   header[156] = typeflag.charCodeAt(0)
+  header.set(strToU8('        '), 148) // checksum placeholder (8 spaces), like tarHeader
+  let checksum = 0
+  for (let i = 0; i < BLOCK; i++) checksum += header[i]
+  header.set(strToU8(checksum.toString(8).padStart(7, '0') + '\0'), 148)
   const footer = new Uint8Array(BLOCK * 2)
   const out = new Uint8Array(header.length + footer.length)
   out.set(header, 0)
   out.set(footer, header.length)
   return out
 }
+
+test('tarExtract throws on malformed non-tar input instead of silently returning a garbage result', () => {
+  const garbage = new Uint8Array(1024)
+  for (let i = 0; i < garbage.length; i++) garbage[i] = (i * 37 + 11) % 256
+  expect(() => tarExtract(garbage)).toThrow(/malformed\/not a tar archive/)
+})
 
 test('archiveExtract surfaces tarExtract\'s skipped (dropped symlink) info instead of discarding it', () => {
   const tarWithSymlink = buildRawTarEntry('evil-link', '2') // typeflag '2' = symlink
