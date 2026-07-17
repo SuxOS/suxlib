@@ -145,6 +145,25 @@ test('releases the half-open probe slot after a failed attempt, so a subsequent 
   expect(breaker.state).toBe('closed')
 })
 
+test('releases the half-open probe slot when the token bucket throws, so a subsequent call can probe again', async () => {
+  const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
+  breaker.onFailure(0) // -> open
+  breaker.allow(100)   // cooldown elapsed -> half-open
+
+  const throwingBucket = { take: async () => { throw new Error('rate limiter unavailable') } }
+  const fn = async () => 'should not run'
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(100), { circuitBreaker: breaker, tokenBucket: throwingBucket as any }, noSleep),
+  ).rejects.toThrow('rate limiter unavailable')
+  expect(breaker.state).toBe('open') // failed probe reopens the breaker, reporting onFailure too
+
+  breaker.allow(300) // cooldown elapsed again -> half-open
+  const succeeding = async () => 'ok'
+  const result = await runGoverned('leaf', { kind: 'effect' }, succeeding, null, caps(300), { circuitBreaker: breaker }, noSleep)
+  expect(result).toBe('ok')
+  expect(breaker.state).toBe('closed')
+})
+
 test('passes a stable idempotencyKey to the leaf fn on every retry attempt', async () => {
   const seen: (string | undefined)[] = []
   let calls = 0

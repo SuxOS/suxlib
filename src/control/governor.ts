@@ -57,8 +57,8 @@ export async function runGoverned(
         probeReserved = true
       }
     }
-    if (gated && governor?.tokenBucket) await governor.tokenBucket.take(1, caps.clock)
     try {
+      if (gated && governor?.tokenBucket) await governor.tokenBucket.take(1, caps.clock)
       const result = await fn(input, caps, idemKey)
       breaker?.onSuccess(caps.clock.now())
       return result
