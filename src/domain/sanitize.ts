@@ -91,17 +91,62 @@ export function detectImageKind(bytes: Uint8Array): ImageKind | null {
 const ICC_PROFILE_TAG = [0x49, 0x43, 0x43, 0x5f, 0x50, 0x52, 0x4f, 0x46, 0x49, 0x4c, 0x45, 0x00] // "ICC_PROFILE\0"
 
 /**
+ * Find the offsets of APP2 segments that carry a *validated* ICC profile: the
+ * "ICC_PROFILE\0" tag is followed by a 1-based sequence number and a total
+ * count (per the ICC/Adobe embedding spec, a profile over ~64KB is split
+ * across multiple APP2 markers, each restating the tag+seq+count header). A
+ * lone segment (seq=1, total=1) is the common case; a real multi-segment
+ * profile must have every sequence number 1..total present exactly once with
+ * a consistent total — anything short of that (forged/partial/duplicate
+ * sequence bytes) is treated as ordinary APP2 metadata and dropped, rather
+ * than risk reassembling a corrupt profile.
+ */
+function findValidIccApp2Offsets(bytes: Uint8Array): Set<number> {
+  const candidates: Array<{ offset: number; seq: number; total: number }> = []
+  let i = 2
+  while (i + 3 < bytes.length && bytes[i] === 0xff) {
+    const marker = bytes[i + 1]
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
+      i += 2
+      if (marker === 0xd9) break
+      continue
+    }
+    if (i + 3 >= bytes.length) break
+    const len = (bytes[i + 2] << 8) | bytes[i + 3]
+    if (marker === 0xda || len < 2 || i + 2 + len > bytes.length) break
+    if (marker === 0xe2 && len >= 2 + ICC_PROFILE_TAG.length + 2 && ICC_PROFILE_TAG.every((b, k) => bytes[i + 4 + k] === b)) {
+      const seq = bytes[i + 4 + ICC_PROFILE_TAG.length]
+      const total = bytes[i + 4 + ICC_PROFILE_TAG.length + 1]
+      candidates.push({ offset: i, seq, total })
+    }
+    i += 2 + len
+  }
+  if (!candidates.length) return new Set()
+  // A single APP2 carrying the tag is the common (small-profile) case — keep it
+  // without policing its trailing seq/total bytes. Multiple candidates only
+  // reassemble into one profile if their sequence numbers exactly cover 1..total.
+  if (candidates.length === 1) return new Set([candidates[0].offset])
+  const total = candidates[0].total
+  const seqs = new Set(candidates.map((c) => c.seq))
+  const valid = total >= 1 && candidates.every((c) => c.total === total) && seqs.size === candidates.length && seqs.size === total && [...seqs].every((s) => s >= 1 && s <= total)
+  return valid ? new Set(candidates.map((c) => c.offset)) : new Set()
+}
+
+/**
  * Strip JPEG APPn metadata markers (APP0 kept — it's the JFIF header most
  * decoders expect; APP1 EXIF/XMP, APP13 Photoshop IPTC, COM comments are
- * dropped). APP2 segments are kept when they carry an ICC color profile
- * (identified by the "ICC_PROFILE\0" payload prefix) — an ICC profile is
- * rendering data, not privacy metadata, matching stripPngMetadata's
- * treatment of iCCP/sRGB/gAMA/cHRM as data to preserve. Non-ICC APP2 is
- * still dropped. Segment-level rebuild: walk markers, drop the ones that
- * carry metadata, keep SOS and the entropy-coded scan data verbatim.
+ * dropped). APP2 segments are kept when they carry a validated ICC color
+ * profile (identified by the "ICC_PROFILE\0" payload prefix and a
+ * consistent sequence/total across all of a profile's segments, see
+ * findValidIccApp2Offsets) — an ICC profile is rendering data, not privacy
+ * metadata, matching stripPngMetadata's treatment of iCCP/sRGB/gAMA/cHRM as
+ * data to preserve. Non-ICC APP2 is still dropped. Segment-level rebuild:
+ * walk markers, drop the ones that carry metadata, keep SOS and the
+ * entropy-coded scan data verbatim.
  */
 function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('not a JPEG (missing SOI marker)')
+  const iccOffsets = findValidIccApp2Offsets(bytes)
   const out: number[] = [0xff, 0xd8]
   let i = 2
   let terminated = false
@@ -145,7 +190,7 @@ function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
     if (len < 2 || i + 2 + len > bytes.length) {
       throw new Error(`malformed/truncated JPEG: segment at offset ${i} declares length ${len}, runs past end of file`)
     }
-    const isIccApp2 = marker === 0xe2 && len >= 2 + ICC_PROFILE_TAG.length && ICC_PROFILE_TAG.every((b, k) => bytes[i + 4 + k] === b)
+    const isIccApp2 = marker === 0xe2 && iccOffsets.has(i)
     const isMetadata = ((marker >= 0xe1 && marker <= 0xef) || marker === 0xfe) && !isIccApp2 // APP1-APP15, COM (ICC-bearing APP2 kept)
     if (!isMetadata) {
       for (let j = i; j < i + 2 + len; j++) out.push(bytes[j])

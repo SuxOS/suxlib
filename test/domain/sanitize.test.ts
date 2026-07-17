@@ -69,6 +69,66 @@ test('sanitizeImage keeps an ICC color profile (APP2) while dropping EXIF (APP1)
   expect(hasExif).toBe(false)
 })
 
+test('sanitizeImage preserves all segments of a multi-segment (>64KB) ICC profile', () => {
+  const enc = new TextEncoder()
+  const tag = enc.encode('ICC_PROFILE\0')
+  const iccSegment = (seq: number, total: number, data: Uint8Array) => {
+    const payload = new Uint8Array(tag.length + 2 + data.length)
+    payload.set(tag, 0)
+    payload[tag.length] = seq
+    payload[tag.length + 1] = total
+    payload.set(data, tag.length + 2)
+    return jpegSegment(0xe2, payload)
+  }
+  const soi = new Uint8Array([0xff, 0xd8])
+  const chunk1 = iccSegment(1, 2, enc.encode('profile-part-1'))
+  const chunk2 = iccSegment(2, 2, enc.encode('profile-part-2'))
+  const sos = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0x00, 0x01, 0xff, 0xd9])
+  const parts = [soi, chunk1, chunk2, sos]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const jpeg = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    jpeg.set(p, off)
+    off += p.length
+  }
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).toContain('profile-part-1')
+  expect(text).toContain('profile-part-2')
+})
+
+test('sanitizeImage drops multiple ICC-tagged APP2 segments whose sequence/total bytes are inconsistent', () => {
+  const enc = new TextEncoder()
+  const tag = enc.encode('ICC_PROFILE\0')
+  const iccSegment = (seq: number, total: number, data: Uint8Array) => {
+    const payload = new Uint8Array(tag.length + 2 + data.length)
+    payload.set(tag, 0)
+    payload[tag.length] = seq
+    payload[tag.length + 1] = total
+    payload.set(data, tag.length + 2)
+    return jpegSegment(0xe2, payload)
+  }
+  const soi = new Uint8Array([0xff, 0xd8])
+  // Two segments both claiming sequence 1 of a 2-part profile — never resolves to a
+  // complete 1..total set, so this can't be reassembled into a valid profile.
+  const chunk1 = iccSegment(1, 2, enc.encode('profile-part-1'))
+  const chunk2 = iccSegment(1, 2, enc.encode('profile-part-2'))
+  const sos = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0x00, 0x01, 0xff, 0xd9])
+  const parts = [soi, chunk1, chunk2, sos]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const jpeg = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    jpeg.set(p, off)
+    off += p.length
+  }
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).not.toContain('profile-part-1')
+  expect(text).not.toContain('profile-part-2')
+})
+
 // ---- minimal JPEG builder for the ICC-preservation test above ----
 function jpegSegment(marker: number, payload: Uint8Array): Uint8Array {
   const len = payload.length + 2

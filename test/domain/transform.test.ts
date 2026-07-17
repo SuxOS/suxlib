@@ -69,6 +69,10 @@ test('parseXml does not truncate a tag at a `>` inside a quoted attribute value'
   expect(parseXml('<tag attr="a>b">text</tag>')).toEqual({ tag: { '@attr': 'a>b', '#text': 'text' } })
 })
 
+test('parseXml strips a DOCTYPE with an internal DTD subset in full, not just up to its first `>`', () => {
+  expect(parseXml('<!DOCTYPE root [<!ELEMENT root (#PCDATA)>]><root>hi</root>')).toEqual({ root: 'hi' })
+})
+
 test('decodeEntities decodes named and numeric entities, and survives an out-of-range numeric entity', () => {
   expect(decodeEntities('a &amp; b &lt;c&gt; &#39;')).toBe("a & b <c> '")
   expect(decodeEntities('&#99999999;')).toBe('&#99999999;')
