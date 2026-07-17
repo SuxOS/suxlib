@@ -5,3 +5,8 @@ test('full-jitter stays within [0, min(cap, base*2^n)] and idempotencyKey is sta
   expect(d).toBeGreaterThanOrEqual(0); expect(d).toBeLessThanOrEqual(800) // base*2^3 = 800
   expect(await idempotencyKey('x', { a: 1 })).toBe(await idempotencyKey('x', { a: 1 }))
 })
+test('idempotencyKey does not collide on differing nested object fields', async () => {
+  const k1 = await idempotencyKey('x', { a: { x: 1 }, b: 2 })
+  const k2 = await idempotencyKey('x', { a: { y: 9 }, b: 2 })
+  expect(k1).not.toBe(k2)
+})
