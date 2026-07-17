@@ -3,6 +3,7 @@ import { op } from '../../src/op/combinators.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { circuitBreaker } from '../../src/control/circuit-breaker.js'
 import { CircuitOpenError } from '../../src/control/governor.js'
+import { fixed } from '../../src/control/aimd.js'
 
 test('runInline retries a leaf per LeafOpts.retries until it succeeds', async () => {
   let calls = 0
@@ -30,4 +31,18 @@ test('runInline leaves an ungoverned leaf (no caps.governors entry) to run exact
   const result = await runInline(leaf, 41, caps)
   expect(result).toBe(42)
   expect(calls).toBe(1)
+})
+
+test('runInline gates an effect leaf through caps.governors[name].concurrency, never exceeding its limit', async () => {
+  const limiter = fixed(1)
+  let inFlight = 0, maxInFlight = 0
+  const leaf = op('bounded', async () => {
+    inFlight++; maxInFlight = Math.max(maxInFlight, inFlight)
+    await Promise.resolve()
+    inFlight--
+    return 'ok'
+  }, { kind: 'effect' })
+  const caps: any = { store: {}, llm: {}, clock: { now: () => 0 }, sinks: {}, governors: { bounded: { concurrency: limiter } } }
+  await Promise.all([runInline(leaf, null, caps), runInline(leaf, null, caps), runInline(leaf, null, caps)])
+  expect(maxInFlight).toBe(1)
 })

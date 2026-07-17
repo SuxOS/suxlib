@@ -37,7 +37,7 @@ export async function fieldMerge(
       // this and the other well-known dangerous keys before they ever reach an assignment.
       if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
       const policy = opts.policy?.[k] ?? defaultPolicy
-      if (policy === 'keep-first') { if (!(k in merged)) merged[k] = v; continue }
+      if (policy === 'keep-first') { if (!Object.prototype.hasOwnProperty.call(merged, k)) merged[k] = v; continue }
       if (policy === 'union' && Array.isArray(v)) {
         const prior = Array.isArray(merged[k]) ? merged[k] as unknown[] : []
         merged[k] = [...new Set([...prior, ...v])]
