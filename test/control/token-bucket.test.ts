@@ -35,3 +35,9 @@ test('zero-cost take never consumes tokens', () => {
   expect(b.tryTake(0, 0)).toBe(true)
   expect(b.tokens).toBe(5)
 })
+
+test('take() rejects a cost greater than capacity instead of spinning forever', async () => {
+  const clock = { now: () => 0 }
+  const b = tokenBucket({ capacity: 5, refillPerMs: 1, clock })
+  await expect(b.take(6, clock)).rejects.toThrow(/exceeds bucket capacity/)
+})

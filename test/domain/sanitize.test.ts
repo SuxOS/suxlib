@@ -56,6 +56,46 @@ test('sanitizeImage throws on an unsupported format', () => {
   expect(() => sanitizeImage(new Uint8Array([1, 2, 3, 4]))).toThrow(/unsupported image format/)
 })
 
+test('sanitizeImage keeps an ICC color profile (APP2) while dropping EXIF (APP1) from a JPEG', () => {
+  const jpeg = buildMinimalJpeg()
+  const result = sanitizeImage(jpeg)
+  expect(result.kind).toBe('jpeg')
+  const bytes = Array.from(result.bytes)
+  const iccTag = Array.from(new TextEncoder().encode('ICC_PROFILE\0'))
+  const hasIcc = bytes.some((_, i) => iccTag.every((b, k) => bytes[i + k] === b))
+  expect(hasIcc).toBe(true)
+  const exifTag = Array.from(new TextEncoder().encode('Exif\0\0'))
+  const hasExif = bytes.some((_, i) => exifTag.every((b, k) => bytes[i + k] === b))
+  expect(hasExif).toBe(false)
+})
+
+// ---- minimal JPEG builder for the ICC-preservation test above ----
+function jpegSegment(marker: number, payload: Uint8Array): Uint8Array {
+  const len = payload.length + 2
+  const out = new Uint8Array(2 + 2 + payload.length)
+  out[0] = 0xff
+  out[1] = marker
+  out[2] = (len >> 8) & 0xff
+  out[3] = len & 0xff
+  out.set(payload, 4)
+  return out
+}
+function buildMinimalJpeg(): Uint8Array {
+  const soi = new Uint8Array([0xff, 0xd8])
+  const app1Exif = jpegSegment(0xe1, new TextEncoder().encode('Exif\0\0extra-exif-bytes'))
+  const app2Icc = jpegSegment(0xe2, new TextEncoder().encode('ICC_PROFILE\0fake-profile-bytes'))
+  const sos = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0x00, 0x01, 0xff, 0xd9]) // header + dummy entropy data + EOI
+  const parts = [soi, app1Exif, app2Icc, sos]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    out.set(p, off)
+    off += p.length
+  }
+  return out
+}
+
 // ---- minimal PNG builder for the sanitize test above ----
 function crc32(bytes: Uint8Array): number {
   let c = 0xffffffff
