@@ -62,9 +62,10 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         },
       },
       async ({ format, base64 }) => {
-        const entries = archiveExtract(format as ArchiveFormat, b64ToBytes(base64))
+        const { entries, skipped } = archiveExtract(format as ArchiveFormat, b64ToBytes(base64))
         return textResult({
           entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, base64: bytesToB64(e.data) })),
+          ...(skipped ? { skipped } : {}),
         })
       },
     )
