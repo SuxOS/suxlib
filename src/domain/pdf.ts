@@ -19,19 +19,65 @@ export const MAX_PDF_INPUT_BYTES = 50_000_000
  * A small crafted PDF (under MAX_PDF_INPUT_BYTES) with pathological object-stream
  * repetition can expand into a huge object graph during load; this post-parse
  * check bounds that expansion. It runs *after* PDFDocument.load, so it caps the
- * retained graph, not load()'s transient peak (a full fix needs a
- * resource-limited parse context and is out of scope here).
+ * retained graph, not load()'s transient peak. estimateDeclaredPdfObjectCount
+ * below is a cheap pre-parse partial mitigation for that peak; a full fix needs
+ * a resource-limited parse context and is out of scope here.
  */
 export const MAX_PDF_OBJECTS = 500_000
 
 /**
- * Load a PDF with the two size guards every entry point shares: a pre-parse
- * byte cap and a post-parse object-count cap. Both throw a "(bomb guard)."
- * Error matching the archive.ts idiom so adapters surface a uniform message.
+ * Chunked byte->latin1-string decode (mirrors adapters/base64.ts's chunked
+ * String.fromCharCode use) — avoids both a call-stack blowup from spreading a
+ * huge array and relying on TextDecoder encodings beyond 'utf-8', which isn't
+ * universally available across this repo's target runtimes.
+ */
+function bytesToLatin1(bytes: Uint8Array): string {
+  let s = ''
+  const CHUNK = 0x8000
+  for (let i = 0; i < bytes.length; i += CHUNK) s += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  return s
+}
+
+/**
+ * Estimate the declared object count straight from the raw bytes, without
+ * invoking pdf-lib's parser — mirrors archive.ts's unzipSync validation-only
+ * pre-pass: reject the obviously pathological case cheaply, before paying for
+ * the expensive parse. Counts indirect-object headers (`N N obj`) plus, for
+ * each object-stream dictionary (`/Type /ObjStm`), its declared `/N` — the
+ * count of further objects that single stream unpacks into. That second term
+ * is what catches the attack this guard exists for: object-stream repetition
+ * can declare a huge /N while the stream's own compressed bytes stay tiny, so
+ * a plain obj-header count alone would miss it. This is a heuristic over raw
+ * bytes, not a real parse — it estimates load()'s peak, it doesn't bound it.
+ */
+function estimateDeclaredPdfObjectCount(input: Uint8Array): number {
+  const text = bytesToLatin1(input)
+  const objHeaders = (text.match(/\d+\s+\d+\s+obj\b/g) ?? []).length
+  let objStreamObjects = 0
+  let searchFrom = 0
+  for (;;) {
+    const idx = text.indexOf('/ObjStm', searchFrom)
+    if (idx === -1) break
+    const window = text.slice(idx, idx + 200)
+    const n = Number(window.match(/\/N\s+(\d+)/)?.[1])
+    if (Number.isFinite(n)) objStreamObjects += n
+    searchFrom = idx + '/ObjStm'.length
+  }
+  return objHeaders + objStreamObjects
+}
+
+/**
+ * Load a PDF with the size guards every entry point shares: a pre-parse byte
+ * cap, a pre-parse declared-object-count estimate, and a post-parse
+ * object-count cap. All three throw a "(bomb guard)." error matching the
+ * archive.ts idiom so adapters surface a uniform message.
  */
 export async function loadBoundedPdf(input: Uint8Array): Promise<PDFDocument> {
   if (input.length > MAX_PDF_INPUT_BYTES) {
     throw new Error(`PDF is larger than ${MAX_PDF_INPUT_BYTES} bytes (bomb guard).`)
+  }
+  if (estimateDeclaredPdfObjectCount(input) > MAX_PDF_OBJECTS) {
+    throw new Error(`PDF declares more than ${MAX_PDF_OBJECTS} objects (bomb guard).`)
   }
   const doc = await PDFDocument.load(input, { updateMetadata: false })
   const objectCount = doc.context.enumerateIndirectObjects().length

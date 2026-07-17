@@ -36,3 +36,10 @@ test('loadBoundedPdf rejects a PDF larger than MAX_PDF_INPUT_BYTES', async () =>
   const big = new Uint8Array(MAX_PDF_INPUT_BYTES + 1)
   await expect(loadBoundedPdf(big)).rejects.toThrow(/bomb guard/)
 })
+
+test('loadBoundedPdf rejects a tiny file whose declared object-stream count is pathological, before ever calling PDFDocument.load', async () => {
+  const bytes = new TextEncoder().encode(
+    '%PDF-1.5\n1 0 obj\n<< /Type /ObjStm /N 600000 /First 10 /Length 1 >>\nstream\nx\nendstream\nendobj\n%%EOF',
+  )
+  await expect(loadBoundedPdf(bytes)).rejects.toThrow(/bomb guard/)
+})
