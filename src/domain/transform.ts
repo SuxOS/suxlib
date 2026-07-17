@@ -383,6 +383,12 @@ const EMPTY_ARRAY_ATTR = 'empty-array'
 // the round-tripped value back into a scalar. See issue #68.
 const SINGLE_ARRAY_ATTR = 'single-array'
 
+// Marker attribute `toXml` emits for a JSON key whose value is null/undefined —
+// without it, a null field and an empty-string scalar field both render as the
+// same self-closing `<tag/>`, so parseXml can't tell them apart and always
+// decodes the tag back to ''. See issue #79.
+const NULL_VALUE_ATTR = 'null-value'
+
 function tagEnd(s: string, lt: number): number {
   let quote = ''
   for (let i = lt + 1; i < s.length; i++) {
@@ -444,10 +450,11 @@ export function parseXml(xml: string): unknown {
       node['@' + key] = decodeEntities(val)
     }
     if (selfClose) {
-      const isEmptyArray = Object.keys(node).length === 1 && node['@' + EMPTY_ARRAY_ATTR] === 'true'
       const isSingleArray = node['@' + SINGLE_ARRAY_ATTR] === 'true'
       if (isSingleArray) delete node['@' + SINGLE_ARRAY_ATTR]
-      const value = isEmptyArray ? [] : Object.keys(node).length ? node : ''
+      const isEmptyArray = Object.keys(node).length === 1 && node['@' + EMPTY_ARRAY_ATTR] === 'true'
+      const isNullValue = Object.keys(node).length === 1 && node['@' + NULL_VALUE_ATTR] === 'true'
+      const value = isEmptyArray ? [] : isNullValue ? null : Object.keys(node).length ? node : ''
       attach(nodes[nodes.length - 1], name, isSingleArray ? [value] : value)
     } else {
       nodes.push(node)
@@ -471,7 +478,7 @@ function markSingleArray(xml: string, tag: string): string {
 
 export function toXml(obj: unknown, name?: string, depth = 0): string {
   if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
-  if (obj === null || obj === undefined) return name ? `<${xmlName(name)}/>` : ''
+  if (obj === null || obj === undefined) return name ? `<${xmlName(name)} ${NULL_VALUE_ATTR}="true"/>` : ''
   if (Array.isArray(obj)) {
     if (!obj.length) return name ? `<${xmlName(name)} ${EMPTY_ARRAY_ATTR}="true"/>` : ''
     if (obj.length === 1 && name) return markSingleArray(toXml(obj[0], name, depth + 1), xmlName(name))

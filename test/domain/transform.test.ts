@@ -93,6 +93,20 @@ test('toXml preserves a key whose value is a single-element array, and parseXml 
   expect(parseXml(xml)).toEqual({ root: { tags: ['a'] } })
 })
 
+test('toXml marks a null value distinctly from an empty-string scalar, and parseXml round-trips it back to null instead of ""', () => {
+  const obj = { a: null }
+  const xml = toXml(obj, 'root')
+  expect(xml).toBe('<root><a null-value="true"/></root>')
+  expect(parseXml(xml)).toEqual({ root: { a: null } })
+  expect(parseXml('<root><a></a></root>')).not.toEqual(parseXml(xml))
+})
+
+test('toXml/parseXml round-trip a single-element array containing null', () => {
+  const obj = { tags: [null] }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
+})
+
 test('toXml/parseXml round-trip a single-element array of objects', () => {
   const obj = { items: [{ id: '1' }] }
   const xml = toXml(obj, 'root')
