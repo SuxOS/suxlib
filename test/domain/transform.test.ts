@@ -58,6 +58,11 @@ test('toCsv escapes a regex-metachar delimiter without throwing, and guards form
   expect(toCsv([{ n: -5 }], ',')).toBe('n\n-5')
 })
 
+test('toCsv emits a single value column for an array of scalars instead of dropping the data', () => {
+  expect(toCsv(['a', 'b', 'c'], ',')).toBe('value\na\nb\nc')
+  expect(toCsv([1, 2, 3], ',')).toBe('value\n1\n2\n3')
+})
+
 test('toXml escapes attribute quotes and parseXml round-trips them', () => {
   const obj = { n: { '@id': 'a"b', '#text': 'hi' } }
   const xml = toXml(obj)

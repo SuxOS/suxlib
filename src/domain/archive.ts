@@ -4,7 +4,7 @@
 // sux-fileops's src/core/archive.ts (itself adapted from sux's src/fns/archive.ts)
 // during the suxlib absorption of sux-fileops.
 
-import { Gunzip, Unzip, UnzipInflate, gzipSync, strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
+import { Gunzip, Unzip, UnzipInflate, UnzipPassThrough, gzipSync, strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { isAbsolute, resolve as resolvePath, sep } from 'node:path'
 import type { LeafFn } from '../op/types.js'
 import { resolve, putBytes } from '../handles/handle.js'
@@ -156,6 +156,7 @@ function unzipGuarded(bytes: Uint8Array): Record<string, Uint8Array> {
     file.start()
   })
   unzipper.register(UnzipInflate)
+  unzipper.register(UnzipPassThrough)
   for (let i = 0; i < bytes.length; i += UNZIP_STREAM_CHUNK) {
     unzipper.push(bytes.subarray(i, i + UNZIP_STREAM_CHUNK), i + UNZIP_STREAM_CHUNK >= bytes.length)
   }
@@ -282,6 +283,7 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
     if (++count > MAX_ENTRIES) throw new Error(`archive has more than ${MAX_ENTRIES} entries (bomb guard).`)
     declared += size
     if (declared > MAX_UNPACK_BYTES) throw new Error(`archive decompresses to more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
+    if (off + size > bytes.length) throw new Error(`malformed/truncated tar: entry '${name}' declares ${size} bytes past the end of the archive.`)
 
     const data = bytes.subarray(off, off + size)
     off += padTo(size, BLOCK)

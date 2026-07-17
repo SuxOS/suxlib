@@ -44,6 +44,13 @@ test('zipCreate rejects duplicate entry names instead of silently dropping one',
   expect(() => zipCreate([{ name: 'a', data: strToU8('1') }, { name: 'a', data: strToU8('2') }])).toThrow(/duplicate entry name/)
 })
 
+test('zipExtract extracts STORED (uncompressed) entries, not just DEFLATE ones', () => {
+  const zip = zipSync({ 'stored.txt': strToU8('stored, not deflated') }, { level: 0 })
+  const entries = zipExtract(zip)
+  expect(entries.map((e) => e.name)).toEqual(['stored.txt'])
+  expect(entries[0].text).toBe('stored, not deflated')
+})
+
 test('gzipCreate/gzipExtract round-trips a single file', () => {
   const packed = gzipCreate(strToU8('gzip me '.repeat(50)))
   const out = gzipExtract(packed)
@@ -58,6 +65,12 @@ test('tarCreate/tarExtract round-trips multiple files and reports skipped non-re
   const { entries, skipped } = tarExtract(packed)
   expect(entries.map((e) => e.name).sort()).toEqual(['a.txt', 'b.txt'])
   expect(skipped).toEqual([])
+})
+
+test('tarExtract throws on a truncated entry instead of silently returning a short file', () => {
+  const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAAAAAAAAA') }])
+  const truncated = packed.subarray(0, 512 + 5) // header intact, only 5 of the declared 10 data bytes present
+  expect(() => tarExtract(truncated)).toThrow(/malformed\/truncated tar/)
 })
 
 test('archiveCreate/archiveExtract dispatch by format, and ARCHIVE_MIME covers every format', () => {
