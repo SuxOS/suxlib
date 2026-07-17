@@ -376,6 +376,13 @@ function collapse(node: Record<string, unknown>): unknown {
 // this same attribute to decode a self-closed tag back into [] rather than ''.
 const EMPTY_ARRAY_ATTR = 'empty-array'
 
+// Marker attribute `toXml` emits on the sole element of a length-1 JSON array —
+// without it, a 1-element array renders as exactly one sibling element, which is
+// byte-identical to a plain scalar field of the same tag name, so parseXml (which
+// only promotes a key to an array once it sees the tag repeated) silently turns
+// the round-tripped value back into a scalar. See issue #68.
+const SINGLE_ARRAY_ATTR = 'single-array'
+
 function tagEnd(s: string, lt: number): number {
   let quote = ''
   for (let i = lt + 1; i < s.length; i++) {
@@ -419,7 +426,10 @@ export function parseXml(xml: string): unknown {
       if (closing !== expected) throw new Error(`mismatched tag: expected </${expected}>, got </${closing}>`)
       const finished = nodes.pop()!
       names.pop()
-      attach(nodes[nodes.length - 1], expected, collapse(finished))
+      const isSingleArray = finished['@' + SINGLE_ARRAY_ATTR] === 'true'
+      if (isSingleArray) delete finished['@' + SINGLE_ARRAY_ATTR]
+      const value = collapse(finished)
+      attach(nodes[nodes.length - 1], expected, isSingleArray ? [value] : value)
       pos = gt + 1
       continue
     }
@@ -435,7 +445,10 @@ export function parseXml(xml: string): unknown {
     }
     if (selfClose) {
       const isEmptyArray = Object.keys(node).length === 1 && node['@' + EMPTY_ARRAY_ATTR] === 'true'
-      attach(nodes[nodes.length - 1], name, isEmptyArray ? [] : Object.keys(node).length ? node : '')
+      const isSingleArray = node['@' + SINGLE_ARRAY_ATTR] === 'true'
+      if (isSingleArray) delete node['@' + SINGLE_ARRAY_ATTR]
+      const value = isEmptyArray ? [] : Object.keys(node).length ? node : ''
+      attach(nodes[nodes.length - 1], name, isSingleArray ? [value] : value)
     } else {
       nodes.push(node)
       names.push(name)
@@ -446,11 +459,22 @@ export function parseXml(xml: string): unknown {
   return collapse(root)
 }
 
+// Injects the single-array marker attribute into an already-rendered element's
+// opening tag, so the sole element of a length-1 array is indistinguishable from
+// no other array elements in the output but still carries a signal parseXml can
+// use to restore its array-ness. Every toXml element output starts with `<${tag}`
+// (attrs and/or a self-close or content follow), so a plain prefix splice suffices.
+function markSingleArray(xml: string, tag: string): string {
+  const prefix = `<${tag}`
+  return xml.startsWith(prefix) ? `${prefix} ${SINGLE_ARRAY_ATTR}="true"${xml.slice(prefix.length)}` : xml
+}
+
 export function toXml(obj: unknown, name?: string, depth = 0): string {
   if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
   if (obj === null || obj === undefined) return name ? `<${xmlName(name)}/>` : ''
   if (Array.isArray(obj)) {
     if (!obj.length) return name ? `<${xmlName(name)} ${EMPTY_ARRAY_ATTR}="true"/>` : ''
+    if (obj.length === 1 && name) return markSingleArray(toXml(obj[0], name, depth + 1), xmlName(name))
     return obj.map((v) => toXml(v, name, depth + 1)).join('')
   }
   if (typeof obj === 'object') {
