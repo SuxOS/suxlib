@@ -31,8 +31,9 @@ describe('extractArchiveTo (CLI filesystem extract path)', () => {
   it('writes entries under the output directory on a well-formed archive', () => {
     const out = tmpDir()
     const packed = archiveCreate('zip', [{ name: 'a.txt', data: new TextEncoder().encode('hello') }])
-    const written = extractArchiveTo('zip', packed, out)
+    const { written, skipped } = extractArchiveTo('zip', packed, out)
     expect(written).toBe(1)
+    expect(skipped).toEqual([])
     expect(readFileSync(join(out, 'a.txt'), 'utf8')).toBe('hello')
   })
 

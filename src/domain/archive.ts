@@ -96,8 +96,20 @@ export function zipCreate(files: ArchiveFile[]): Uint8Array {
     totalBytes += f.data.length
   }
   if (totalBytes > MAX_UNPACK_BYTES) throw new Error(`archive input totals more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
-  const record: Record<string, Uint8Array> = {}
+  // Object.create(null) rather than {}: a plain object inherits every
+  // Object.prototype member name ('constructor', 'toString', ...) as an own
+  // "in" hit, so `f.name in record` would falsely report e.g. a file named
+  // 'constructor' as a duplicate on its first (only) occurrence. A
+  // null-prototype object has no inherited names to collide with.
+  const record: Record<string, Uint8Array> = Object.create(null)
   for (const f of files) {
+    // fflate's zipSync (via its internal `fltn` flattening step) keys its own
+    // scratch object by entry name and assigns to it directly — for the
+    // literal name '__proto__' that invokes the Annex B setter on fflate's
+    // object and corrupts its internal state instead of storing the entry.
+    // That's a bug in fflate itself we can't fix from here, so refuse before
+    // ever calling zipSync rather than let it fail confusingly downstream.
+    if (f.name === '__proto__') throw new Error(`file name '__proto__' can't be packed into a zip (rejected — the underlying zip library mishandles this exact name).`)
     // Keying by name means a duplicate would silently overwrite (drop) the
     // earlier entry's data — refuse rather than lose a file.
     if (f.name in record) throw new Error(`duplicate entry name: '${f.name}' — every file in an archive needs a unique name.`)
@@ -130,7 +142,14 @@ function unzipGuarded(bytes: Uint8Array): Record<string, Uint8Array> {
     },
   })
 
-  const files: Record<string, Uint8Array> = {}
+  // Object.create(null): files[file.name] = ... on a plain {} silently
+  // repoints its prototype for name === '__proto__' instead of creating an
+  // own property, so Object.entries would drop that entry with no error and
+  // no exception — unlike zipCreate's packing side, this assignment is on our
+  // own object rather than routed through fflate's zipSync, so the
+  // null-prototype fix fully resolves it here (a file named '__proto__'
+  // extracts correctly instead of vanishing).
+  const files: Record<string, Uint8Array> = Object.create(null)
   let count = 0
   let total = 0
   const unzipper = new Unzip((file) => {
@@ -322,14 +341,24 @@ export function archiveCreate(format: ArchiveFormat, files: ArchiveFile[]): Uint
   }
 }
 
-export function archiveExtract(format: ArchiveFormat, bytes: Uint8Array): UnpackedEntry[] {
+/**
+ * Unified extract result. `skipped` is only ever populated for 'tar' (dropped
+ * symlinks/hardlinks/devices — see TarExtractResult) and omitted otherwise, so
+ * callers can tell a tar extraction was partial without every format having
+ * to carry a meaningless empty array.
+ */
+export type ArchiveExtractResult = { entries: UnpackedEntry[]; skipped?: Array<{ name: string; typeflag: string }> }
+
+export function archiveExtract(format: ArchiveFormat, bytes: Uint8Array): ArchiveExtractResult {
   switch (format) {
     case 'zip':
-      return zipExtract(bytes)
-    case 'tar':
-      return tarExtract(bytes).entries
+      return { entries: zipExtract(bytes) }
+    case 'tar': {
+      const { entries, skipped } = tarExtract(bytes)
+      return skipped.length ? { entries, skipped } : { entries }
+    }
     case 'gzip':
-      return [gzipExtract(bytes)]
+      return { entries: [gzipExtract(bytes)] }
   }
 }
 

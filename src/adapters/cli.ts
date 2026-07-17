@@ -43,8 +43,11 @@ archiveCmd
   .action((archivePath: string, opts: { output: string; format?: string }) => {
     const format = (opts.format as ArchiveFormat) ?? inferArchiveFormat(archivePath)
     const bytes = new Uint8Array(readFileSync(archivePath))
-    const written = extractArchiveTo(format, bytes, opts.output)
+    const { written, skipped } = extractArchiveTo(format, bytes, opts.output)
     console.log(`extracted ${written} entr${written === 1 ? 'y' : 'ies'} to ${opts.output}`)
+    if (skipped.length) {
+      console.log(`skipped ${skipped.length} non-regular entr${skipped.length === 1 ? 'y' : 'ies'} (symlink/hardlink/device): ${skipped.map((s) => `${s.name} (${s.typeflag})`).join(', ')}`)
+    }
   })
 
 function inferArchiveFormat(path: string): ArchiveFormat {
@@ -60,8 +63,8 @@ function inferArchiveFormat(path: string): ArchiveFormat {
  * ever becomes a filesystem path. Exported (rather than inlined in the CLI
  * action) so it's directly unit-testable without shelling out to the CLI.
  */
-export function extractArchiveTo(format: ArchiveFormat, bytes: Uint8Array, outputDir: string): number {
-  const entries = archiveExtract(format, bytes)
+export function extractArchiveTo(format: ArchiveFormat, bytes: Uint8Array, outputDir: string): { written: number; skipped: Array<{ name: string; typeflag: string }> } {
+  const { entries, skipped = [] } = archiveExtract(format, bytes)
   mkdirSync(outputDir, { recursive: true })
   let written = 0
   for (const e of entries) {
@@ -78,7 +81,7 @@ export function extractArchiveTo(format: ArchiveFormat, bytes: Uint8Array, outpu
     writeFileSync(dest, e.data)
     written++
   }
-  return written
+  return { written, skipped }
 }
 
 // ---------- pdf ----------

@@ -108,9 +108,10 @@ const routes: Route[] = [
       if (typeof body.base64 !== 'string' || !body.base64) return errorResponse(new Error('`base64` required'))
       const format = (body.format ?? 'zip') as ArchiveFormat
       if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, or gzip'))
-      const entries = archiveExtract(format, b64ToBytes(body.base64))
+      const { entries, skipped } = archiveExtract(format, b64ToBytes(body.base64))
       return json({
         entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, base64: bytesToB64(e.data) })),
+        ...(skipped ? { skipped } : {}),
       })
     },
   },

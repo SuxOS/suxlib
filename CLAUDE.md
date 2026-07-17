@@ -121,7 +121,17 @@ There is no linter in this repo. Run both locally before pushing.
   streaming parser (unlike `unzipSync`) does not throw on malformed/non-zip input —
   it just silently finds zero entries — so if you touch `unzipGuarded` in
   `src/domain/archive.ts`, keep (or replace with an equivalent) the `unzipSync`
-  validation pre-pass that gives corrupt-input callers a real error.
+  validation pre-pass that gives corrupt-input callers a real error. Also: both
+  `zipSync` and `unzipSync` (not just our own code) key an *internal* plain object by
+  entry name and assign to it directly, so an entry literally named `__proto__` hits
+  the same Annex-B setter bug inside fflate itself — `zipSync` throws a confusing
+  `TypeError` reading `.level`, `unzipSync` silently returns that entry via
+  `Object.keys() === []`. This isn't fixable by making *our* objects
+  `Object.create(null)` (that only protects our own record/files objects, e.g. in
+  `zipCreate`/`unzipGuarded`'s streaming `Unzip` path) — a name of exactly
+  `'__proto__'` must be rejected before it ever reaches `zipSync`, and any future
+  codepath calling `unzipSync` directly (not the streaming `Unzip` class) needs the
+  same awareness.
 - Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
   `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
   `circuitBreaker` gating for `effect` leaves is configured separately, via
