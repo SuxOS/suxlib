@@ -5,7 +5,7 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { archiveCreate, archiveExtract, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
+import { archiveCreate, archiveExtract, ARCHIVE_MIME, ARCHIVE_FORMATS, MAX_ENTRIES, MAX_UNPACK_BYTES, type ArchiveFile, type ArchiveFormat } from '../domain/archive.js'
 import { pdfShrink } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES } from '../domain/sanitize.js'
 import { dispatchTransform, type Format } from '../domain/transform.js'
@@ -39,12 +39,24 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         description: 'Pack one or more files into a zip, tar, or gzip archive.',
         inputSchema: {
           format: z.enum(ARCHIVE_FORMATS).default('zip'),
-          files: z.array(z.object({ name: z.string(), base64: z.string() })).min(1),
+          files: z.array(z.object({ name: z.string(), base64: z.string() })).min(1).max(MAX_ENTRIES),
         },
       },
       async ({ format, files }) => {
         const fmt = format as ArchiveFormat
-        const entries = files.map((f) => ({ name: f.name, data: b64ToBytes(f.base64) }))
+        // Decode incrementally and check the running total against
+        // archiveCreate's own bomb guard as we go, rather than decoding every
+        // file up front — otherwise a full array of near-cap files forces
+        // the entire aggregate decode before archiveCreate ever gets a
+        // chance to reject it.
+        const entries: ArchiveFile[] = []
+        let totalBytes = 0
+        for (const f of files) {
+          const data = b64ToBytes(f.base64)
+          totalBytes += data.length
+          if (totalBytes > MAX_UNPACK_BYTES) throw new Error(`archive input totals more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
+          entries.push({ name: f.name, data })
+        }
         const out = archiveCreate(fmt, entries)
         return textResult({ format: fmt, mime: ARCHIVE_MIME[fmt], bytes: out.length, base64: bytesToB64(out) })
       },
