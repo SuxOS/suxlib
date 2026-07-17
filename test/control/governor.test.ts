@@ -2,6 +2,7 @@ import { test, expect } from 'vitest'
 import { runGoverned, CircuitOpenError } from '../../src/control/governor.js'
 import { tokenBucket } from '../../src/control/token-bucket.js'
 import { circuitBreaker } from '../../src/control/circuit-breaker.js'
+import { fixed, aimd } from '../../src/control/aimd.js'
 
 function caps(now = 0): any {
   return { store: {}, llm: {}, clock: { now: () => now }, sinks: {} }
@@ -184,4 +185,52 @@ test('does not compute an idempotencyKey for pure leaves', async () => {
   const fn = async (_input: any, _caps: any, idemKey?: string) => { seenKey = idemKey; return 'ok' }
   await runGoverned('leaf', { kind: 'pure' }, fn, { a: 1 }, caps(), undefined, noSleep)
   expect(seenKey).toBeUndefined()
+})
+
+test('gates an effect leaf through governor.concurrency, never exceeding its limit', async () => {
+  const limiter = fixed(1)
+  let inFlight = 0, maxInFlight = 0
+  const fn = async () => {
+    inFlight++; maxInFlight = Math.max(maxInFlight, inFlight)
+    await Promise.resolve()
+    inFlight--
+    return 'ok'
+  }
+  await Promise.all([
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency: limiter }, noSleep),
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency: limiter }, noSleep),
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency: limiter }, noSleep),
+  ])
+  expect(maxInFlight).toBe(1)
+})
+
+test('concurrency is not consulted for pure leaves', async () => {
+  const limiter = fixed(1)
+  let acquireCalls = 0
+  const spy = { acquire: async () => { acquireCalls++; await limiter.acquire() }, release: (ok: boolean) => limiter.release(ok) }
+  const fn = async () => 'ok'
+  const result = await runGoverned('leaf', { kind: 'pure' }, fn, null, caps(), { concurrency: spy }, noSleep)
+  expect(result).toBe('ok')
+  expect(acquireCalls).toBe(0)
+})
+
+test('reports failure to an AIMD concurrency limiter on a rejected attempt, halving its limit', async () => {
+  const limiter = aimd({ start: 8, min: 1 })
+  const fn = async () => { throw new Error('boom') }
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency: limiter }, noSleep),
+  ).rejects.toThrow('boom')
+  expect(limiter.limit).toBe(4)
+})
+
+test('releases the concurrency slot when the token bucket throws, without ever acquiring it', async () => {
+  const limiter = fixed(1)
+  let acquireCalls = 0
+  const spy = { acquire: async () => { acquireCalls++; await limiter.acquire() }, release: (ok: boolean) => limiter.release(ok) }
+  const throwingBucket = { take: async () => { throw new Error('rate limiter unavailable') } }
+  const fn = async () => 'should not run'
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { tokenBucket: throwingBucket as any, concurrency: spy }, noSleep),
+  ).rejects.toThrow('rate limiter unavailable')
+  expect(acquireCalls).toBe(0)
 })

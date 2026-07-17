@@ -42,6 +42,11 @@ test('parseYaml and parseXml guard against prototype pollution via __proto__ key
   expect(root).toEqual({ q: 'hi' })
 })
 
+test('parseXml parses a lone element named like an Object.prototype member instead of corrupting it', () => {
+  const x = parseXml('<root><toString>hello</toString><hasOwnProperty>world</hasOwnProperty></root>') as Record<string, unknown>
+  expect(x.root).toEqual({ toString: 'hello', hasOwnProperty: 'world' })
+})
+
 test('parseCsv keeps a quoted-empty row but drops a truly blank line', () => {
   expect(parseCsv('a\n""\nb\n', ',')).toEqual([['a'], [''], ['b']])
   expect(parseCsv('a\n\nb\n', ',')).toEqual([['a'], ['b']])

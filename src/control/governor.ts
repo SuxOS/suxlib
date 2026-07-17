@@ -17,12 +17,15 @@ export interface RunGovernedOpts {
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
 /**
- * Wraps a leaf's fn with the retry/rate-limit/circuit-breaker gating described in
- * the Slice 3 design doc's §3.3 call-site pattern (breaker gate -> token gate ->
- * effect), driven off caps.clock so it stays replay-deterministic. `retries`
- * applies to any leaf kind (it's the leaf's own declared resilience contract);
- * the tokenBucket/circuitBreaker gates only apply to 'effect' leaves, since
- * 'pure' leaves have no external dependency to protect.
+ * Wraps a leaf's fn with the retry/rate-limit/circuit-breaker/concurrency gating
+ * described in the Slice 3 design doc's §3.3 call-site pattern (breaker gate ->
+ * token gate -> concurrency gate -> effect), driven off caps.clock so it stays
+ * replay-deterministic. `retries` applies to any leaf kind (it's the leaf's own
+ * declared resilience contract); the tokenBucket/circuitBreaker/concurrency gates
+ * only apply to 'effect' leaves, since 'pure' leaves have no external dependency
+ * to protect. Each retry attempt re-acquires/releases the concurrency slot (like
+ * the token bucket, taken fresh per attempt) rather than holding it across
+ * backoff sleeps, so a slow/failing leaf doesn't pin a slot idle while it waits.
  *
  * Exported standalone rather than inlined into runInline's switch so a future
  * sux-side runDurable can wrap its own leaf dispatch with the same gating and
@@ -43,6 +46,7 @@ export async function runGoverned(
   const sleep = gOpts.sleep ?? defaultSleep
   const gated = opts.kind === 'effect'
   const breaker = gated ? governor?.circuitBreaker : undefined
+  const concurrency = gated ? governor?.concurrency : undefined
   // Computed once, outside the retry loop, so every retry attempt hands the fn
   // the same key -- letting a capability that dedupes on it (e.g. an idempotent
   // HTTP POST) collapse retried attempts into a single side effect.
@@ -57,12 +61,16 @@ export async function runGoverned(
         probeReserved = true
       }
     }
+    let acquired = false
     try {
       if (gated && governor?.tokenBucket) await governor.tokenBucket.take(1, caps.clock)
+      if (concurrency) { await concurrency.acquire(); acquired = true }
       const result = await fn(input, caps, idemKey)
+      if (acquired) concurrency!.release(true)
       breaker?.onSuccess(caps.clock.now())
       return result
     } catch (err) {
+      if (acquired) concurrency!.release(false)
       breaker?.onFailure(caps.clock.now())
       if (attempt >= maxRetries) throw err
       await sleep(backoffFullJitter(attempt, backoff, gOpts.rand))

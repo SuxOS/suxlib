@@ -151,7 +151,13 @@ There is no linter in this repo. Run both locally before pushing.
   `runGoverned` calls those instead of a WeakMap. The in-memory
   `circuitBreaker()` still backs them with a plain in-process flag, so a
   future `sux`-side durable `CircuitBreaker` implementation must back those
-  same two methods with persisted state to actually close the gap.
+  same two methods with persisted state to actually close the gap. Update: the
+  third §3.3 gate is now wired too — `Governor.concurrency` (any `Concurrency`,
+  e.g. `aimd()`/`fixed()` from `src/control/aimd.ts`) is acquired/released by
+  `runGoverned` after the token-bucket take and before the effect call, same as
+  breaker/token-bucket: only for `'effect'` leaves, and freshly per retry
+  attempt (not held across a backoff sleep), so a slow/failing leaf doesn't pin
+  a slot idle while it waits to retry.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than

@@ -47,6 +47,15 @@ test('fieldMerge: rejects __proto__ key and does not pollute Object.prototype (C
   expect(merged).toEqual({ name: 'mallory' })
 })
 
+test('fieldMerge: keep-first policy keeps a field named like an Object.prototype member', async () => {
+  const s = new MemoryStore()
+  const a = await putText(s, JSON.stringify({ toString: 'first', hasOwnProperty: 'x' }), 'application/json')
+  const b = await putText(s, JSON.stringify({ toString: 'second', hasOwnProperty: 'y' }), 'application/json')
+  const merged = JSON.parse(await resolveText(s, await fieldMerge([a, b], s, { defaultPolicy: 'keep-first' })))
+  expect(merged.toString).toBe('first')
+  expect(merged.hasOwnProperty).toBe('x')
+})
+
 test('fieldMerge: rejects constructor/prototype keys across multiple handles', async () => {
   const s = new MemoryStore()
   const a = await putText(s, '{"constructor": {"prototype": {"polluted2": "yes"}}}', 'application/json')

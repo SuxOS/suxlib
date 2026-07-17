@@ -356,7 +356,7 @@ function attach(node: Record<string, unknown>, name: string, child: unknown) {
   // node[name] = ... on "__proto__" invokes the Object.prototype setter and
   // repoints node's prototype to attacker-controlled XML content.
   if (name === '__proto__' || name === 'constructor' || name === 'prototype') return
-  if (name in node) {
+  if (Object.prototype.hasOwnProperty.call(node, name)) {
     const cur = node[name]
     if (Array.isArray(cur)) cur.push(child)
     else node[name] = [cur, child]
