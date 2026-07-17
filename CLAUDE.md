@@ -152,3 +152,13 @@ There is no linter in this repo. Run both locally before pushing.
   `circuitBreaker()` still backs them with a plain in-process flag, so a
   future `sux`-side durable `CircuitBreaker` implementation must back those
   same two methods with persisted state to actually close the gap.
+- Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
+  string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
+  through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
+  inventing a duration-parsing scheme this repo doesn't otherwise have. With no
+  `Ask` capability supplied, `runInline` honors `onTimeout` itself (throws
+  `AskTimeoutError` on `'fail'`, proceeds with the piped value on `'proceed'`)
+  since an inline run has no way to actually pause for a human answer. A future
+  `sux`-side `Ask` implementation owns defining/parsing the timeout format as
+  part of building real pause/resume — don't add parsing here without a scoped
+  design pass.
