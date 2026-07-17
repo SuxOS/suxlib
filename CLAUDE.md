@@ -129,4 +129,10 @@ There is no linter in this repo. Run both locally before pushing.
   hold mutable state that must persist and be shared across calls, which
   per-leaf declarative opts can't express. A future `sux`-side `runDurable`
   should reuse `runGoverned` (passing a durable `sleep`) rather than
-  reimplementing the retry/gating logic.
+  reimplementing the retry/gating logic. `runGoverned`'s half-open-probe cap
+  (one in-flight probe per breaker, guarding the livelock in spec §7) is
+  tracked in an in-process `WeakMap` keyed off the `CircuitBreaker` instance —
+  fine for `runInline`, but a durable runtime whose steps can resume in a
+  different isolate will need that cap made durable too (e.g. state on the
+  breaker itself, or persisted alongside the workflow run) rather than
+  inheriting the `WeakMap` as-is.
