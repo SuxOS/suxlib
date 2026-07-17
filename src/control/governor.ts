@@ -1,5 +1,4 @@
 import type { LeafFn, LeafOpts, Caps, Governor } from '../op/types.js'
-import type { CircuitBreaker } from './circuit-breaker.js'
 import { backoffFullJitter, idempotencyKey } from './retry.js'
 
 export class CircuitOpenError extends Error {
@@ -16,13 +15,6 @@ export interface RunGovernedOpts {
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
-
-// Spec §7's half-open/AIMD livelock risk: circuitBreaker.allow() alone does not cap
-// concurrent half-open probes, so a concurrent caller (e.g. map(..., {concurrency:
-// fixed(N>1)})) sharing one breaker could send more than one probe through at once.
-// Keyed by the breaker instance (shared via caps.governors[name] across concurrent
-// runGoverned calls) rather than held in local state, since each call has its own.
-const halfOpenProbeInFlight = new WeakMap<CircuitBreaker, boolean>()
 
 /**
  * Wraps a leaf's fn with the retry/rate-limit/circuit-breaker gating described in
@@ -61,8 +53,7 @@ export async function runGoverned(
     if (breaker) {
       if (!breaker.allow(caps.clock.now())) throw new CircuitOpenError(name)
       if (breaker.state === 'half-open') {
-        if (halfOpenProbeInFlight.get(breaker)) throw new CircuitOpenError(name)
-        halfOpenProbeInFlight.set(breaker, true)
+        if (!breaker.reserveHalfOpenProbe()) throw new CircuitOpenError(name)
         probeReserved = true
       }
     }
@@ -76,7 +67,7 @@ export async function runGoverned(
       if (attempt >= maxRetries) throw err
       await sleep(backoffFullJitter(attempt, backoff, gOpts.rand))
     } finally {
-      if (probeReserved) halfOpenProbeInFlight.delete(breaker!)
+      if (probeReserved) breaker!.releaseHalfOpenProbe()
     }
   }
 }
