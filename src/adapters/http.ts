@@ -5,9 +5,9 @@
 // suxlib absorption of sux-fileops.
 
 import { archiveCreate, archiveExtract, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
-import { pdfShrink } from '../domain/pdf.js'
+import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, type RedactType } from '../domain/sanitize.js'
-import { dispatchTransform, type Format } from '../domain/transform.js'
+import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 function json(data: unknown, status = 200): Response {
@@ -133,6 +133,16 @@ const routes: Route[] = [
   },
   {
     method: 'POST',
+    path: '/pdf/page-count',
+    handle: async (rawBody) => {
+      const body = rawBody as { base64?: string }
+      if (typeof body.base64 !== 'string' || !body.base64) return errorResponse(new Error('`base64` required'))
+      const pageCount = await pdfPageCount(b64ToBytes(body.base64))
+      return json({ pageCount })
+    },
+  },
+  {
+    method: 'POST',
     path: '/sanitize/image',
     handle: async (rawBody) => {
       const body = rawBody as { base64?: string }
@@ -158,7 +168,14 @@ const routes: Route[] = [
       const body = rawBody as { data?: string; from?: string; to?: string; delimiter?: string }
       if (typeof body.data !== 'string') return errorResponse(new Error('`data` required'))
       if (typeof body.to !== 'string') return errorResponse(new Error('`to` required'))
-      const out = dispatchTransform(body.data, (body.from as Format | 'auto') ?? 'auto', body.to as Format, body.delimiter)
+      const from = body.from ?? 'auto'
+      if (from !== 'auto' && !TRANSFORM_FORMATS.includes(from as Format)) {
+        return errorResponse(new Error(`\`from\` must be one of: auto, ${TRANSFORM_FORMATS.join(', ')}`))
+      }
+      if (!TRANSFORM_FORMATS.includes(body.to as Format)) {
+        return errorResponse(new Error(`\`to\` must be one of: ${TRANSFORM_FORMATS.join(', ')}`))
+      }
+      const out = dispatchTransform(body.data, from as Format | 'auto', body.to as Format, body.delimiter)
       return json({ data: out })
     },
   },

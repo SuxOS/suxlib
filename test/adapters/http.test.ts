@@ -41,6 +41,18 @@ describe('http adapter', () => {
     expect(((await res.json()) as { error: string }).error).toBeTruthy()
   })
 
+  it('POST /transform: an invalid `from` surfaces a 400, not a silent 200 with an empty body', async () => {
+    const res = await post('transform', { data: 'foo', from: 'bogus', to: 'json' })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toBeTruthy()
+  })
+
+  it('POST /transform: an invalid `to` surfaces a 400', async () => {
+    const res = await post('transform', { data: '{"a":1}', to: 'bogus' })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toBeTruthy()
+  })
+
   it('POST /archive/create + /archive/extract: happy-path round trip', async () => {
     const createRes = await post('archive/create', { format: 'zip', files: [{ name: 'a.txt', base64: b64('hello') }] })
     expect(createRes.status).toBe(200)
@@ -68,6 +80,20 @@ describe('http adapter', () => {
     const body = (await res.json()) as { mime: string; outputBytes: number }
     expect(body.mime).toBe('application/pdf')
     expect(body.outputBytes).toBeGreaterThan(0)
+  })
+
+  it('POST /pdf/page-count: happy path reports the page count', async () => {
+    const { PDFDocument } = await import('pdf-lib')
+    const doc = await PDFDocument.create()
+    doc.addPage([300, 400])
+    doc.addPage([300, 400])
+    const pdfBytes = await doc.save()
+    let s = ''
+    for (const b of pdfBytes) s += String.fromCharCode(b)
+    const res = await post('pdf/page-count', { base64: btoa(s) })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { pageCount: number }
+    expect(body.pageCount).toBe(2)
   })
 
   it('POST /sanitize/text: happy path redacts an email', async () => {
