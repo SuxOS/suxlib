@@ -1,6 +1,6 @@
 import type { LeafFn } from '../op/types.js'
 import { resolve, putText, resolveText } from '../handles/handle.js'
-export const extract: LeafFn = async (pdfHandle, caps) => {   // heavy:true when used in an op
+export const extract: LeafFn = async (pdfHandle, caps) => {
   const md = await caps.llm.markdownFromPdf(await resolve(caps.store, pdfHandle))
   return putText(caps.store, md, 'text/markdown')
 }

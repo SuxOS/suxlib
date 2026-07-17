@@ -2,6 +2,7 @@ export interface Handle { r2Key: string; sha256: string; type: string; size: num
 export interface Store { put(bytes: Uint8Array, type: string): Promise<Handle>; get(h: Handle): Promise<Uint8Array> }
 export interface Llm { markdownFromPdf(bytes: Uint8Array): Promise<string>; summarize(text: string): Promise<string> }
 export interface Clock { now(): number }
+export interface Ask { request(prompt: string, timeout: string): Promise<{ answered: boolean; value?: any }> }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const d = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
