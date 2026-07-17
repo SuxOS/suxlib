@@ -372,7 +372,7 @@ export function parseXml(xml: string): unknown {
   const src = xml
     .replace(/<\?[\s\S]*?\?>/g, '')
     .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<!DOCTYPE[^>]*>/gi, '')
+    .replace(/<!DOCTYPE[^\[>]*(\[[^\]]*\])?[^>]*>/gi, '')
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, (_m, c) => encodeEntitiesXml(c))
   const root: Record<string, unknown> = {}
   const nodes: Record<string, unknown>[] = [root]
