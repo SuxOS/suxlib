@@ -71,6 +71,27 @@ describe('mcp adapter', () => {
     const result = await client.callTool({ name: 'sanitize_image', arguments: { base64: b64('not an image') } })
     expect(result.isError).toBe(true)
   })
+
+  it('archive_create: rejects more than MAX_ENTRIES files without decoding them', async () => {
+    const { MAX_ENTRIES } = await import('../../src/domain/archive.js')
+    const files = Array.from({ length: MAX_ENTRIES + 1 }, (_, i) => ({ name: `f${i}.txt`, base64: b64('x') }))
+    const result = await client.callTool({ name: 'archive_create', arguments: { format: 'zip', files } })
+    expect(result.isError).toBe(true)
+  })
+
+  it('archive_create: bails on the aggregate byte guard instead of decoding every file first', async () => {
+    const { MAX_UNPACK_BYTES } = await import('../../src/domain/archive.js')
+    const big = 'x'.repeat(Math.ceil(MAX_UNPACK_BYTES / 2) + 1)
+    const files = [
+      { name: 'a.txt', base64: b64(big) },
+      { name: 'b.txt', base64: b64(big) },
+      { name: 'c.txt', base64: b64(big) },
+    ]
+    const result = await client.callTool({ name: 'archive_create', arguments: { format: 'zip', files } })
+    expect(result.isError).toBe(true)
+    const content = result.content as Array<{ type: string; text?: string }>
+    expect(content?.[0]?.text).toMatch(/bomb guard/)
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {
