@@ -88,11 +88,17 @@ export function detectImageKind(bytes: Uint8Array): ImageKind | null {
   return null
 }
 
+const ICC_PROFILE_TAG = [0x49, 0x43, 0x43, 0x5f, 0x50, 0x52, 0x4f, 0x46, 0x49, 0x4c, 0x45, 0x00] // "ICC_PROFILE\0"
+
 /**
  * Strip JPEG APPn metadata markers (APP0 kept — it's the JFIF header most
- * decoders expect; APP1 EXIF/XMP, APP2 ICC-adjacent, APP13 Photoshop IPTC,
- * COM comments are dropped). Segment-level rebuild: walk markers, drop the
- * ones that carry metadata, keep SOS and the entropy-coded scan data verbatim.
+ * decoders expect; APP1 EXIF/XMP, APP13 Photoshop IPTC, COM comments are
+ * dropped). APP2 segments are kept when they carry an ICC color profile
+ * (identified by the "ICC_PROFILE\0" payload prefix) — an ICC profile is
+ * rendering data, not privacy metadata, matching stripPngMetadata's
+ * treatment of iCCP/sRGB/gAMA/cHRM as data to preserve. Non-ICC APP2 is
+ * still dropped. Segment-level rebuild: walk markers, drop the ones that
+ * carry metadata, keep SOS and the entropy-coded scan data verbatim.
  */
 function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('not a JPEG (missing SOI marker)')
@@ -139,7 +145,8 @@ function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
     if (len < 2 || i + 2 + len > bytes.length) {
       throw new Error(`malformed/truncated JPEG: segment at offset ${i} declares length ${len}, runs past end of file`)
     }
-    const isMetadata = (marker >= 0xe1 && marker <= 0xef) || marker === 0xfe // APP1-APP15, COM
+    const isIccApp2 = marker === 0xe2 && len >= 2 + ICC_PROFILE_TAG.length && ICC_PROFILE_TAG.every((b, k) => bytes[i + 4 + k] === b)
+    const isMetadata = ((marker >= 0xe1 && marker <= 0xef) || marker === 0xfe) && !isIccApp2 // APP1-APP15, COM (ICC-bearing APP2 kept)
     if (!isMetadata) {
       for (let j = i; j < i + 2 + len; j++) out.push(bytes[j])
     }

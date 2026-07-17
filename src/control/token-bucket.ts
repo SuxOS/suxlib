@@ -26,6 +26,9 @@ export function tokenBucket(opts: { capacity: number; refillPerMs: number; clock
       return true
     },
     async take(cost, clock) {
+      if (cost > opts.capacity) {
+        throw new Error(`tokenBucket.take: requested cost ${cost} exceeds bucket capacity ${opts.capacity} and can never be satisfied`)
+      }
       let attempt = 0
       while (!bucket.tryTake(cost, clock.now())) {
         const delayMs = Math.max(1, backoffFullJitter(attempt++, { base: 5, cap: 200 }))

@@ -1,29 +1,34 @@
 import { test, expect } from 'vitest'
-import { MemoryStore } from '../../src/effects/types.js'
-import { putBytes, putText, resolveText } from '../../src/handles/handle.js'
 import { extract, summarize } from '../../src/domain/text.js'
+import { MemoryStore } from '../../src/effects/types.js'
+import type { Llm } from '../../src/effects/types.js'
+import type { Caps } from '../../src/op/types.js'
 
-test('extract puts the LLM-returned markdown as text/markdown', async () => {
-  const store = new MemoryStore()
-  const pdfHandle = await putBytes(store, new Uint8Array([1, 2, 3]), 'application/pdf')
-  const llm = {
-    markdownFromPdf: async (bytes: Uint8Array) => `# doc (${bytes.byteLength} bytes)`,
+function fakeCaps(llm: Llm): Caps {
+  return { store: new MemoryStore(), llm, clock: { now: () => 0 }, sinks: {} }
+}
+
+test('extract resolves the pdf handle, calls markdownFromPdf, and stores the result as text/markdown', async () => {
+  const llm: Llm = {
+    markdownFromPdf: async (bytes) => `# md for ${new TextDecoder().decode(bytes)}`,
     summarize: async () => { throw new Error('unused') },
   }
-  const mdHandle = await extract(pdfHandle, { store, llm } as any)
-  expect(mdHandle.type).toBe('text/markdown')
-  expect(await resolveText(store, mdHandle)).toBe('# doc (3 bytes)')
+  const caps = fakeCaps(llm)
+  const pdfHandle = await caps.store.put(new TextEncoder().encode('pdf-bytes'), 'application/pdf')
+  const out = await extract(pdfHandle, caps)
+  expect(out.type).toBe('text/markdown')
+  expect(new TextDecoder().decode(await caps.store.get(out))).toBe('# md for pdf-bytes')
 })
 
-test('summarize returns an abstract and a handle resolving to the stubbed text', async () => {
-  const store = new MemoryStore()
-  const masterHandle = await putText(store, 'the full document text')
-  const llm = {
+test('summarize resolves text, calls summarize, and returns abstract + summaryHandle', async () => {
+  const llm: Llm = {
     markdownFromPdf: async () => { throw new Error('unused') },
-    summarize: async (text: string) => `summary of: ${text}`,
+    summarize: async (text) => `summary of ${text}`,
   }
-  const { abstract, summaryHandle } = await summarize(masterHandle, { store, llm } as any)
-  expect(abstract).toBe('summary of: the full document text')
+  const caps = fakeCaps(llm)
+  const masterHandle = await caps.store.put(new TextEncoder().encode('the full text'), 'text/markdown')
+  const { abstract, summaryHandle } = await summarize(masterHandle, caps)
+  expect(abstract).toBe('summary of the full text')
   expect(summaryHandle.type).toBe('text/markdown')
-  expect(await resolveText(store, summaryHandle)).toBe(abstract)
+  expect(new TextDecoder().decode(await caps.store.get(summaryHandle))).toBe('summary of the full text')
 })
