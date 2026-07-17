@@ -7,7 +7,7 @@ export interface Governor { tokenBucket?: TokenBucket; circuitBreaker?: CircuitB
 export interface Caps { store: Store; llm: Llm; clock: Clock; sinks: Record<string, SinkTarget>; governors?: Record<string, Governor> }
 export interface Concurrency { acquire(): Promise<void>; release(ok: boolean): void }
 export interface LeafOpts { kind: 'pure' | 'effect'; heavy?: boolean; retries?: number; effort?: 'cheap' | 'auto' | 'max' }
-export type LeafFn = (input: any, caps: Caps) => Promise<any>
+export type LeafFn = (input: any, caps: Caps, idempotencyKey?: string) => Promise<any>
 export type Op =
   | { tag: 'leaf'; name: string; fn: LeafFn; opts: LeafOpts }
   | { tag: 'pipe'; steps: Op[] }
