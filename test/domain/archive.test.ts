@@ -91,6 +91,23 @@ test('gzipExtract fails a gzip bomb instead of decompressing it fully', () => {
   expect(() => gzipExtract(bomb)).toThrow(/bomb guard/)
 })
 
+/** Overwrite the 4-byte uncompressed-size field following every occurrence of a zip record signature. */
+function patchDeclaredSize(zip: Uint8Array, signature: number[], sizeOffset: number, declaredSize: number): void {
+  for (let i = 0; i < zip.length - 4; i++) {
+    if (signature.every((b, j) => zip[i + j] === b)) {
+      new DataView(zip.buffer, zip.byteOffset + i + sizeOffset, 4).setUint32(0, declaredSize, true)
+    }
+  }
+}
+
+test('zipExtract fails a zip bomb that lies about its declared entry size (originalSize is attacker-controlled)', () => {
+  const real = zipSync({ 'big.bin': new Uint8Array(21_000_000).fill(65) }, { level: 9 })
+  const tampered = new Uint8Array(real)
+  patchDeclaredSize(tampered, [0x50, 0x4b, 0x03, 0x04], 22, 10) // local file header uncompressed size
+  patchDeclaredSize(tampered, [0x50, 0x4b, 0x01, 0x02], 24, 10) // central directory uncompressed size
+  expect(() => zipExtract(tampered)).toThrow(/bomb guard/)
+})
+
 test('safeExtractPath rejects absolute paths and directory escapes (zip-slip guard)', () => {
   expect(() => safeExtractPath('/tmp/out', '/etc/passwd')).toThrow(/absolute path/)
   expect(() => safeExtractPath('/tmp/out', '../../etc/passwd')).toThrow(/escapes the extraction directory/)
