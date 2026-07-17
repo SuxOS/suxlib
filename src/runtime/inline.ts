@@ -1,8 +1,9 @@
 import type { Op, Caps } from '../op/types.js'
 import { runReconcile } from '../op/reconcile.js'
+import { runGoverned } from '../control/governor.js'
 export async function runInline(node: Op, input: any, caps: Caps): Promise<any> {
   switch (node.tag) {
-    case 'leaf': return node.fn(input, caps)
+    case 'leaf': return runGoverned(node.name, node.opts, node.fn, input, caps, caps.governors?.[node.name])
     case 'pipe': { let v = input; for (const s of node.steps) v = await runInline(s, v, caps); return v }
     case 'map': {
       const items: any[] = input; const out = new Array(items.length)

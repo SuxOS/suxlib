@@ -122,3 +122,11 @@ There is no linter in this repo. Run both locally before pushing.
   it just silently finds zero entries — so if you touch `unzipGuarded` in
   `src/domain/archive.ts`, keep (or replace with an equivalent) the `unzipSync`
   validation pre-pass that gives corrupt-input callers a real error.
+- Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
+  `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
+  `circuitBreaker` gating for `effect` leaves is configured separately, via
+  `Caps.governors: Record<leafName, Governor>`, not `LeafOpts` — those primitives
+  hold mutable state that must persist and be shared across calls, which
+  per-leaf declarative opts can't express. A future `sux`-side `runDurable`
+  should reuse `runGoverned` (passing a durable `sleep`) rather than
+  reimplementing the retry/gating logic.
