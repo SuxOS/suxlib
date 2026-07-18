@@ -4,7 +4,7 @@ import { PDFDocument } from 'pdf-lib'
 import { buildOp, type OpSpec } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
-import { putBytes, resolveText } from '../../src/handles/handle.js'
+import { putBytes, putText, resolveText } from '../../src/handles/handle.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -104,7 +104,7 @@ test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })
 
-test('buildOp rejects an unsupported tag (e.g. sink/ask/reconcile, which need host capabilities)', () => {
+test('buildOp rejects an unsupported tag (e.g. sink/ask, which need host capabilities)', () => {
   expect(() => buildOp({ tag: 'sink' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "sink"/)
 })
 
@@ -142,4 +142,36 @@ test('wrapHandle/unwrapHandle bridge unzip\'s bare-Handle output into shrink\'s 
   const result = await runInline(tree, zipHandle, { store, ...rest })
   expect(result).toHaveLength(1)
   expect(result[0]).toMatchObject({ type: 'application/pdf' })
+})
+
+test('buildOp builds a working reconcile node, needing only caps.store like every leaf', async () => {
+  const { store, ...rest } = caps()
+  const a = await putText(store, JSON.stringify({ x: 1 }), 'application/json')
+  const b = await putText(store, JSON.stringify({ y: 2 }), 'application/json')
+
+  const spec: OpSpec = { tag: 'reconcile', opts: { mode: 'field-merge' } }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, [a, b], { store, ...rest })
+  expect(JSON.parse(await resolveText(store, result))).toEqual({ x: 1, y: 2 })
+})
+
+test('a pipe can end in reconcile, merging a map\'s fanned-out output back into one handle', async () => {
+  const { store, ...rest } = caps()
+  const zip = zipSync({ 'a.json': new TextEncoder().encode('{"a":1}'), 'b.json': new TextEncoder().encode('{"b":2}') })
+  const zipHandle = await putBytes(store, zip, 'application/zip')
+
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unzip' },
+      { tag: 'reconcile', opts: { mode: 'field-merge' } },
+    ],
+  }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, zipHandle, { store, ...rest })
+  expect(JSON.parse(await resolveText(store, result))).toEqual({ a: 1, b: 2 })
+})
+
+test('buildOp rejects a reconcile spec with an invalid mode', () => {
+  expect(() => buildOp({ tag: 'reconcile', opts: { mode: 'nope' } } as unknown as OpSpec)).toThrow(/opts\.mode/)
 })

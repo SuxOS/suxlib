@@ -134,6 +134,22 @@ describe('cli `archive create` (real CLI entry point)', () => {
     const entry = archiveExtract('zip', new Uint8Array(readFileSync(outPath))).entries.find((e) => e.name === 'in.txt')!
     expect(entry.mtime).toBe(mtime)
   })
+
+  it('rejects a non-numeric --mtime instead of silently packing NaN', async () => {
+    const work = tmpDir()
+    const inPath = join(work, 'in.txt')
+    const outPath = join(work, 'out.zip')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(inPath, 'hello')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'archive', 'create', '-o', outPath, '-m', 'not-a-number', inPath])
+    expect(process.exitCode).toBe(1)
+    expect(existsSync(outPath)).toBe(false)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/--mtime must be a numeric epoch-ms value/i))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
 })
 
 describe('cli `pipeline run` (real CLI entry point)', () => {

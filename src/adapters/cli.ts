@@ -34,6 +34,7 @@ archiveCmd
     const format = opts.format as ArchiveFormat
     if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, or gzip (got '${format}')`)
     const mtimeOverride = opts.mtime !== undefined ? Number(opts.mtime) : undefined
+    if (mtimeOverride !== undefined && Number.isNaN(mtimeOverride)) throw new Error(`--mtime must be a numeric epoch-ms value (got '${opts.mtime}')`)
     const entries = files.map((f) => ({ name: basename(f), data: new Uint8Array(readFileSync(f)), mtime: mtimeOverride ?? statSync(f).mtimeMs }))
     const out = archiveCreate(format, entries)
     writeFileSync(opts.output, out)

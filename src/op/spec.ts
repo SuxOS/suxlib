@@ -1,13 +1,15 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
-import { op, pipe, map } from './combinators.js'
+import { op, pipe, map, reconcile } from './combinators.js'
 import { resolveLeaf } from './registry.js'
 import { fixed } from '../control/aimd.js'
+import type { ReconcileOpts } from './reconcile.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
 export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
+  | { tag: 'reconcile'; opts: ReconcileOpts }
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -40,10 +42,13 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
 /**
  * Builds a real Op tree from a caller-supplied JSON description, resolving
  * every leaf name against the registry -- a spec can never carry a live `fn`,
- * only a name. Deliberately supports just `leaf`/`pipe`/`map`: `reconcile`,
- * `sink`, and `ask` all depend on host-provided capabilities (a sink target,
- * an Ask implementation) that a stateless adapter call has no way to supply,
- * so composing those still requires building an Op tree in-process.
+ * only a name. Supports `leaf`/`pipe`/`map`/`reconcile`: `reconcile` only
+ * touches `caps.store`, which every adapter-triggered run already supplies
+ * (src/runtime/inline.ts's reconcile case), so unlike `sink`/`ask` it needs
+ * no host-provided capability a stateless adapter call can't already give it.
+ * `sink` and `ask` still depend on capabilities (a live sink target, an Ask
+ * implementation) a JSON spec has no way to express, so composing those still
+ * requires building an Op tree in-process.
  */
 export function buildOp(spec: OpSpec): Op {
   if (!spec || typeof spec !== 'object') throw new Error('op spec must be an object')
@@ -74,7 +79,14 @@ export function buildOp(spec: OpSpec): Op {
       }
       return map(buildOp(spec.op), { concurrency: fixed(spec.concurrency) })
     }
+    case 'reconcile': {
+      const mode = spec.opts?.mode
+      if (mode !== 'faithful-union' && mode !== 'last-write-wins' && mode !== 'field-merge') {
+        throw new Error(`reconcile spec's \`opts.mode\` must be one of faithful-union, last-write-wins, field-merge (got '${mode}')`)
+      }
+      return reconcile(spec.opts)
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, reconcile)`)
   }
 }

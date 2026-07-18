@@ -30,6 +30,16 @@ const opSpecLeafOptsSchema = z.object({
   kind: z.enum(['pure', 'effect']).optional(),
 }).optional()
 
+const reconcileOptsSchema = z.union([
+  z.object({ mode: z.literal('faithful-union') }),
+  z.object({ mode: z.literal('last-write-wins') }),
+  z.object({
+    mode: z.literal('field-merge'),
+    defaultPolicy: z.enum(['last-write-wins', 'union', 'keep-first']).optional(),
+    policy: z.record(z.string(), z.enum(['last-write-wins', 'union', 'keep-first'])).optional(),
+  }),
+])
+
 const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   // record(z.unknown()), not a stricter value schema: `params` is shallow-merged
   // as-is onto whatever the piped value is (buildOp/mergeParams, src/op/spec.ts)
@@ -39,6 +49,7 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   z.object({ tag: z.literal('leaf'), name: z.string(), opts: opSpecLeafOptsSchema, params: z.record(z.string(), z.unknown()).optional() }),
   z.object({ tag: z.literal('pipe'), steps: z.array(opSpecSchema).min(1) }),
   z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(32) }),
+  z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
 ]))
 
 export type RegisterFileopsToolsOptions = {

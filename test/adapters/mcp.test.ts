@@ -165,6 +165,21 @@ describe('mcp adapter', () => {
     const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'leaf', name: 'nope' }, input: null } })
     expect(result.isError).toBe(true)
   })
+
+  it('run_pipeline: a `reconcile` spec reaches buildOp through the MCP tool schema, not just HTTP/CLI (unzip -> reconcile field-merge)', async () => {
+    const zipMod = await import('fflate')
+    const zip = zipMod.zipSync({ 'a.json': new TextEncoder().encode('{"a":1}'), 'b.json': new TextEncoder().encode('{"b":2}') })
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'unzip' }, { tag: 'reconcile', opts: { mode: 'field-merge' } }] },
+        input: { $handle: true, base64: bytesToB64(zip), type: 'application/zip' },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { base64: string }
+    expect(JSON.parse(atob(body.base64))).toEqual({ a: 1, b: 2 })
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {
