@@ -1,5 +1,6 @@
 import type { LeafFn } from './types.js'
 import type { Handle } from '../effects/types.js'
+import { stamp as stampHandle } from '../handles/handle.js'
 
 // Reshape leaves: every {handle, ...opts}-shaped leaf (pdf.ts's shrink,
 // sanitize.ts's redact, transform.ts's convert) already agrees on the field
@@ -14,3 +15,13 @@ import type { Handle } from '../effects/types.js'
 export const wrapHandle: LeafFn = async (handle) => ({ handle: handle as Handle })
 
 export const unwrapHandle: LeafFn = async (input) => (input as { handle: Handle }).handle
+
+// stampLeaf: the only way a JSON op spec (src/op/spec.ts) can produce a
+// Handle carrying `producedAt` -- every other registered leaf's
+// putBytes/putText call returns an unstamped Handle, so reconcile.ts's
+// lastWriteWins() always throws for a spec-built tree without this leaf in
+// the pipe ahead of it. Named `stampLeaf`, not `stamp` (CLAUDE.md's
+// leaf-naming convention), since `src/index.ts` re-exports both this module
+// and handle.ts's pure `stamp(h, clock)` -- the registry still registers it
+// under the short leaf name `"stamp"` (src/op/registry.ts).
+export const stampLeaf: LeafFn = async (handle, caps) => stampHandle(handle as Handle, caps.clock)

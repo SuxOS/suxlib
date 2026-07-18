@@ -3,6 +3,11 @@ import { MemoryStore } from '../../src/effects/types.js'
 import { putText } from '../../src/handles/handle.js'
 import { stamp } from '../../src/handles/handle.js'
 import { lastWriteWins } from '../../src/op/reconcile.js'
+import { stampLeaf } from '../../src/op/reshape.js'
+import { op, pipe, map, reconcile } from '../../src/op/combinators.js'
+import { fixed } from '../../src/control/aimd.js'
+import { runInline } from '../../src/runtime/inline.js'
+import type { Caps } from '../../src/op/types.js'
 
 test('lastWriteWins picks the handle with the latest producedAt, regardless of array position', async () => {
   const s = new MemoryStore()
@@ -30,4 +35,19 @@ test('lastWriteWins throws if any handle is unstamped', async () => {
 
 test('lastWriteWins throws on empty input', () => {
   expect(() => lastWriteWins([])).toThrow(/empty/)
+})
+
+test('map(stamp) -> reconcile(last-write-wins) resolves two unstamped branches end to end through the op engine', async () => {
+  const store = new MemoryStore()
+  const early = await putText(store, 'v1')
+  const late = await putText(store, 'v2')
+  let now = 0
+  const caps: Caps = { store, llm: {} as any, clock: { now: () => now++ }, sinks: {} }
+
+  const tree = pipe(
+    map(op('stamp', stampLeaf, { kind: 'effect' }), { concurrency: fixed(1) }),
+    reconcile({ mode: 'last-write-wins' }),
+  )
+  const winner = await runInline(tree, [early, late], caps)
+  expect(winner.r2Key).toBe(late.r2Key)
 })

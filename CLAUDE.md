@@ -256,4 +256,18 @@ There is no linter in this repo. Run both locally before pushing.
   `redact`/`scrub` all wrap their result as `{handle, ...extra}`, but
   `convert` returns a bare `Handle` — so `unwrapHandle` belongs after
   `shrink`/`redact` in a pipe, never after `convert` (it would read a
-  nonexistent `.handle` off the bare Handle and produce `undefined`).
+  nonexistent `.handle` off the bare Handle and produce `undefined`). Update:
+  `src/op/registry.ts`'s `LEAF_SHAPES` (#143) now gives every registered leaf
+  a declared `{input, output}` `LeafShape` (`'handle' | 'handle[]' |
+  'unknown' | {object: Record<string, 'handle'|'unknown'>}`), and
+  `buildOp`'s `pipe` case (`src/op/spec.ts`) walks consecutive steps'
+  shapes, throwing a build-time error instead of letting a mismatch like the
+  `convert` → `unwrapHandle` example above reach `runInline`. A future leaf
+  added to `LEAF_REGISTRY` needs a matching `LEAF_SHAPES` entry too, or its
+  input/output silently degrades to `'unknown'` (always compatible, so a
+  real mismatch involving that leaf won't be caught) — same "add it in two
+  places or it silently no-ops" gotcha as `opSpecSchema` above. This only
+  validates a flat `pipe`'s adjacent leaf/pipe steps; a `map`'s own boundary
+  against its pipe neighbors is always treated as `'unknown'` (element-wise
+  shape isn't expressible yet), though a mismatch *inside* `map`'s inner
+  `op` still gets caught since `buildOp` recurses into it.

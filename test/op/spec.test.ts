@@ -121,6 +121,36 @@ test('buildOp rejects an out-of-range leaf retries', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { retries: 6 } })).toThrow(/retries/)
 })
 
+test('buildOp rejects a pipe chaining convert straight into unwrapHandle (bare Handle output vs {handle} input)', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'wrapHandle' },
+      { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/"unwrapHandle" expects \{handle\}, but "convert" produces a bare Handle/)
+})
+
+test('buildOp rejects a pipe chaining unzip\'s Handle[] output straight into shrink\'s {handle} input', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'unzip' }, { tag: 'leaf', name: 'shrink' }] }
+  expect(() => buildOp(spec)).toThrow(/"shrink" expects \{handle\}, but "unzip" produces a Handle\[\]/)
+})
+
+test('buildOp accepts a pipe chaining redact straight into shrink (both agree on the `handle` field)', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'redact' }, { tag: 'leaf', name: 'shrink' }] }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp does not shape-check across a map boundary (unzip -> map(scrub) stays valid)', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [{ tag: 'leaf', name: 'unzip' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 }],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
 test('wrapHandle/unwrapHandle bridge unzip\'s bare-Handle output into shrink\'s {handle, ...opts} shape and back', async () => {
   const { store, ...rest } = caps()
   const pdfBytes = await (await PDFDocument.create()).save()
