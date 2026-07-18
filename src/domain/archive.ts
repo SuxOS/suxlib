@@ -87,6 +87,13 @@ function gunzipCapped(bytes: Uint8Array): Uint8Array {
 
 // ---------- zip ----------
 
+// DOS date/time (the format zip headers embed mtime in) can't represent
+// anything before 1980, so unlike tarCreate's mtime ?? 0 (a plain Unix
+// timestamp, epoch 0 is valid) zipCreate can't default a missing mtime to 0
+// — fflate throws 'date not in range 1980-2099'. Default to the earliest
+// representable DOS date instead, keeping output deterministic without a caller-supplied mtime.
+const ZIP_EPOCH = Date.UTC(1980, 0, 1)
+
 export function zipCreate(files: ArchiveFile[]): Uint8Array {
   if (!files.length) throw new Error('pack needs at least one file.')
   if (files.length > MAX_ENTRIES) throw new Error(`archive has more than ${MAX_ENTRIES} entries (bomb guard).`)
@@ -101,7 +108,7 @@ export function zipCreate(files: ArchiveFile[]): Uint8Array {
   // "in" hit, so `f.name in record` would falsely report e.g. a file named
   // 'constructor' as a duplicate on its first (only) occurrence. A
   // null-prototype object has no inherited names to collide with.
-  const record: Record<string, Uint8Array> = Object.create(null)
+  const record: Record<string, [Uint8Array, { mtime: number }]> = Object.create(null)
   for (const f of files) {
     // fflate's zipSync (via its internal `fltn` flattening step) keys its own
     // scratch object by entry name and assigns to it directly — for the
@@ -113,7 +120,10 @@ export function zipCreate(files: ArchiveFile[]): Uint8Array {
     // Keying by name means a duplicate would silently overwrite (drop) the
     // earlier entry's data — refuse rather than lose a file.
     if (f.name in record) throw new Error(`duplicate entry name: '${f.name}' — every file in an archive needs a unique name.`)
-    record[f.name] = f.data
+    // fflate defaults a missing mtime to Date.now(), making zipCreate's output
+    // wall-clock-dependent even for byte-identical input; default to
+    // ZIP_EPOCH unless the caller supplied one.
+    record[f.name] = [f.data, { mtime: f.mtime ?? ZIP_EPOCH }]
   }
   return zipSync(record, { level: 6 })
 }
@@ -189,9 +199,12 @@ export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {
 
 // ---------- gzip ----------
 
-export function gzipCreate(data: Uint8Array): Uint8Array {
+export function gzipCreate(data: Uint8Array, mtime = 0): Uint8Array {
   if (data.length > MAX_UNPACK_BYTES) throw new Error(`archive input totals more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
-  return gzipSync(data, { level: 6 })
+  // fflate only omits the header's wall-clock MTIME when mtime is exactly 0
+  // (any other value, including undefined, embeds Date.now()) — default to 0
+  // so gzipCreate(tarCreate(files)) stays fully deterministic end to end.
+  return gzipSync(data, { level: 6, mtime })
 }
 
 export function gzipExtract(bytes: Uint8Array): UnpackedEntry {

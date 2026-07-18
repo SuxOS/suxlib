@@ -131,7 +131,12 @@ There is no linter in this repo. Run both locally before pushing.
   `zipCreate`/`unzipGuarded`'s streaming `Unzip` path) — a name of exactly
   `'__proto__'` must be rejected before it ever reaches `zipSync`, and any future
   codepath calling `unzipSync` directly (not the streaming `Unzip` class) needs the
-  same awareness.
+  same awareness. Also: `zipSync`'s per-entry `mtime` is DOS date/time encoded, which
+  can't represent anything before 1980 — `mtime: 0` throws `'date not in range
+  1980-2099'` (unlike `gzipSync`, where `mtime: 0` is the documented "omit the
+  timestamp" sentinel, and unlike `tarCreate`'s plain-Unix-timestamp `mtime ?? 0`).
+  `zipCreate` defaults to `ZIP_EPOCH` (1980-01-01 UTC) instead, for the same
+  deterministic-output goal.
 - Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
   `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
   `circuitBreaker` gating for `effect` leaves is configured separately, via

@@ -41,6 +41,14 @@ test('zipCreate/zipExtract round-trips text and binary entries', () => {
   expect(raw.text).toBeUndefined()
 })
 
+test('zipCreate is deterministic — two calls with identical input produce byte-identical output', async () => {
+  const files = [{ name: 'hello.txt', data: strToU8('hello world') }]
+  const first = zipCreate(files)
+  await new Promise((r) => setTimeout(r, 5))
+  const second = zipCreate(files)
+  expect(second).toEqual(first)
+})
+
 test('zipCreate rejects duplicate entry names instead of silently dropping one', () => {
   expect(() => zipCreate([{ name: 'a', data: strToU8('1') }, { name: 'a', data: strToU8('2') }])).toThrow(/duplicate entry name/)
 })
@@ -110,6 +118,20 @@ test('gzipCreate/gzipExtract round-trips a single file', () => {
   const packed = gzipCreate(strToU8('gzip me '.repeat(50)))
   const out = gzipExtract(packed)
   expect(out.text).toBe('gzip me '.repeat(50))
+})
+
+test('gzipCreate is deterministic — two calls with identical input produce byte-identical output, including gzipCreate(tarCreate(...))', async () => {
+  const data = strToU8('gzip me '.repeat(50))
+  const first = gzipCreate(data)
+  await new Promise((r) => setTimeout(r, 5))
+  const second = gzipCreate(data)
+  expect(second).toEqual(first)
+
+  const files = [{ name: 'a.txt', data: strToU8('AAA') }]
+  const firstTgz = gzipCreate(tarCreate(files))
+  await new Promise((r) => setTimeout(r, 5))
+  const secondTgz = gzipCreate(tarCreate(files))
+  expect(secondTgz).toEqual(firstTgz)
 })
 
 test('tarCreate/tarExtract round-trips multiple files and reports skipped non-regular entries', () => {
