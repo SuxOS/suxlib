@@ -13,6 +13,8 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { LEAF_REGISTRY } from '../op/registry.js'
 import type { OpSpec } from '../op/spec.js'
+import type { Governor } from '../op/types.js'
+import type { Cache, Store } from '../effects/types.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
@@ -42,6 +44,23 @@ export type RegisterFileopsToolsOptions = {
    * of calling registerFileopsTools unconditionally.
    */
   allow?: string[]
+  /**
+   * Persistent, host-built governors (keyed by leaf name, see
+   * createGovernor in src/control/governor.ts) and/or cache, threaded
+   * through to every run_pipeline call's Caps (op-run.ts's OpRunOpts) so a
+   * spec's leaf opts.retries actually gets breaker/token-bucket/concurrency
+   * gating and opts.memo actually memoizes, instead of both silently
+   * degrading to a no-op. Build these once per server instance, not per
+   * call, so their state (breaker trip counts, bucket levels, cache
+   * entries) persists across run_pipeline invocations. `store` matters for
+   * `cache` specifically: a memoized leaf's cached output frequently embeds
+   * a Handle, only resolvable against the Store it was written to, so
+   * `cache` only survives across calls when `store` is supplied too (see
+   * op-run.ts's OpRunOpts doc comment).
+   */
+  governors?: Record<string, Governor>
+  cache?: Cache
+  store?: Store
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -188,7 +207,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           input: z.unknown(),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input })),
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.governors, cache: opts.cache, store: opts.store })),
     )
   }
 }

@@ -4,9 +4,10 @@ import { pack, unpack, unzip } from '../../src/domain/archive.js'
 import { shrink } from '../../src/domain/pdf.js'
 import { redact, scrub } from '../../src/domain/sanitize.js'
 import { convert } from '../../src/domain/transform.js'
+import { wrapHandle, unwrapHandle } from '../../src/op/reshape.js'
 
 test('LEAF_REGISTRY contains every domain leaf under its wrapper name', () => {
-  expect(LEAF_REGISTRY).toEqual({ pack, unpack, unzip, shrink, redact, scrub, convert })
+  expect(LEAF_REGISTRY).toEqual({ pack, unpack, unzip, shrink, redact, scrub, convert, wrapHandle, unwrapHandle })
 })
 
 test('resolveLeaf returns the exact registered fn for a known name', () => {

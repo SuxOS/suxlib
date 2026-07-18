@@ -7,13 +7,14 @@
 // Store), not bytes -- but an adapter request is JSON in, JSON out. So the
 // caller marks any Handle it wants to seed as input with `{ $handle: true,
 // base64, type? }`; hydrate() walks the input and turns those into real
-// Handles in a fresh per-request MemoryStore before the run. dehydrate() does
-// the reverse to the result, turning any Handle-shaped value it finds back
-// into base64 -- the caller never sees or invents a Store key itself.
+// Handles in a Store before the run (a fresh per-request MemoryStore by
+// default, or opts.store below). dehydrate() does the reverse to the result,
+// turning any Handle-shaped value it finds back into base64 -- the caller
+// never sees or invents a Store key itself.
 
-import type { Handle, Llm } from '../effects/types.js'
+import type { Cache, Handle, Llm, Store } from '../effects/types.js'
 import { MemoryStore } from '../effects/types.js'
-import type { Caps } from '../op/types.js'
+import type { Caps, Governor } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
 import { runInline } from '../runtime/inline.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
@@ -31,7 +32,7 @@ function isResolvedHandle(v: unknown): v is Handle {
   return typeof h.r2Key === 'string' && typeof h.sha256 === 'string' && typeof h.type === 'string' && typeof h.size === 'number'
 }
 
-async function hydrate(store: MemoryStore, value: unknown): Promise<unknown> {
+async function hydrate(store: Store, value: unknown): Promise<unknown> {
   if (isHandleRef(value)) return store.put(b64ToBytes(value.base64), value.type ?? 'application/octet-stream')
   if (Array.isArray(value)) return Promise.all(value.map((v) => hydrate(store, v)))
   if (value && typeof value === 'object') {
@@ -49,7 +50,7 @@ async function hydrate(store: MemoryStore, value: unknown): Promise<unknown> {
   return value
 }
 
-async function dehydrate(store: MemoryStore, value: unknown): Promise<unknown> {
+async function dehydrate(store: Store, value: unknown): Promise<unknown> {
   if (isResolvedHandle(value)) {
     const bytes = await store.get(value)
     return { base64: bytesToB64(bytes), type: value.type, size: value.size }
@@ -70,17 +71,36 @@ const llmUnavailable: Llm = {
 
 export type OpRunRequest = { spec: OpSpec; input: unknown }
 
+// Governors/cache are the one piece of Caps that's meant to persist *across*
+// calls (a breaker/token-bucket/AIMD's state, a memo cache) rather than being
+// rebuilt fresh per request like the default Store below -- so a host that
+// wants opts.retries' breaker/token-bucket/concurrency gating (see
+// governor.ts's `runGoverned`) or opts.memo to do anything beyond a silent
+// no-op supplies them here, keyed by leaf name, and reuses the same
+// map/cache across calls. A memoized leaf's cached output is frequently a
+// Handle (or a value with one nested inside it) -- a claim-check that's only
+// resolvable against the Store instance it was written to -- so opts.cache
+// only actually pays off across calls when opts.store is *also* supplied and
+// reused; with the default fresh-per-call MemoryStore, a cache hit's Handle
+// silently fails to resolve in dehydrate() on any call after the one that
+// produced it.
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store }
+
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
- * from `spec`, hydrates `input` into a fresh MemoryStore, runs it via
- * runInline, and dehydrates the result back to plain JSON. Each call gets its
- * own Store (and so its own governors-free Caps) -- there's no cross-request
- * state, matching the stateless request/response shape of an HTTP route or
- * an MCP tool call.
+ * from `spec`, hydrates `input` into a Store, runs it via runInline, and
+ * dehydrates the result back to plain JSON. Absent `opts.store`, each call
+ * gets its own fresh MemoryStore -- there's no cross-request state for
+ * Handle data, matching the stateless request/response shape of an HTTP
+ * route or an MCP tool call -- but `opts.governors`/`opts.cache`/`opts.store`,
+ * when supplied, are passed straight through, so a host that constructs them
+ * once (e.g. per Worker instance) can share their state across every call
+ * instead of every leaf's retries running ungated and every opts.memo being
+ * a no-op.
  */
-export async function runOpSpec({ spec, input }: OpRunRequest): Promise<unknown> {
-  const store = new MemoryStore()
-  const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks: {} }
+export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
+  const store = opts.store ?? new MemoryStore()
+  const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks: {}, governors: opts.governors, cache: opts.cache }
   const tree = buildOp(spec)
   const hydrated = await hydrate(store, input)
   const result = await runInline(tree, hydrated, caps)

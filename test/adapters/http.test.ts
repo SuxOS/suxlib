@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import handler, { type Env } from '../../src/adapters/http.js'
+import { MemoryCache, MemoryStore } from '../../src/effects/types.js'
 
 function post(path: string, body: unknown, headers: Record<string, string> = {}, env?: Env): Promise<Response> {
   return handler.fetch(
@@ -160,5 +161,21 @@ describe('http adapter', () => {
   it('POST /op/run: a missing `spec` surfaces a 400', async () => {
     const res = await post('op/run', { input: null })
     expect(res.status).toBe(400)
+  })
+
+  it('POST /op/run: env.opCache + env.opStore are reused across calls for a memo leaf', async () => {
+    const cache = new MemoryCache()
+    let puts = 0
+    const originalPut = cache.put.bind(cache)
+    cache.put = async (key: string, value: unknown) => { puts++; return originalPut(key, value) }
+    const env: Env = { opCache: cache, opStore: new MemoryStore() }
+    const body = {
+      spec: { tag: 'leaf', name: 'convert', opts: { memo: true } },
+      input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+    }
+    expect((await post('op/run', body, {}, env)).status).toBe(200)
+    expect(puts).toBe(1)
+    expect((await post('op/run', body, {}, env)).status).toBe(200)
+    expect(puts).toBe(1)
   })
 })

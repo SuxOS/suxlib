@@ -3,6 +3,7 @@ import { zipSync } from 'fflate'
 import { runOpSpec } from '../../src/adapters/op-run.js'
 import { bytesToB64 } from '../../src/adapters/base64.js'
 import type { OpSpec } from '../../src/op/spec.js'
+import { MemoryCache, MemoryStore } from '../../src/effects/types.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -66,4 +67,33 @@ test('runOpSpec: a "__proto__"-keyed input cannot inject an inherited `to` into 
     `{"handle":{"$handle":true,"base64":"${bytesToB64(new TextEncoder().encode('{"a":1}'))}","type":"application/json"},"from":"json","__proto__":{"to":"yaml"}}`,
   )
   await expect(runOpSpec({ spec, input: maliciousInput })).rejects.toThrow(/Unsupported target format/)
+})
+
+test('runOpSpec: a supplied cache is threaded through and populated by a memo leaf (requires a shared store too, since the cached output embeds a Handle)', async () => {
+  const cache = new MemoryCache()
+  const store = new MemoryStore()
+  const spec: OpSpec = { tag: 'leaf', name: 'convert', opts: { memo: true } }
+  const input = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' }
+  let puts = 0
+  const originalPut = cache.put.bind(cache)
+  cache.put = async (key: string, value: unknown) => { puts++; return originalPut(key, value) }
+
+  const first = await runOpSpec({ spec, input }, { cache, store }) as { base64: string }
+  expect(puts).toBe(1)
+  const second = await runOpSpec({ spec, input }, { cache, store }) as { base64: string }
+  // `puts` staying at 1 across both calls is what proves reuse -- the memo
+  // path only ever calls `cache.put` on a miss (control/governor.ts's
+  // runGoverned), so a second `put` would mean the second call missed the
+  // cache instead of reusing what the first call wrote.
+  expect(puts).toBe(1)
+  expect(second).toEqual(first)
+  expect(Buffer.from(second.base64, 'base64').toString('utf8')).toBe('a: 1')
+})
+
+test('runOpSpec: a supplied cache without a shared store fails to resolve the memoized Handle on the second call', async () => {
+  const cache = new MemoryCache()
+  const spec: OpSpec = { tag: 'leaf', name: 'convert', opts: { memo: true } }
+  const input = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' }
+  await runOpSpec({ spec, input }, { cache })
+  await expect(runOpSpec({ spec, input }, { cache })).rejects.toThrow(/handle not found/)
 })

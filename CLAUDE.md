@@ -233,4 +233,17 @@ There is no linter in this repo. Run both locally before pushing.
   op spec (leaf/pipe/map over `src/op/registry.ts`, added for #113) inherits
   this as-is rather than solving it — a caller chaining shape-incompatible
   leaves still needs a reshape step of its own; there's no generic adapter for
-  this yet.
+  this yet. Update: `src/op/reshape.ts`'s `wrapHandle`/`unwrapHandle` (pure,
+  registry-eligible leaves, added for #118) narrow this gap for the common
+  case — `wrapHandle` turns a bare `Handle` into `{handle}` and `unwrapHandle`
+  does the reverse — but they're a fixed-field bridge (always keys on
+  `handle`, matching every existing wrapper's convention), not a general
+  reshape/rename primitive for arbitrary field names.
+- Adapter cache/store coupling gotcha (op-run.ts, added for #119): `runOpSpec`
+  builds a fresh `MemoryStore` per call by default, so passing only
+  `opts.cache` (HTTP's `Env.opCache` / MCP's `registerFileopsTools(opts).cache`)
+  without also passing `opts.store` looks like it works on the first call but
+  throws `handle not found` on the next — a memoized leaf's cached output
+  frequently embeds a `Handle`, which only resolves against the exact Store
+  instance it was written to. Always pass `store` alongside `cache` when
+  wiring persistent caching through an adapter.

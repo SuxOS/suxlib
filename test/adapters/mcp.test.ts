@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { registerFileopsTools } from '../../src/adapters/mcp.js'
+import { MemoryCache, MemoryStore } from '../../src/effects/types.js'
 
 const b64 = (s: string) => btoa(s)
 
@@ -131,6 +132,34 @@ describe('mcp adapter', () => {
   it('run_pipeline: an unknown leaf name surfaces as a tool error, not an uncaught exception', async () => {
     const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'leaf', name: 'nope' }, input: null } })
     expect(result.isError).toBe(true)
+  })
+})
+
+describe('mcp adapter: opts.cache/opts.store threading', () => {
+  it('run_pipeline reuses a host-supplied cache + store across calls for a memo leaf', async () => {
+    const cache = new MemoryCache()
+    const store = new MemoryStore()
+    const cachedServer = new McpServer({ name: 'test-cached', version: '0.0.0' })
+    registerFileopsTools(cachedServer, { cache, store })
+    const cachedClient = new Client({ name: 'test-cached-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([cachedServer.connect(serverTransport), cachedClient.connect(clientTransport)])
+
+    let puts = 0
+    const originalPut = cache.put.bind(cache)
+    cache.put = async (key: string, value: unknown) => { puts++; return originalPut(key, value) }
+
+    const args = {
+      spec: { tag: 'leaf', name: 'convert', opts: { memo: true } },
+      input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+    }
+    await cachedClient.callTool({ name: 'run_pipeline', arguments: args })
+    expect(puts).toBe(1)
+    await cachedClient.callTool({ name: 'run_pipeline', arguments: args })
+    expect(puts).toBe(1)
+
+    await cachedClient.close()
+    await cachedServer.close()
   })
 })
 
