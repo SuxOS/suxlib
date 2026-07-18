@@ -252,4 +252,8 @@ There is no linter in this repo. Run both locally before pushing.
   `http.ts`'s `POST /op/run` passes `body.spec` straight through untyped with
   no such schema. A new `OpSpec` field needs both `buildOp` *and*
   `opSpecSchema` updated together, or it works over HTTP and silently no-ops
-  over MCP.
+  over MCP. Output-shape gotcha, mirroring the input one above: `shrink`/
+  `redact`/`scrub` all wrap their result as `{handle, ...extra}`, but
+  `convert` returns a bare `Handle` — so `unwrapHandle` belongs after
+  `shrink`/`redact` in a pipe, never after `convert` (it would read a
+  nonexistent `.handle` off the bare Handle and produce `undefined`).
