@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { LEAF_REGISTRY, resolveLeaf } from '../../src/op/registry.js'
+import { LEAF_REGISTRY, LEAF_SHAPES, resolveLeaf } from '../../src/op/registry.js'
 import { pack, unpack, unzip } from '../../src/domain/archive.js'
 import { shrink } from '../../src/domain/pdf.js'
 import { redact, scrub } from '../../src/domain/sanitize.js'
@@ -22,4 +22,8 @@ test('resolveLeaf rejects inherited Object.prototype member names instead of res
   for (const name of ['constructor', 'toString', 'hasOwnProperty', 'valueOf', 'isPrototypeOf', 'propertyIsEnumerable', 'toLocaleString']) {
     expect(() => resolveLeaf(name)).toThrow(new RegExp(`unknown leaf "${name}"`))
   }
+})
+
+test('LEAF_SHAPES declares an input/output shape for every LEAF_REGISTRY leaf', () => {
+  expect(Object.keys(LEAF_SHAPES).sort()).toEqual(Object.keys(LEAF_REGISTRY).sort())
 })

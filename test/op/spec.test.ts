@@ -104,8 +104,44 @@ test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })
 
-test('buildOp rejects an unsupported tag (e.g. ask/reconcile, which need host capabilities)', () => {
+test('buildOp rejects an unsupported tag (e.g. ask, which needs a host-provided capability)', () => {
   expect(() => buildOp({ tag: 'ask' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "ask"/)
+})
+
+test('buildOp builds a reconcile node that merges a prior map/unzip step\'s Handle[] via caps.store alone', async () => {
+  const { store, ...rest } = caps()
+  const a = await putBytes(store, new TextEncoder().encode('{"x":1}'), 'application/json')
+  const b = await putBytes(store, new TextEncoder().encode('{"y":2}'), 'application/json')
+  const spec: OpSpec = { tag: 'reconcile', opts: { mode: 'faithful-union' } }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, [a, b], { store, ...rest })
+  expect(await resolveText(store, result)).toContain('"x":1')
+  expect(await resolveText(store, result)).toContain('"y":2')
+})
+
+test('buildOp rejects a reconcile spec with an invalid `opts.mode`', () => {
+  const spec = { tag: 'reconcile', opts: { mode: 'nope' } } as unknown as OpSpec
+  expect(() => buildOp(spec)).toThrow(/opts\.mode/)
+})
+
+test('buildOp rejects a pipe chaining a bare-Handle-producing leaf straight into a leaf expecting {handle} (the #143 motivating example)', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } }, { tag: 'leaf', name: 'unwrapHandle' }] }
+  expect(() => buildOp(spec)).toThrow(/"unwrapHandle"\) expects \{handle\} input, but step 0 \("convert"\) produces handle/)
+})
+
+test('buildOp rejects a pipe chaining an object-producing leaf straight into a leaf expecting a bare Handle', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'shrink' }, { tag: 'leaf', name: 'scrub' }] }
+  expect(() => buildOp(spec)).toThrow(/"scrub"\) expects handle input, but step 0 \("shrink"\) produces \{handle\}/)
+})
+
+test('buildOp accepts unzip -> reconcile directly (Handle[] into reconcile\'s Handle[] input)', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'unzip' }, { tag: 'reconcile', opts: { mode: 'last-write-wins' } }] }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp does not flag pack/unpack\'s non-Handle-typed fields (`files`, `entries`) as a shape mismatch', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'unpack', params: { format: 'zip' } }, { tag: 'leaf', name: 'pack', params: { format: 'zip' } }] }
+  expect(() => buildOp(spec)).not.toThrow()
 })
 
 test('buildOp builds a sink/fanout node whose targets resolve against caps.sinks at run time', async () => {

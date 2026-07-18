@@ -171,6 +171,27 @@ describe('mcp adapter', () => {
     expect(result.isError).toBeFalsy()
     expect(parseResult(result)).toEqual({ a: 1 })
   })
+
+  it('run_pipeline: a reconcile spec merges a Handle[] input via caps.store alone, reachable through the MCP tool schema', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: { tag: 'reconcile', opts: { mode: 'field-merge', defaultPolicy: 'last-write-wins' } },
+        input: [
+          { $handle: true, base64: b64('{"a":1}'), type: 'application/json' },
+          { $handle: true, base64: b64('{"b":2}'), type: 'application/json' },
+        ],
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { base64: string }
+    expect(JSON.parse(atob(body.base64))).toEqual({ a: 1, b: 2 })
+  })
+
+  it('run_pipeline: a reconcile spec with an invalid `opts.mode` surfaces as a tool error, not an uncaught exception', async () => {
+    const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'reconcile', opts: { mode: 'nope' } }, input: [] } })
+    expect(result.isError).toBe(true)
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {

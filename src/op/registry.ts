@@ -30,3 +30,34 @@ export function resolveLeaf(name: string): LeafFn {
   if (!fn) throw new Error(`unknown leaf "${name}" (registered: ${Object.keys(LEAF_REGISTRY).join(', ')})`)
   return fn
 }
+
+/**
+ * Coarse per-leaf input/output shape, keyed by the same name as LEAF_REGISTRY
+ * -- src/op/spec.ts's buildOp walks these across a `pipe`'s consecutive steps
+ * to catch a shape-incompatible chain (CLAUDE.md's "Leaf composability
+ * gotcha") at build time instead of letting it reach `runInline`. Only
+ * describes the "is this a bare Handle, a Handle array, or an object with a
+ * `handle` field" question -- an object shape's non-`'handle'` fields (e.g.
+ * convert's `to`/`from`, pack's `files`) are `'unknown'` rather than
+ * recursively typed, since those are either supplied via a leaf spec's
+ * `params` (never from the previous step's output) or aren't Handle-shaped at
+ * all (pack's `files` is an array of `{name, handle, mtime?}`, not a bare
+ * Handle) -- `'unknown'` is also the shape for pack/unpack's non-Handle-typed
+ * side entirely, deliberately opting them out of the check rather than
+ * guessing.
+ */
+export type LeafShape = 'handle' | 'handle[]' | { object: Record<string, 'handle' | 'unknown'> } | 'unknown'
+
+export const LEAF_SHAPES: Readonly<Record<string, { input: LeafShape; output: LeafShape }>> = Object.freeze(
+  Object.assign(Object.create(null), {
+    pack: { input: { object: { format: 'unknown', files: 'unknown' } }, output: 'handle' },
+    unpack: { input: { object: { format: 'unknown', handle: 'handle' } }, output: 'unknown' },
+    unzip: { input: 'handle', output: 'handle[]' },
+    shrink: { input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } },
+    redact: { input: { object: { handle: 'handle', types: 'unknown' } }, output: { object: { handle: 'handle' } } },
+    scrub: { input: 'handle', output: { object: { handle: 'handle' } } },
+    convert: { input: { object: { handle: 'handle', from: 'unknown', to: 'unknown', delimiter: 'unknown' } }, output: 'handle' },
+    wrapHandle: { input: 'handle', output: { object: { handle: 'handle' } } },
+    unwrapHandle: { input: { object: { handle: 'handle' } }, output: 'handle' },
+  } satisfies Record<string, { input: LeafShape; output: LeafShape }>),
+)

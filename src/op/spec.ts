@@ -1,6 +1,7 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
-import { op, pipe, map, sink } from './combinators.js'
-import { resolveLeaf } from './registry.js'
+import type { ReconcileOpts } from './reconcile.js'
+import { op, pipe, map, sink, reconcile } from './combinators.js'
+import { resolveLeaf, LEAF_SHAPES, type LeafShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
@@ -8,7 +9,34 @@ export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
+  | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'sink'; targets: string[] }
+
+const RECONCILE_MODES = new Set(['faithful-union', 'last-write-wins', 'field-merge'])
+
+/** reconcile always consumes the Handle[] a prior map/unzip step produced and always emits one merged Handle (runReconcile, src/op/reconcile.ts) -- fixed regardless of `opts.mode`. */
+const RECONCILE_SHAPE: { input: LeafShape; output: LeafShape } = { input: 'handle[]', output: 'handle' }
+
+function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
+  if (s.tag === 'leaf') return LEAF_SHAPES[s.name]?.[side] ?? 'unknown'
+  if (s.tag === 'reconcile') return RECONCILE_SHAPE[side]
+  return 'unknown'
+}
+
+function shapeLabel(s: LeafShape): string {
+  if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
+  return `{${Object.keys(s.object).join(', ')}}`
+}
+
+function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
+  if (output === 'unknown' || input === 'unknown') return true
+  if (typeof output === 'string' || typeof input === 'string') return output === input
+  return Object.entries(input.object).every(([k, v]) => v !== 'handle' || output.object[k] === 'handle')
+}
+
+function stepLabel(s: OpSpec): string {
+  return s.tag === 'leaf' ? s.name : s.tag
+}
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -41,14 +69,16 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
 /**
  * Builds a real Op tree from a caller-supplied JSON description, resolving
  * every leaf name against the registry -- a spec can never carry a live `fn`,
- * only a name. Supports `leaf`/`pipe`/`map`/`sink`: a `sink` spec only carries
- * target *names*, resolved against Caps.sinks at run time (runInline's `case
- * 'sink'`) the same way it already works for an in-process caller -- see
- * SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks (../adapters/op-run.ts) for
- * where those names come from. `reconcile` and `ask` still depend on
- * host-provided capabilities (a live Ask implementation; reconcile has no
- * OpSpec variant yet) that a stateless adapter call has no way to supply, so
- * composing those still requires building an Op tree in-process.
+ * only a name. Supports `leaf`/`pipe`/`map`/`reconcile`/`sink`: a `sink` spec
+ * only carries target *names*, resolved against Caps.sinks at run time
+ * (runInline's `case 'sink'`) the same way it already works for an in-process
+ * caller -- see SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks
+ * (../adapters/op-run.ts) for where those names come from. `reconcile`'s opts
+ * (src/op/reconcile.ts) are plain JSON and it only touches `caps.store`,
+ * which every adapter call already supplies, so it needs no such indirection.
+ * `ask` still depends on a live host-provided Ask implementation that a
+ * stateless adapter call has no way to supply, so composing that still
+ * requires building an Op tree in-process.
  */
 export function buildOp(spec: OpSpec): Op {
   if (!spec || typeof spec !== 'object') throw new Error('op spec must be an object')
@@ -70,6 +100,16 @@ export function buildOp(spec: OpSpec): Op {
     }
     case 'pipe': {
       if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('pipe spec requires a non-empty `steps` array')
+      for (let i = 0; i + 1 < spec.steps.length; i++) {
+        const prev = spec.steps[i]; const next = spec.steps[i + 1]
+        const output = stepShape(prev, 'output'); const input = stepShape(next, 'input')
+        if (!shapeCompatible(output, input)) {
+          throw new Error(
+            `pipe step ${i + 1} ("${stepLabel(next)}") expects ${shapeLabel(input)} input, but step ${i} ` +
+            `("${stepLabel(prev)}") produces ${shapeLabel(output)}`,
+          )
+        }
+      }
       return pipe(...spec.steps.map(buildOp))
     }
     case 'map': {
@@ -79,6 +119,12 @@ export function buildOp(spec: OpSpec): Op {
       }
       return map(buildOp(spec.op), { concurrency: fixed(spec.concurrency) })
     }
+    case 'reconcile': {
+      if (!spec.opts || typeof spec.opts !== 'object' || !RECONCILE_MODES.has(spec.opts.mode)) {
+        throw new Error(`reconcile spec's \`opts.mode\` must be one of: ${[...RECONCILE_MODES].join(', ')}`)
+      }
+      return reconcile(spec.opts)
+    }
     case 'sink': {
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
         throw new Error('sink spec requires a non-empty `targets` array of non-empty strings')
@@ -86,6 +132,6 @@ export function buildOp(spec: OpSpec): Op {
       return sink.fanout(...spec.targets)
     }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, sink)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, reconcile, sink)`)
   }
 }
