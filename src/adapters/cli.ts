@@ -11,12 +11,21 @@ import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_F
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, type Format } from '../domain/transform.js'
-import { runOpSpec } from './op-run.js'
+import { runOpSpec, type OpRunOpts } from './op-run.js'
 import { LEAF_REGISTRY } from '../op/registry.js'
 import type { OpSpec } from '../op/spec.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 const program = new Command()
+
+// Set by main() before parsing, read by the `pipeline run` action below.
+// commander's .action() closures are built once at module load time, before
+// main()'s caller has a chance to supply anything -- a module-level slot is
+// how a programmatic caller of main() (unlike bin/fileops.mjs, which has no
+// way to construct a live Llm/Store/Cache object from argv) hands runOpSpec
+// the same host-configurable capabilities HTTP's Env / MCP's
+// RegisterFileopsToolsOptions already offer.
+let cliOpRunOpts: OpRunOpts = {}
 program.name('suxlib-fileops').description('Shared file-ops CLI: archive, sanitize, transform, pdf-shrink').version('0.0.0')
 
 // ---------- archive ----------
@@ -33,7 +42,11 @@ archiveCmd
   .action((files: string[], opts: { output: string; format: string; mtime?: string }) => {
     const format = opts.format as ArchiveFormat
     if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, or gzip (got '${format}')`)
-    const mtimeOverride = opts.mtime !== undefined ? Number(opts.mtime) : undefined
+    let mtimeOverride: number | undefined
+    if (opts.mtime !== undefined) {
+      mtimeOverride = Number(opts.mtime)
+      if (Number.isNaN(mtimeOverride)) throw new Error(`--mtime must be a numeric epoch-ms value (got '${opts.mtime}')`)
+    }
     const entries = files.map((f) => ({ name: basename(f), data: new Uint8Array(readFileSync(f)), mtime: mtimeOverride ?? statSync(f).mtimeMs }))
     const out = archiveCreate(format, entries)
     writeFileSync(opts.output, out)
@@ -253,7 +266,7 @@ pipelineCmd
     const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown; input?: unknown }
     if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
     const input = resolveFileRefs(parsed.input, dirname(resolve(specFile)))
-    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input })
+    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input }, cliOpRunOpts)
     if (opts.output) {
       const files: Array<{ name: string; bytes: Uint8Array }> = []
       const shaped = extractHandleFiles(result, files)
@@ -272,8 +285,13 @@ pipelineCmd
 export const transform = dispatchTransform
 
 /** Entry point called by bin/fileops.mjs. Kept separate from module load so
- * importing `transform` (e.g. from tests) never triggers argv parsing. */
-export async function main(argv: string[] = process.argv): Promise<void> {
+ * importing `transform` (e.g. from tests) never triggers argv parsing.
+ * `opRunOpts` lets a programmatic caller (not the bin script, which has no
+ * way to construct a live JS object from argv) supply `pipeline run` the
+ * same host-configurable governors/cache/store/sinks/llm HTTP's Env and
+ * MCP's RegisterFileopsToolsOptions already offer runOpSpec. */
+export async function main(argv: string[] = process.argv, opRunOpts: OpRunOpts = {}): Promise<void> {
+  cliOpRunOpts = opRunOpts
   try {
     await program.parseAsync(argv)
   } catch (e) {

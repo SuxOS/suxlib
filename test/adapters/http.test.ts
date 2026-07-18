@@ -200,4 +200,19 @@ describe('http adapter', () => {
     await post('op/run', body, {}, env)
     expect(puts).toBe(1)
   })
+
+  it('POST /op/run: summarize throws with no env.opRunLlm supplied', async () => {
+    const res = await post('op/run', { spec: { tag: 'leaf', name: 'summarize' }, input: { $handle: true, base64: b64('the full text') } })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/llm capability is not available/)
+  })
+
+  it('POST /op/run: env.opRunLlm wires a real Llm capability through to the summarize leaf', async () => {
+    const env: Env = { opRunLlm: { markdownFromPdf: async () => { throw new Error('unused') }, summarize: async (text) => `summary of ${text}` } }
+    const res = await post('op/run', { spec: { tag: 'leaf', name: 'summarize' }, input: { $handle: true, base64: b64('the full text') } }, {}, env)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: { abstract: string } }
+    expect(body.result.abstract).toBe('summary of the full text')
+  })
 })

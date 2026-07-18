@@ -208,6 +208,15 @@ There is no linter in this repo. Run both locally before pushing.
   Handle — no extra validation beyond what the pure function already does.
   `unzip` itself stays untouched (zip-only, exact signature already depended on
   by `sux`'s tracer-bullet op tree) rather than being folded into `unpack`.
+  The same collision can happen *across* two different modules, not just
+  within one: `src/index.ts`'s `export *` barrel re-exports every top-level
+  module, so a new module whose export shares a name already used elsewhere
+  in the barrel (e.g. `src/op/reshape.ts`'s `stamp` leaf colliding with
+  `src/handles/handle.ts`'s raw `stamp(h, clock)` helper, #142/#133) fails
+  only `npm run build` (`tsc`'s "already exported a member" error) — `npm
+  test` stays green, since vitest doesn't type-check the barrel — so always
+  run both gates, and grep `src/index.ts`'s re-exported modules for an
+  existing same-named export before picking a new leaf/helper's name.
 - Memoization convention: `LeafOpts.memo` (opt-in per leaf, independent of
   `kind`/`heavy`) makes `runGoverned` (`src/control/governor.ts`) check
   `caps.cache` for a prior result — keyed by `memoKey(name, input)`
