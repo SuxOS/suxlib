@@ -9,6 +9,8 @@ import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
+import { runOpSpec } from './op-run.js'
+import type { OpSpec } from '../op/spec.js'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
@@ -182,6 +184,16 @@ const routes: Route[] = [
       }
       const out = dispatchTransform(body.data, from as Format | 'auto', body.to as Format, body.delimiter)
       return json({ data: out })
+    },
+  },
+  {
+    method: 'POST',
+    path: '/op/run',
+    handle: async (rawBody) => {
+      const body = rawBody as { spec?: unknown; input?: unknown }
+      if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
+      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input })
+      return json({ result })
     },
   },
 ]

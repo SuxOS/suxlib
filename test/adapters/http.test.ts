@@ -131,4 +131,25 @@ describe('http adapter', () => {
     expect((await post('transform', { data: '{"a":1}', to: 'yaml' }, { authorization: 'Bearer wrong' }, env)).status).toBe(401)
     expect((await post('transform', { data: '{"a":1}', to: 'yaml' }, { authorization: 'Bearer s3cret' }, env)).status).toBe(200)
   })
+
+  it('POST /op/run: happy path runs a single-leaf `convert` spec via the op engine', async () => {
+    const res = await post('op/run', {
+      spec: { tag: 'leaf', name: 'convert' },
+      input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: { base64: string } }
+    expect(atob(body.result.base64)).toBe('a: 1')
+  })
+
+  it('POST /op/run: an unknown leaf name in the spec surfaces a 400, not a 500', async () => {
+    const res = await post('op/run', { spec: { tag: 'leaf', name: 'nope' }, input: null })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toMatch(/unknown leaf "nope"/)
+  })
+
+  it('POST /op/run: a missing `spec` surfaces a 400', async () => {
+    const res = await post('op/run', { input: null })
+    expect(res.status).toBe(400)
+  })
 })
