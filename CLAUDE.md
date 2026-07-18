@@ -89,7 +89,15 @@ There is no linter in this repo. Run both locally before pushing.
   <path>`) to turn a from-scratch design task into a verify-and-adapt one. Don't
   merge/cherry-pick it wholesale though — it may predate a feature that's since
   landed on `main` (see #143/#162), so reimplement against current `main` using
-  it as a reference, not a patch.
+  it as a reference, not a patch. When several sibling stale branches exist for
+  the same issue (multiple prior batches each attempted it independently),
+  they can diverge in actual design/naming — and a since-filed follow-up issue
+  for the "next increment" may describe function/line details from a sibling
+  attempt that wasn't the one ultimately merged (#143's own follow-ups, #145
+  and #161, cite a `validatePipeShapes` name/lines that don't match the
+  `shapeCompatible`/`stepShape` implementation that actually landed from a
+  different sibling branch) — verify a follow-up issue's cited names/lines
+  against current code rather than trusting them verbatim.
 
 ## Consumers
 
