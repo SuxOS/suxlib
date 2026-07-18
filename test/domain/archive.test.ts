@@ -275,6 +275,14 @@ test('pack/unpack round-trip files through Handles, for any archive format', asy
   }
 })
 
+test('unpack surfaces each entry mtime on the LeafFn result, not just archiveExtract', async () => {
+  const store = new MemoryStore()
+  const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime: 12345 }])
+  const archiveHandle = await putBytes(store, packed, 'application/x-tar')
+  const { entries } = await unpack({ format: 'tar', handle: archiveHandle }, { store } as any)
+  expect(entries[0].mtime).toBe(12345)
+})
+
 test('pack honors an explicit per-file mtime for the gzip format (threaded through to archiveCreate)', async () => {
   const store = new MemoryStore()
   const h = await putBytes(store, strToU8('AAA'), 'text/plain')
