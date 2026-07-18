@@ -1,5 +1,5 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
-import { op, pipe, map } from './combinators.js'
+import { op, pipe, map, sink } from './combinators.js'
 import { resolveLeaf } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
@@ -8,6 +8,7 @@ export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
+  | { tag: 'sink'; targets: string[] }
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -40,10 +41,14 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
 /**
  * Builds a real Op tree from a caller-supplied JSON description, resolving
  * every leaf name against the registry -- a spec can never carry a live `fn`,
- * only a name. Deliberately supports just `leaf`/`pipe`/`map`: `reconcile`,
- * `sink`, and `ask` all depend on host-provided capabilities (a sink target,
- * an Ask implementation) that a stateless adapter call has no way to supply,
- * so composing those still requires building an Op tree in-process.
+ * only a name. Supports `leaf`/`pipe`/`map`/`sink`: a `sink` spec only carries
+ * target *names*, resolved against Caps.sinks at run time (runInline's `case
+ * 'sink'`) the same way it already works for an in-process caller -- see
+ * SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks (../adapters/op-run.ts) for
+ * where those names come from. `reconcile` and `ask` still depend on
+ * host-provided capabilities (a live Ask implementation; reconcile has no
+ * OpSpec variant yet) that a stateless adapter call has no way to supply, so
+ * composing those still requires building an Op tree in-process.
  */
 export function buildOp(spec: OpSpec): Op {
   if (!spec || typeof spec !== 'object') throw new Error('op spec must be an object')
@@ -74,7 +79,13 @@ export function buildOp(spec: OpSpec): Op {
       }
       return map(buildOp(spec.op), { concurrency: fixed(spec.concurrency) })
     }
+    case 'sink': {
+      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
+        throw new Error('sink spec requires a non-empty `targets` array of non-empty strings')
+      }
+      return sink.fanout(...spec.targets)
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, sink)`)
   }
 }

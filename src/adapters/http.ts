@@ -11,7 +11,7 @@ import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/tra
 import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import type { OpSpec } from '../op/spec.js'
-import type { Governor } from '../op/types.js'
+import type { Governor, SinkTarget } from '../op/types.js'
 import type { Cache, Store } from '../effects/types.js'
 
 function json(data: unknown, status = 200): Response {
@@ -38,7 +38,11 @@ function errorResponse(e: unknown, status = 400): Response {
 // host policy choice. Supplying opRunCache without opRunStore is a footgun
 // (see op-run.ts's OpRunOpts doc) -- a memoized leaf's Handle-shaped result
 // won't resolve against a fresh per-request MemoryStore on a later cache hit.
-export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store }
+//
+// opRunSinks: host-supplied SinkTarget instances a spec's `sink`/
+// `sink.fanout` targets can name, merged alongside op/sinks.ts's built-in
+// `store` target. Omitted entirely still leaves `store` reachable.
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget> }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -205,7 +209,7 @@ const routes: Route[] = [
     handle: async (rawBody, env) => {
       const body = rawBody as { spec?: unknown; input?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore })
+      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks })
       return json({ result })
     },
   },

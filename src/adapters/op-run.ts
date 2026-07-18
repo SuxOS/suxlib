@@ -15,8 +15,9 @@
 
 import type { Handle, Llm, Cache, Store } from '../effects/types.js'
 import { MemoryStore } from '../effects/types.js'
-import type { Caps, Governor } from '../op/types.js'
+import type { Caps, Governor, SinkTarget } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
+import { SINK_REGISTRY } from '../op/sinks.js'
 import { runInline } from '../runtime/inline.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
@@ -107,8 +108,15 @@ export type OpRunRequest = { spec: OpSpec; input: unknown }
  * per-call MemoryStore will throw ("handle not found") the moment the result
  * is dehydrated, not silently misbehave. Pass the same `store` alongside
  * `cache` (both long-lived) for cross-call memoization to actually work.
+ *
+ * `sinks`: host-supplied SinkTarget instances (a log, a queue, a second
+ * store), merged alongside SINK_REGISTRY's built-in `store` target -- a spec
+ * name matching a key here wins over SINK_REGISTRY, letting a host override
+ * `store` too if it wants different re-put semantics. Omitted entirely still
+ * leaves the built-in `store` target reachable, unlike governors/cache which
+ * are pure no-ops when omitted.
  */
-export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget> }
 
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
@@ -123,7 +131,8 @@ export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; s
  */
 export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
   const store = opts.store ?? new MemoryStore()
-  const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks: {}, governors: opts.governors, cache: opts.cache }
+  const sinks = Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks) as Record<string, SinkTarget>
+  const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache }
   const tree = buildOp(spec)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
   const result = await runInline(tree, hydrated, caps)

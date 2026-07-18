@@ -165,6 +165,12 @@ describe('mcp adapter', () => {
     const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'leaf', name: 'nope' }, input: null } })
     expect(result.isError).toBe(true)
   })
+
+  it('run_pipeline: a sink spec resolves the built-in `store` target with no host wiring required, echoing the piped value through', async () => {
+    const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'sink', targets: ['store'] }, input: { a: 1 } } })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ a: 1 })
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {
@@ -213,5 +219,21 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
 
     await cachedClient.close()
     await cachedServer.close()
+  })
+
+  it('run_pipeline: opts.opRunSinks registers a host-supplied sink target', async () => {
+    const written: unknown[] = []
+    const sinkServer = new McpServer({ name: 'test-sinks', version: '0.0.0' })
+    registerFileopsTools(sinkServer, { opRunSinks: { log: { name: 'log', write: async (v) => { written.push(v); return v } } } })
+    const sinkClient = new Client({ name: 'test-sinks-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([sinkServer.connect(serverTransport), sinkClient.connect(clientTransport)])
+
+    const result = await sinkClient.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'sink', targets: ['log'] }, input: { a: 1 } } })
+    expect(result.isError).toBeFalsy()
+    expect(written).toEqual([{ a: 1 }])
+
+    await sinkClient.close()
+    await sinkServer.close()
   })
 })

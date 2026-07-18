@@ -12,8 +12,9 @@ import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/tra
 import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { LEAF_REGISTRY } from '../op/registry.js'
+import { SINK_REGISTRY } from '../op/sinks.js'
 import type { OpSpec } from '../op/spec.js'
-import type { Governor } from '../op/types.js'
+import type { Governor, SinkTarget } from '../op/types.js'
 import type { Cache, Store } from '../effects/types.js'
 
 function textResult(obj: unknown) {
@@ -39,6 +40,7 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   z.object({ tag: z.literal('leaf'), name: z.string(), opts: opSpecLeafOptsSchema, params: z.record(z.string(), z.unknown()).optional() }),
   z.object({ tag: z.literal('pipe'), steps: z.array(opSpecSchema).min(1) }),
   z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(32) }),
+  z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1) }),
 ]))
 
 export type RegisterFileopsToolsOptions = {
@@ -64,6 +66,15 @@ export type RegisterFileopsToolsOptions = {
   opRunGovernors?: Record<string, Governor>
   opRunCache?: Cache
   opRunStore?: Store
+  /**
+   * Host-supplied SinkTarget instances a `run_pipeline` spec's `sink`/
+   * `sink.fanout` targets can name, merged alongside SINK_REGISTRY's
+   * built-in `store` target (op/sinks.ts). Omitted entirely still leaves
+   * `store` reachable — `sink`/`ask`/`reconcile` used to be 100% dead weight
+   * from every adapter's perspective (#147); this is what makes the `sink`
+   * half of that reachable over MCP.
+   */
+  opRunSinks?: Record<string, SinkTarget>
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -202,15 +213,16 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
       'run_pipeline',
       {
         description:
-          `Run a JSON-described op-tree pipeline (leaf/pipe/map) over the op engine's registered leaves ` +
-          `(${Object.keys(LEAF_REGISTRY).join(', ')}), instead of calling one tool per step. ` +
+          `Run a JSON-described op-tree pipeline (leaf/pipe/map/sink) over the op engine's registered leaves ` +
+          `(${Object.keys(LEAF_REGISTRY).join(', ')}) and sink targets (${Object.keys(SINK_REGISTRY).join(', ')}), ` +
+          `instead of calling one tool per step. ` +
           `Handle-shaped values in \`input\`/the result are marshalled as { $handle: true, base64, type } / { base64, type, size }.`,
         inputSchema: {
           spec: opSpecSchema,
           input: z.unknown(),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore })),
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks })),
     )
   }
 }
