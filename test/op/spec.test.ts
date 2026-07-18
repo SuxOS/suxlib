@@ -220,6 +220,42 @@ test('buildOp\'s `extraLeaves` lets a host-registered leaf shadow a built-in nam
   expect(result).toEqual({ overridden: true })
 })
 
+test('buildOp rejects a pipe step whose declared shape mismatches the previous step\'s output (unwrapHandle straight after convert, #132)', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } }, { tag: 'leaf', name: 'unwrapHandle' }] }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("convert"\) produces handle/)
+})
+
+test('buildOp rejects a pipe step whose declared shape mismatches deep inside a nested pipe (e.g. inside a map\'s inner op)', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unzip' },
+      {
+        tag: 'map',
+        op: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } }, { tag: 'leaf', name: 'unwrapHandle' }] },
+        concurrency: 2,
+      },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("convert"\) produces handle/)
+})
+
+test('buildOp allows a pipe step next to a host-registered extraLeaves leaf, treating its undeclared shape as compatible with anything', async () => {
+  // `shout` has no LEAF_SHAPES entry (only built-in registry leaves do), so
+  // its output reads as 'unknown' and is permissively compatible with
+  // unwrapHandle's {handle} input -- buildOp doesn't throw. The mismatch
+  // (shout's output has no `handle` field) only surfaces at run time -- as a
+  // real error, not silently, since unwrapHandle itself throws on a missing
+  // `handle` field (#159) -- same as any leaf pairing this shape scheme can't
+  // represent at build time.
+  const { store, ...rest } = caps()
+  const handle = await putBytes(store, new TextEncoder().encode('hi'), 'text/plain')
+  const shout: (input: unknown) => Promise<unknown> = async (input) => ({ shouted: input })
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'shout' }, { tag: 'leaf', name: 'unwrapHandle' }] }
+  const tree = buildOp(spec, { shout })
+  await expect(runInline(tree, handle, { store, ...rest })).rejects.toThrow(/unwrapHandle: input has no `handle` field/)
+})
+
 test('wrapHandle/unwrapHandle bridge unzip\'s bare-Handle output into shrink\'s {handle, ...opts} shape and back', async () => {
   const { store, ...rest } = caps()
   const pdfBytes = await (await PDFDocument.create()).save()

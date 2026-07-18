@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { zipSync } from 'fflate'
 import { archiveCreate } from '../../src/domain/archive.js'
-import { extractArchiveTo, main, transform } from '../../src/adapters/cli.js'
+import { extractArchiveTo, main, pipelineRunCmd, transform } from '../../src/adapters/cli.js'
 
 // extractArchiveTo exercises the CLI's actual filesystem-writing extract path —
 // the real attack surface the zip-slip guard protects, as opposed to
@@ -293,6 +293,21 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { shouted: { a: number } }
     expect(printed.shouted).toEqual({ a: 1 })
     logSpy.mockRestore()
+  })
+
+  it('main() refreshes `pipeline run`\'s description with opRunOpts.leaves-registered leaf names (#158)', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 } }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(
+      ['node', 'suxlib-fileops', 'pipeline', 'run', specPath],
+      { leaves: { shout: async (input) => input } },
+    )
+    logSpy.mockRestore()
+    expect(pipelineRunCmd.description()).toContain('shout')
+    expect(pipelineRunCmd.description()).toContain('convert')
   })
 
   it('--config surfaces a module with no default export as a clean error', async () => {
