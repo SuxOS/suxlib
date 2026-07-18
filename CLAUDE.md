@@ -81,6 +81,15 @@ There is no linter in this repo. Run both locally before pushing.
 - **Self-isolate work in a git worktree**: `git worktree add .scratch-worktrees/<slug>
   -b <type>/<slug>` — don't work directly on a checked-out branch that another
   session/task might also be touching.
+- **Before reimplementing a requeued issue, check for a stale closed-PR builder
+  branch**: a prior attempt's branch (`git fetch origin
+  bot/issue-build-<run-id>`, findable via the issue's own comment history/linked
+  PRs) can still exist even after its PR was closed without merging — diff it
+  against current `main` for the relevant path (`git diff main <branch> --
+  <path>`) to turn a from-scratch design task into a verify-and-adapt one. Don't
+  merge/cherry-pick it wholesale though — it may predate a feature that's since
+  landed on `main` (see #143/#162), so reimplement against current `main` using
+  it as a reference, not a patch.
 
 ## Consumers
 
