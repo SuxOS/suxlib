@@ -356,15 +356,36 @@ function xmlName(key: string): string {
   return /^[A-Za-z_]/.test(safe) ? safe : `_${safe}`
 }
 
-function attach(node: Record<string, unknown>, name: string, child: unknown) {
+// attach()'s default promote-on-repeat heuristic (below) infers "already
+// promoted to an array" purely from `Array.isArray(cur)` — which breaks the
+// moment a *value itself* is an array (a single-array or nested-array child),
+// since a lone occurrence's value looks identical to an already-promoted
+// multi-occurrence accumulator. forceArrayKeys tracks, per parent node, which
+// keys must always accumulate (rather than ever being inferred), so repeated
+// array-valued siblings (see wrapNestedArray) don't get misread as a single
+// promoted array and swallow later siblings into a wrong shape.
+const forceArrayKeys = new WeakMap<object, Set<string>>()
+
+function attach(node: Record<string, unknown>, name: string, child: unknown, forceArray = false) {
   // node[name] = ... on "__proto__" invokes the Object.prototype setter and
   // repoints node's prototype to attacker-controlled XML content.
   if (name === '__proto__' || name === 'constructor' || name === 'prototype') return
+  const forced = forceArrayKeys.get(node)
+  if (forced?.has(name)) {
+    ;(node[name] as unknown[]).push(child)
+    return
+  }
   if (Object.prototype.hasOwnProperty.call(node, name)) {
     const cur = node[name]
     if (Array.isArray(cur)) cur.push(child)
     else node[name] = [cur, child]
-  } else node[name] = child
+  } else if (forceArray) {
+    node[name] = [child]
+    if (forced) forced.add(name)
+    else forceArrayKeys.set(node, new Set([name]))
+  } else {
+    node[name] = child
+  }
 }
 function collapse(node: Record<string, unknown>): unknown {
   const keys = Object.keys(node)
@@ -392,6 +413,19 @@ const SINGLE_ARRAY_ATTR = 'single-array'
 // same self-closing `<tag/>`, so parseXml can't tell them apart and always
 // decodes the tag back to ''. See issue #79.
 const NULL_VALUE_ATTR = 'null-value'
+
+// Marker attribute `toXml` emits on an array element that is itself an array
+// (array-of-arrays) — without it, `{a: [[1,2],[3,4]]}` recurses into the inner
+// arrays using the *same* tag as the outer array, rendering byte-identical to
+// (and round-tripping as) the fully flattened `{a: [1,2,3,4]}`. The marked
+// element's children all use ARRAY_ITEM_TAG rather than the outer array's own
+// tag, so parseXml can rebuild the inner array without it being mistaken for
+// more siblings of the outer array. See issue #105.
+const NESTED_ARRAY_ATTR = 'nested-array'
+
+// Fixed child tag `wrapNestedArray` renders a nested array's own elements
+// under, keeping them distinct from the outer array's repeated tag name.
+const ARRAY_ITEM_TAG = 'item'
 
 function tagEnd(s: string, lt: number): number {
   let quote = ''
@@ -438,8 +472,10 @@ export function parseXml(xml: string): unknown {
       names.pop()
       const isSingleArray = finished['@' + SINGLE_ARRAY_ATTR] === 'true'
       if (isSingleArray) delete finished['@' + SINGLE_ARRAY_ATTR]
-      const value = collapse(finished)
-      attach(nodes[nodes.length - 1], expected, isSingleArray ? [value] : value)
+      const isNestedArray = finished['@' + NESTED_ARRAY_ATTR] === 'true'
+      if (isNestedArray) delete finished['@' + NESTED_ARRAY_ATTR]
+      const value = isNestedArray ? (finished[ARRAY_ITEM_TAG] ?? []) : collapse(finished)
+      attach(nodes[nodes.length - 1], expected, value, isSingleArray || isNestedArray)
       pos = gt + 1
       continue
     }
@@ -456,10 +492,12 @@ export function parseXml(xml: string): unknown {
     if (selfClose) {
       const isSingleArray = node['@' + SINGLE_ARRAY_ATTR] === 'true'
       if (isSingleArray) delete node['@' + SINGLE_ARRAY_ATTR]
+      const isNestedArray = node['@' + NESTED_ARRAY_ATTR] === 'true'
+      if (isNestedArray) delete node['@' + NESTED_ARRAY_ATTR]
       const isEmptyArray = Object.keys(node).length === 1 && node['@' + EMPTY_ARRAY_ATTR] === 'true'
       const isNullValue = Object.keys(node).length === 1 && node['@' + NULL_VALUE_ATTR] === 'true'
       const value = isEmptyArray ? [] : isNullValue ? null : Object.keys(node).length ? node : ''
-      attach(nodes[nodes.length - 1], name, isSingleArray ? [value] : value)
+      attach(nodes[nodes.length - 1], name, value, isSingleArray || isNestedArray)
     } else {
       nodes.push(node)
       names.push(name)
@@ -480,13 +518,27 @@ function markSingleArray(xml: string, tag: string): string {
   return xml.startsWith(prefix) ? `${prefix} ${SINGLE_ARRAY_ATTR}="true"${xml.slice(prefix.length)}` : xml
 }
 
+// Renders an array-of-arrays element (`v` is itself an array) under the outer
+// array's own tag, marked with NESTED_ARRAY_ATTR so parseXml treats the whole
+// element as one array-typed sibling instead of flattening its children in
+// with the outer array's. `v`'s own elements render under ARRAY_ITEM_TAG
+// (delegated to toXml, which already handles v's own length-0/1/N cases)
+// rather than the outer tag, so they can't be confused with more outer
+// siblings during decode.
+function wrapNestedArray(v: unknown[], tag: string, depth: number): string {
+  if (!v.length) return `<${tag} ${NESTED_ARRAY_ATTR}="true" ${EMPTY_ARRAY_ATTR}="true"/>`
+  return `<${tag} ${NESTED_ARRAY_ATTR}="true">${toXml(v, ARRAY_ITEM_TAG, depth + 1)}</${tag}>`
+}
+
 export function toXml(obj: unknown, name?: string, depth = 0): string {
   if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
   if (obj === null || obj === undefined) return name ? `<${xmlName(name)} ${NULL_VALUE_ATTR}="true"/>` : ''
   if (Array.isArray(obj)) {
     if (!obj.length) return name ? `<${xmlName(name)} ${EMPTY_ARRAY_ATTR}="true"/>` : ''
-    if (obj.length === 1 && name) return markSingleArray(toXml(obj[0], name, depth + 1), xmlName(name))
-    return obj.map((v) => toXml(v, name, depth + 1)).join('')
+    if (!name) return obj.map((v) => toXml(v, name, depth + 1)).join('')
+    const tag = xmlName(name)
+    const rendered = obj.map((v) => (Array.isArray(v) ? wrapNestedArray(v, tag, depth) : toXml(v, name, depth + 1)))
+    return obj.length === 1 ? markSingleArray(rendered[0], tag) : rendered.join('')
   }
   if (typeof obj === 'object') {
     const entries = Object.entries(obj as Record<string, unknown>)
