@@ -31,7 +31,7 @@ describe('mcp adapter', () => {
 
   it('lists the expected tools', async () => {
     const { tools } = await client.listTools()
-    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform'].sort())
+    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline'].sort())
   })
 
   it('transform: happy path json -> yaml', async () => {
@@ -113,6 +113,24 @@ describe('mcp adapter', () => {
     expect(result.isError).toBe(true)
     const content = result.content as Array<{ type: string; text?: string }>
     expect(content?.[0]?.text).toMatch(/bomb guard/)
+  })
+
+  it('run_pipeline: happy path runs a single-leaf `convert` spec via the op engine', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: { tag: 'leaf', name: 'convert' },
+        input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { base64: string }
+    expect(atob(body.base64)).toBe('a: 1')
+  })
+
+  it('run_pipeline: an unknown leaf name surfaces as a tool error, not an uncaught exception', async () => {
+    const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'leaf', name: 'nope' }, input: null } })
+    expect(result.isError).toBe(true)
   })
 })
 

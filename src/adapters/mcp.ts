@@ -10,10 +10,29 @@ import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES } from '../domain/sanitize.js'
 import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
+import { runOpSpec } from './op-run.js'
+import { LEAF_REGISTRY } from '../op/registry.js'
+import type { OpSpec } from '../op/spec.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
 }
+
+// Recursive JSON schema for an op-tree spec (src/op/spec.ts) -- z.lazy defers
+// building the schema for `steps`/`op` until it's actually validated, which is
+// what makes a self-referential shape like this expressible in zod at all.
+const opSpecLeafOptsSchema = z.object({
+  retries: z.number().int().min(0).max(5).optional(),
+  heavy: z.boolean().optional(),
+  memo: z.boolean().optional(),
+  kind: z.enum(['pure', 'effect']).optional(),
+}).optional()
+
+const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
+  z.object({ tag: z.literal('leaf'), name: z.string(), opts: opSpecLeafOptsSchema }),
+  z.object({ tag: z.literal('pipe'), steps: z.array(opSpecSchema).min(1) }),
+  z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(32) }),
+]))
 
 export type RegisterFileopsToolsOptions = {
   /**
@@ -153,6 +172,23 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         },
       },
       async ({ data, from, to, delimiter }) => textResult({ data: dispatchTransform(data, from as Format | 'auto', to as Format, delimiter) }),
+    )
+  }
+
+  if (enabled('run_pipeline')) {
+    server.registerTool(
+      'run_pipeline',
+      {
+        description:
+          `Run a JSON-described op-tree pipeline (leaf/pipe/map) over the op engine's registered leaves ` +
+          `(${Object.keys(LEAF_REGISTRY).join(', ')}), instead of calling one tool per step. ` +
+          `Handle-shaped values in \`input\`/the result are marshalled as { $handle: true, base64, type } / { base64, type, size }.`,
+        inputSchema: {
+          spec: opSpecSchema,
+          input: z.unknown(),
+        },
+      },
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input })),
     )
   }
 }

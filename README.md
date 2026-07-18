@@ -73,6 +73,20 @@ on) and only differs in how it reads input and shapes output:
 - **MCP** — `registerFileopsTools(server, { allow? })` registers every domain function
   as an MCP tool (or a subset via `allow`) on an `@modelcontextprotocol/sdk` server.
 
+### Composable pipelines: `POST /op/run` and the `run_pipeline` MCP tool
+
+Beyond one-shot single-leaf calls, HTTP and MCP also expose the op engine itself: a
+JSON `{ tag: 'leaf' | 'pipe' | 'map', ... }` spec (`src/op/spec.ts`) describes a
+pipeline over the leaves in `src/op/registry.ts` (`pack`/`unpack`/`shrink`/`redact`/
+`scrub`/`convert`/`unzip`), which gets built into a real `Op` tree and run via
+`runInline` — a multi-step job (e.g. unzip a bundle, transform each entry) runs as one
+call instead of several round trips. `reconcile`/`sink`/`ask` aren't accepted from a
+spec since they need host-supplied capabilities (a sink target, an `Ask`
+implementation) a stateless call has no way to provide. Handle-shaped values thread
+through as `{ $handle: true, base64, type? }` on the way in and `{ base64, type, size }`
+on the way out; the CLI adapter doesn't expose this (it's file-based, one domain
+function per invocation).
+
 ## Development
 
 ```sh
