@@ -33,17 +33,23 @@ function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
 }
 
 /**
- * A pipe step's declared shape, for the one tag (`leaf`) LEAF_SHAPES actually
- * describes -- `map`/`pipe`/`sink` steps read as 'unknown' on both sides
- * rather than guessing: a `map` step's own boundary (its inner op's shape,
- * one array level up) is a real question with its own design surface (issue
- * #145's deliberate follow-up), and a nested `pipe`/`sink` step composing
+ * A pipe step's declared shape. `leaf` reads straight from LEAF_SHAPES. `map`
+ * derives its own boundary from its inner op's shape, one array level up
+ * (issue #145): a `handle` inner input/output means the map as a whole is
+ * `handle[]` on that side, since `unzip`'s `handle[]` output is the one
+ * representable array shape this scheme has. Anything else the inner op's
+ * shape resolves to (including 'unknown', or 'handle[]' which would need a
+ * two-level array this scheme can't represent) makes the map's own boundary
+ * 'unknown' too, rather than guessing. A nested `pipe`/`sink` step composing
  * multiple leaves has no single input/output shape without walking further
- * than a single adjacent-step comparison needs to.
+ * than a single adjacent-step comparison needs to, so those still read as
+ * 'unknown' on both sides.
  */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (!s || typeof s !== 'object') return 'unknown'
-  return s.tag === 'leaf' ? LEAF_SHAPES[s.name]?.[side] ?? 'unknown' : 'unknown'
+  if (s.tag === 'leaf') return LEAF_SHAPES[s.name]?.[side] ?? 'unknown'
+  if (s.tag === 'map') return stepShape(s.op, side) === 'handle' ? 'handle[]' : 'unknown'
+  return 'unknown'
 }
 
 function stepLabel(s: OpSpec): string {
@@ -95,10 +101,11 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * LEAF_SHAPES (./registry.ts) before the tree is built, so a caller-supplied
  * shape mismatch (e.g. `unwrapHandle` straight after `convert`, #132) throws
  * a clear build-time error naming both steps instead of reaching `runInline`
- * and failing there -- sometimes silently, per #143. Only a *leaf* step's
- * shape is known; `map`/`pipe`/`sink` steps read as 'unknown' (permissively
- * compatible with anything) since their own boundary isn't modeled yet (see
- * stepShape's doc and issue #145).
+ * and failing there -- sometimes silently, per #143. A `leaf` step's shape
+ * comes straight from LEAF_SHAPES; a `map` step's own boundary is derived
+ * from its inner op's shape, one array level up (#145); a nested `pipe`/
+ * `sink` step still reads as 'unknown' (permissively compatible with
+ * anything) since it has no single input/output shape (see stepShape's doc).
  */
 export function buildOp(spec: OpSpec, extraLeaves?: Record<string, LeafFn>): Op {
   return buildOpNode(spec, mergeLeaves(extraLeaves))
