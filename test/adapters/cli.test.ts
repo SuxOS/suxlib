@@ -48,6 +48,22 @@ describe('extractArchiveTo (CLI filesystem extract path)', () => {
   })
 })
 
+describe('cli `sanitize text` (real CLI entry point)', () => {
+  it('rejects an invalid --types value instead of silently redacting nothing', async () => {
+    const work = tmpDir()
+    const inPath = join(work, 'in.txt')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(inPath, 'contact me at a@b.com')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'sanitize', 'text', inPath, '--types', 'emial'])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/--types must be/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
+})
+
 describe('cli `archive create` (real CLI entry point)', () => {
   it('reports duplicate basenames cleanly and writes no output file', async () => {
     const work = tmpDir()

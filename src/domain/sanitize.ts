@@ -4,6 +4,10 @@
 // sux's src/fns/redact.ts (pure regex + Luhn/IPv4 validation, no I/O); this
 // version adds a context-gated bare-9-digit-SSN pattern on top.
 
+import type { LeafFn } from '../op/types.js'
+import type { Handle } from '../effects/types.js'
+import { resolve, resolveText, putBytes, putText } from '../handles/handle.js'
+
 // ---------- text redaction (ported from sux/src/fns/redact.ts) ----------
 
 export const REDACT_TYPES = ['email', 'phone', 'ssn', 'credit_card', 'ip'] as const
@@ -287,4 +291,21 @@ export function sanitizeImage(bytes: Uint8Array): SanitizeImageResult {
   if (!kind) throw new Error('unsupported image format for sanitize (expected JPEG or PNG magic bytes)')
   const out = kind === 'jpeg' ? stripJpegMetadata(bytes) : stripPngMetadata(bytes)
   return { kind, bytes: out, strippedBytes: bytes.length - out.length }
+}
+
+// redact/scrub: Handle-based wrappers around redactText/sanitizeImage,
+// following archive.ts's pack/unpack and pdf.ts's shrink — resolve the input
+// Handle(s), run the pure function, put the result back as a Handle.
+export type RedactInput = { handle: Handle; types?: RedactType[] }
+export const redact: LeafFn = async (input, caps) => {
+  const { handle, types } = input as RedactInput
+  const text = await resolveText(caps.store, handle)
+  const result = redactText(text, types)
+  return { handle: await putText(caps.store, result.redacted, 'text/plain'), counts: result.counts }
+}
+
+export const scrub: LeafFn = async (imageHandle, caps) => {
+  const bytes = await resolve(caps.store, imageHandle)
+  const result = sanitizeImage(bytes)
+  return { handle: await putBytes(caps.store, result.bytes, `image/${result.kind}`), kind: result.kind, strippedBytes: result.strippedBytes }
 }

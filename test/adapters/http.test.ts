@@ -103,6 +103,12 @@ describe('http adapter', () => {
     expect(body.counts.email).toBe(1)
   })
 
+  it('POST /sanitize/text: an invalid `types` entry surfaces a 400 instead of a silent no-op redaction', async () => {
+    const res = await post('sanitize/text', { text: 'contact ada@example.com', types: ['emial'] })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toBeTruthy()
+  })
+
   it('POST with a Content-Length over the cap is rejected with 413 before the body is parsed', async () => {
     const res = await handler.fetch(
       new Request('https://fileops.example/sanitize/text', {

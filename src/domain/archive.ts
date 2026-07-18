@@ -7,6 +7,7 @@
 import { Gunzip, Unzip, UnzipInflate, UnzipPassThrough, gzipSync, strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { isAbsolute, resolve as resolvePath, sep } from 'node:path'
 import type { LeafFn } from '../op/types.js'
+import type { Handle } from '../effects/types.js'
 import { resolve, putBytes } from '../handles/handle.js'
 
 /** Cap total decompressed output so a zip/gzip bomb can't OOM the process. */
@@ -368,7 +369,7 @@ export function archiveCreate(format: ArchiveFormat, files: ArchiveFile[]): Uint
       return tarCreate(files)
     case 'gzip':
       if (files.length !== 1) throw new Error(`gzip packs exactly one file — got ${files.length}. Use format='zip' or 'tar' for multiple.`)
-      return gzipCreate(files[0].data)
+      return gzipCreate(files[0].data, files[0].mtime ?? 0)
   }
 }
 
@@ -411,4 +412,29 @@ export const unzip: LeafFn = async (zipHandle, caps) => {
       putBytes(caps.store, data, name.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream'),
     ),
   )
+}
+
+// pack/unpack: Handle-based wrappers around archiveCreate/archiveExtract, for
+// an op tree that wants to build or open zip/tar/gzip archives (any format,
+// unlike unzip above which is zip-only and kept as-is since the sux Worker's
+// tracer-bullet op tree already depends on its exact signature).
+export type PackInput = { format: ArchiveFormat; files: Array<{ name: string; handle: Handle; mtime?: number }> }
+export const pack: LeafFn = async (input, caps) => {
+  const { format, files } = input as PackInput
+  const resolved = await Promise.all(
+    files.map(async (f) => ({ name: f.name, data: await resolve(caps.store, f.handle), mtime: f.mtime })),
+  )
+  const bytes = archiveCreate(format, resolved)
+  return putBytes(caps.store, bytes, ARCHIVE_MIME[format])
+}
+
+export type UnpackInput = { format: ArchiveFormat; handle: Handle }
+export const unpack: LeafFn = async (input, caps) => {
+  const { format, handle } = input as UnpackInput
+  const bytes = await resolve(caps.store, handle)
+  const { entries, skipped } = archiveExtract(format, bytes)
+  const parts = await Promise.all(
+    entries.map(async (e) => ({ name: e.name, handle: await putBytes(caps.store, e.data, 'application/octet-stream') })),
+  )
+  return skipped ? { entries: parts, skipped } : { entries: parts }
 }

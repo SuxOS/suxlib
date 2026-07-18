@@ -1,6 +1,8 @@
 import { test, expect } from 'vitest'
 import { PDFDocument } from 'pdf-lib'
-import { pdfShrink, pdfPageCount, loadBoundedPdf, MAX_PDF_INPUT_BYTES } from '../../src/domain/pdf.js'
+import { pdfShrink, pdfPageCount, loadBoundedPdf, shrink, MAX_PDF_INPUT_BYTES } from '../../src/domain/pdf.js'
+import { MemoryStore } from '../../src/effects/types.js'
+import { putBytes, resolve } from '../../src/handles/handle.js'
 
 async function blankPdf(pages = 1): Promise<Uint8Array> {
   const doc = await PDFDocument.create()
@@ -25,6 +27,18 @@ test('pdfShrink keeps metadata when stripMetadata is false', async () => {
   const result = await pdfShrink(input, { stripMetadata: false })
   const out = await PDFDocument.load(result.bytes)
   expect(out.getTitle()).toBe('My Title')
+})
+
+test('shrink (Handle-based leaf) round-trips a PDF through a Store and reports the same stats as pdfShrink', async () => {
+  const store = new MemoryStore()
+  const input = await blankPdf(1)
+  const handle = await putBytes(store, input, 'application/pdf')
+  const result = await shrink({ handle }, { store } as any)
+  expect(result.inputBytes).toBe(input.length)
+  const outBytes = await resolve(store, result.handle)
+  expect(result.outputBytes).toBe(outBytes.length)
+  const out = await PDFDocument.load(outBytes)
+  expect(out.getTitle() ?? '').toBe('')
 })
 
 test('pdfPageCount reports the page count', async () => {

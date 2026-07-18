@@ -6,7 +6,7 @@
 
 import { archiveCreate, archiveExtract, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
-import { sanitizeImage, redactText, type RedactType } from '../domain/sanitize.js'
+import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
@@ -157,6 +157,11 @@ const routes: Route[] = [
     handle: async (rawBody) => {
       const body = rawBody as { text?: string; types?: string[] }
       if (typeof body.text !== 'string') return errorResponse(new Error('`text` required'))
+      if (body.types !== undefined) {
+        if (!Array.isArray(body.types) || body.types.some((t) => typeof t !== 'string' || !REDACT_TYPES.includes(t as RedactType))) {
+          return errorResponse(new Error(`\`types\` must be an array of: ${REDACT_TYPES.join(', ')}`))
+        }
+      }
       const result = redactText(body.text, body.types as RedactType[] | undefined)
       return json(result)
     },

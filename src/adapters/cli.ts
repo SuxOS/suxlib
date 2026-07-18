@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
-import { sanitizeImage, redactText, type RedactType } from '../domain/sanitize.js'
+import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, type Format } from '../domain/transform.js'
 
 const program = new Command()
@@ -135,6 +135,10 @@ sanitizeCmd
   .action((file: string | undefined, opts: { types?: string }) => {
     const text = file ? readFileSync(file, 'utf8') : readFileSync(0, 'utf8')
     const types = opts.types ? (opts.types.split(',').map((t) => t.trim()) as RedactType[]) : undefined
+    if (types) {
+      const invalid = types.filter((t) => !REDACT_TYPES.includes(t))
+      if (invalid.length) throw new Error(`--types must be a comma-separated subset of: ${REDACT_TYPES.join(', ')} (got invalid: ${invalid.join(', ')})`)
+    }
     const result = redactText(text, types)
     process.stdout.write(result.redacted + '\n')
     console.error(`[redacted] ${JSON.stringify(result.counts)}`)
