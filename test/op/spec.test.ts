@@ -4,7 +4,7 @@ import { PDFDocument } from 'pdf-lib'
 import { buildOp, type OpSpec } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
-import { putBytes } from '../../src/handles/handle.js'
+import { putBytes, resolveText } from '../../src/handles/handle.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -51,6 +51,53 @@ test('buildOp builds a working leaf/pipe/map tree that resolves names against th
   expect(result).toHaveLength(2)
   expect(result[0]).toMatchObject({ kind: 'png' })
   expect(result[1]).toMatchObject({ kind: 'png' })
+})
+
+test('leaf spec `params` merges convert\'s required `to`/`from` onto wrapHandle\'s output, so unzip -> map(convert) is expressible via a JSON op spec', async () => {
+  const { store, ...rest } = caps()
+  const zip = zipSync({ 'a.json': new TextEncoder().encode('{"a":1}') })
+  const zipHandle = await putBytes(store, zip, 'application/zip')
+
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unzip' },
+      {
+        tag: 'map',
+        op: {
+          tag: 'pipe',
+          steps: [
+            { tag: 'leaf', name: 'wrapHandle' },
+            { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } },
+          ],
+        },
+        concurrency: 2,
+      },
+    ],
+  }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, zipHandle, { store, ...rest })
+  expect(result).toHaveLength(1)
+  expect(await resolveText(store, result[0])).toBe('a: 1')
+})
+
+test('leaf spec `params` cannot inject `to` via a "__proto__" key', async () => {
+  const { store, ...rest } = caps()
+  const handle = await putBytes(store, new TextEncoder().encode('{"a":1}'), 'application/json')
+  // `to` is only reachable through the poisoned prototype -- never as an own
+  // property of `params`. If mergeParams assigned it onto a plain {} via
+  // bracket notation, it would hit the inherited Annex-B setter and reassign
+  // the merged object's own prototype instead of storing an ordinary
+  // "__proto__"-named property, and `to` would then resolve as an
+  // *inherited* property straight through to the convert leaf.
+  const params = JSON.parse('{"from":"json","__proto__":{"to":"yaml"}}')
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'leaf', name: 'convert', params }] }
+  const tree = buildOp(spec)
+  await expect(runInline(tree, handle, { store, ...rest })).rejects.toThrow(/Unsupported target format/)
+})
+
+test('buildOp rejects a non-object `params`', () => {
+  expect(() => buildOp({ tag: 'leaf', name: 'convert', params: [] as unknown as Record<string, unknown> })).toThrow(/params/)
 })
 
 test('buildOp rejects an unknown leaf name', () => {
