@@ -269,4 +269,20 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await leavesClient.close()
     await leavesServer.close()
   })
+
+  it('run_pipeline\'s tool description lists opts.opRunLeaves-registered leaves alongside the built-in registry (#158)', async () => {
+    const leavesServer = new McpServer({ name: 'test-leaves-desc', version: '0.0.0' })
+    registerFileopsTools(leavesServer, { opRunLeaves: { shout: async (input) => input } })
+    const leavesClient = new Client({ name: 'test-leaves-desc-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([leavesServer.connect(serverTransport), leavesClient.connect(clientTransport)])
+
+    const { tools } = await leavesClient.listTools()
+    const runPipeline = tools.find((t) => t.name === 'run_pipeline')
+    expect(runPipeline?.description).toContain('shout')
+    expect(runPipeline?.description).toContain('convert')
+
+    await leavesClient.close()
+    await leavesServer.close()
+  })
 })
