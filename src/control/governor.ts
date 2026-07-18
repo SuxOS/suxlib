@@ -86,7 +86,8 @@ export async function runGoverned(
   gOpts: RunGovernedOpts = {},
 ): Promise<any> {
   if (opts.memo && caps.cache) {
-    const key = await memoKey(name, input)
+    const keyInput = opts.memoKeyExtra !== undefined ? { input, params: opts.memoKeyExtra } : input
+    const key = await memoKey(name, keyInput)
     const cached = await caps.cache.get(key)
     if (cached !== undefined) { gOpts.onEvent?.({ kind: 'memo-hit', name }); return cached }
     const result = await runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts)

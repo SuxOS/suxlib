@@ -3,7 +3,7 @@ import { zipSync } from 'fflate'
 import { PDFDocument } from 'pdf-lib'
 import { buildOp, type OpSpec } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
-import { MemoryStore } from '../../src/effects/types.js'
+import { MemoryStore, MemoryCache } from '../../src/effects/types.js'
 import { putBytes, resolveText } from '../../src/handles/handle.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
@@ -94,6 +94,28 @@ test('leaf spec `params` cannot inject `to` via a "__proto__" key', async () => 
   const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'leaf', name: 'convert', params }] }
   const tree = buildOp(spec)
   await expect(runInline(tree, handle, { store, ...rest })).rejects.toThrow(/Unsupported target format/)
+})
+
+test('memo: true keys on `params` too, so two leaf specs with the same name/input but different `params` don\'t collide', async () => {
+  const { store, ...rest } = caps()
+  const handle = await putBytes(store, new TextEncoder().encode('{"a":1}'), 'application/json')
+  const cache = new MemoryCache()
+  const capsWithCache = { store, ...rest, cache }
+
+  const toYaml: OpSpec = {
+    tag: 'pipe',
+    steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'leaf', name: 'convert', opts: { memo: true }, params: { from: 'json', to: 'yaml' } }],
+  }
+  const toJson: OpSpec = {
+    tag: 'pipe',
+    steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'leaf', name: 'convert', opts: { memo: true }, params: { from: 'json', to: 'json' } }],
+  }
+
+  const yamlResult = await runInline(buildOp(toYaml), handle, capsWithCache)
+  const jsonResult = await runInline(buildOp(toJson), handle, capsWithCache)
+
+  expect(await resolveText(store, yamlResult)).toBe('a: 1')
+  expect(await resolveText(store, jsonResult)).toBe('{\n  "a": 1\n}')
 })
 
 test('buildOp rejects a non-object `params`', () => {

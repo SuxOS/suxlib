@@ -13,4 +13,13 @@ import type { Handle } from '../effects/types.js'
 // these two only bridge the `handle` field itself.
 export const wrapHandle: LeafFn = async (handle) => ({ handle: handle as Handle })
 
-export const unwrapHandle: LeafFn = async (input) => (input as { handle: Handle }).handle
+// Throws rather than silently plucking `undefined` off a bare Handle (e.g.
+// convert's output, which has no `.handle` field) -- see CLAUDE.md's "Leaf
+// composability gotcha" for why that mis-chain is an easy mistake to make.
+export const unwrapHandle: LeafFn = async (input) => {
+  const handle = (input as { handle?: Handle } | undefined)?.handle
+  if (!handle || typeof handle !== 'object' || typeof handle.r2Key !== 'string' || typeof handle.sha256 !== 'string') {
+    throw new Error('unwrapHandle: input is not {handle: Handle}-shaped')
+  }
+  return handle
+}

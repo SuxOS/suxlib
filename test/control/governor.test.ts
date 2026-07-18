@@ -376,6 +376,16 @@ test('a memo leaf recomputes for a different input, keeping both results cached'
   expect(calls).toBe(2)
 })
 
+test('a memo leaf with different memoKeyExtra recomputes even for identical input', async () => {
+  let calls = 0
+  const fn = async (input: any) => { calls++; return input }
+  const c = { ...caps(), cache: new MemoryCache() }
+  const first = await runGoverned('convert', { kind: 'pure', memo: true, memoKeyExtra: { to: 'yaml' } }, fn, { a: 1 }, c, undefined, noSleep)
+  const second = await runGoverned('convert', { kind: 'pure', memo: true, memoKeyExtra: { to: 'json' } }, fn, { a: 1 }, c, undefined, noSleep)
+  expect(calls).toBe(2)
+  expect(first).toEqual(second)
+})
+
 test('memo is a no-op without caps.cache: fn runs on every call', async () => {
   let calls = 0
   const fn = async () => { calls++; return 'ok' }

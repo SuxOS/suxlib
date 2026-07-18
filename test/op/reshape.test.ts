@@ -20,3 +20,12 @@ test('wrapHandle then unwrapHandle round-trips a bare Handle unchanged', async (
   const wrapped = await wrapHandle(handle, caps)
   await expect(unwrapHandle(wrapped, caps)).resolves.toEqual(handle)
 })
+
+test('unwrapHandle throws on a bare Handle (e.g. chained straight after convert)', async () => {
+  const handle = await caps.store.put(new TextEncoder().encode('bare'), 'text/plain')
+  await expect(unwrapHandle(handle, caps)).rejects.toThrow(/not.*handle.*shaped/i)
+})
+
+test('unwrapHandle throws on undefined input', async () => {
+  await expect(unwrapHandle(undefined, caps)).rejects.toThrow(/not.*handle.*shaped/i)
+})

@@ -58,8 +58,8 @@ export function buildOp(spec: OpSpec): Op {
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         throw new Error(`leaf "${spec.name}": \`params\` must be an object`)
       }
-      const opts: LeafOpts = { kind: o.kind ?? 'effect', retries: o.retries ?? 0, heavy: o.heavy, memo: o.memo }
       const params = spec.params
+      const opts: LeafOpts = { kind: o.kind ?? 'effect', retries: o.retries ?? 0, heavy: o.heavy, memo: o.memo, memoKeyExtra: params }
       const leafFn: LeafFn = params ? (input, caps, idempotencyKey) => fn(mergeParams(input, params), caps, idempotencyKey) : fn
       return op(spec.name, leafFn, opts)
     }
