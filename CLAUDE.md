@@ -136,7 +136,22 @@ There is no linter in this repo. Run both locally before pushing.
   1980-2099'` (unlike `gzipSync`, where `mtime: 0` is the documented "omit the
   timestamp" sentinel, and unlike `tarCreate`'s plain-Unix-timestamp `mtime ?? 0`).
   `zipCreate` defaults to `ZIP_EPOCH` (1980-01-01 UTC) instead, for the same
-  deterministic-output goal.
+  deterministic-output goal. Update: fflate's zip writer reads the DOS year back out
+  via *local*, not UTC, `Date` getters, so a `Date.UTC(1980, 0, 1)` constant reads
+  back as 1979 (retriggering the same throw) on any host whose TZ is behind UTC —
+  `zipCreate` now builds this fallback with the local `Date` constructor instead,
+  and recomputes it per call (not as a module-level constant) so it tracks the
+  process's TZ at call time rather than whatever TZ was active at import.
+- `src/domain/transform.ts`'s `toXml`/`parseXml` marker-attribute scheme
+  (`EMPTY_ARRAY_ATTR`/`SINGLE_ARRAY_ATTR`/`NULL_VALUE_ATTR`/`NESTED_ARRAY_ATTR`) has
+  a gotcha of its own: `attach()`'s promote-on-repeat logic used to infer "this key
+  was already promoted to an array" purely from `Array.isArray(node[name])` — which
+  breaks the instant a *value itself* is an array (a single-array or nested-array
+  child looks identical, by shape, to an already-promoted accumulator). `attach()`
+  now takes an explicit `forceArray` flag and tracks forced keys per-node in a
+  `WeakMap` instead of inferring from shape — any future marker attribute whose
+  decoded value can itself be an array must thread through that same `forceArray`
+  path rather than relying on `Array.isArray(cur)`.
 - Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
   `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
   `circuitBreaker` gating for `effect` leaves is configured separately, via
