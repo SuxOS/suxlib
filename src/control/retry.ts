@@ -1,7 +1,7 @@
 export function backoffFullJitter(attempt: number, o: { base: number; cap: number }, rand: () => number = Math.random): number {
   return Math.floor(rand() * Math.min(o.cap, o.base * 2 ** attempt))
 }
-function canonicalize(v: unknown): unknown {
+export function canonicalize(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(canonicalize)
   if (v && typeof v === 'object') {
     const o = v as Record<string, unknown>

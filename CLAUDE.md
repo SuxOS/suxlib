@@ -208,3 +208,17 @@ There is no linter in this repo. Run both locally before pushing.
   Handle — no extra validation beyond what the pure function already does.
   `unzip` itself stays untouched (zip-only, exact signature already depended on
   by `sux`'s tracer-bullet op tree) rather than being folded into `unpack`.
+- Memoization convention: `LeafOpts.memo` (opt-in per leaf, independent of
+  `kind`/`heavy`) makes `runGoverned` (`src/control/governor.ts`) check
+  `caps.cache` for a prior result — keyed by `memoKey(name, input)`
+  (`src/control/memo.ts`, reusing `retry.ts`'s `canonicalize()`) — before
+  running the leaf at all, and writes a successful result back under that key
+  after. This dedupes identical `(leaf, input)` calls *across* separate
+  calls/runs; it's deliberately a different key space (`memo:` prefix) from
+  `idempotencyKey`, which instead dedupes retry *attempts* within one
+  `runGoverned` call and is handed to the effect fn itself. With no
+  `caps.cache` wired, `memo: true` is a silent no-op (same degrade-gracefully
+  pattern as `caps.ask`) — this repo doesn't decide *which* leaves opt in
+  (that's `sux`'s op-tree construction call site, same as `heavy`/`kind`) or
+  ship a durable `Cache` implementation, only `MemoryCache`
+  (`src/effects/types.ts`) for inline/test use.
