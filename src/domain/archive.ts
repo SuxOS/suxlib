@@ -202,7 +202,13 @@ function readU32(d: Uint8Array, o: number): number {
   return (d[o] | (d[o + 1] << 8) | (d[o + 2] << 16) | (d[o + 3] << 24)) >>> 0
 }
 
+function readU64(d: Uint8Array, o: number): number {
+  return readU32(d, o) + readU32(d, o + 4) * 0x1_0000_0000
+}
+
 const EOCD_SIGNATURE = 0x06054b50
+const ZIP64_EOCD_LOCATOR_SIGNATURE = 0x07064b50
+const ZIP64_EOCD_SIGNATURE = 0x06064b50
 
 /**
  * Decode each entry's DOS date/time out of the zip central directory. Neither
@@ -213,6 +219,13 @@ const EOCD_SIGNATURE = 0x06054b50
  * above). Best-effort: an EOCD record that can't be found (corrupt/exotic
  * input already rejected by unzipGuarded's unzipSync validation pass) just
  * yields no mtimes rather than throwing a second time.
+ *
+ * When an archive has >65535 entries or a >4GB central directory, the plain
+ * EOCD's count/offset fields are the sentinel 0xffff/0xffffffff and the real
+ * values live in the zip64 end-of-central-directory record, reached via the
+ * zip64 EOCD locator (signature 0x07064b50) that immediately precedes the
+ * plain EOCD — mirrors fflate's own z64hs() so mtimes stay correct once
+ * MAX_ENTRIES/MAX_UNPACK_BYTES are ever raised past those thresholds.
  */
 function readZipMtimes(bytes: Uint8Array): Record<string, number> {
   const mtimes: Record<string, number> = Object.create(null)
@@ -221,8 +234,16 @@ function readZipMtimes(bytes: Uint8Array): Record<string, number> {
     if (bytes.length - e > 65558) return mtimes
   }
   if (e < 0) return mtimes
-  const count = readU16(bytes, e + 8)
+  let count = readU16(bytes, e + 8)
   let o = readU32(bytes, e + 16)
+  const locatorOff = e - 20
+  if ((count === 0xffff || o === 0xffffffff) && locatorOff >= 0 && readU32(bytes, locatorOff) === ZIP64_EOCD_LOCATOR_SIGNATURE) {
+    const z64Off = readU64(bytes, locatorOff + 8)
+    if (z64Off >= 0 && z64Off + 56 <= bytes.length && readU32(bytes, z64Off) === ZIP64_EOCD_SIGNATURE) {
+      count = readU64(bytes, z64Off + 32)
+      o = readU64(bytes, z64Off + 48)
+    }
+  }
   for (let i = 0; i < count && o + 46 <= bytes.length; i++) {
     const modTime = readU16(bytes, o + 12)
     const modDate = readU16(bytes, o + 14)

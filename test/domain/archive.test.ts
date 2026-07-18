@@ -173,6 +173,60 @@ test('zipCreate/zipExtract round-trips an explicit per-file mtime', () => {
   expect(entry.mtime).toBe(mtime)
 })
 
+test('zipExtract recovers mtime from the zip64 end-of-central-directory record when the plain EOCD fields are the zip64 sentinel', () => {
+  const mtime = new Date(2022, 4, 17, 10, 30, 0).getTime()
+  const packed = zipCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])
+
+  const eocdOff = packed.length - 22
+  const centralDirOffset = (packed[eocdOff + 16] | (packed[eocdOff + 17] << 8) | (packed[eocdOff + 18] << 16) | (packed[eocdOff + 19] << 24)) >>> 0
+  const centralDirSize = eocdOff - centralDirOffset
+  const prefix = packed.subarray(0, eocdOff)
+  const z64EocdOffset = prefix.length
+
+  const writeU32 = (buf: Uint8Array, o: number, v: number) => {
+    buf[o] = v & 0xff
+    buf[o + 1] = (v >>> 8) & 0xff
+    buf[o + 2] = (v >>> 16) & 0xff
+    buf[o + 3] = (v >>> 24) & 0xff
+  }
+  const writeU64 = (buf: Uint8Array, o: number, v: number) => {
+    writeU32(buf, o, v >>> 0)
+    writeU32(buf, o + 4, 0)
+  }
+
+  const z64Record = new Uint8Array(56)
+  writeU32(z64Record, 0, 0x06064b50)
+  writeU64(z64Record, 4, 44)
+  z64Record[12] = 45 // version made by
+  z64Record[14] = 45 // version needed
+  writeU64(z64Record, 24, 1) // total entries, this disk
+  writeU64(z64Record, 32, 1) // total entries
+  writeU64(z64Record, 40, centralDirSize)
+  writeU64(z64Record, 48, centralDirOffset)
+
+  const locator = new Uint8Array(20)
+  writeU32(locator, 0, 0x07064b50)
+  writeU64(locator, 8, z64EocdOffset)
+  writeU32(locator, 16, 1) // total number of disks
+
+  const eocd = new Uint8Array(22)
+  writeU32(eocd, 0, 0x06054b50)
+  eocd[8] = 0xff
+  eocd[9] = 0xff // sentinel entry count -> defer to zip64 record
+  eocd[10] = 0xff
+  eocd[11] = 0xff
+  writeU32(eocd, 16, 0xffffffff) // sentinel central-dir offset -> defer to zip64 record
+
+  const zip64Bytes = new Uint8Array(prefix.length + z64Record.length + locator.length + eocd.length)
+  zip64Bytes.set(prefix, 0)
+  zip64Bytes.set(z64Record, prefix.length)
+  zip64Bytes.set(locator, prefix.length + z64Record.length)
+  zip64Bytes.set(eocd, prefix.length + z64Record.length + locator.length)
+
+  const entry = zipExtract(zip64Bytes).find((e) => e.name === 'a.txt')!
+  expect(entry.mtime).toBe(mtime)
+})
+
 test('gzipCreate/gzipExtract round-trips an explicit mtime, and omits it when not supplied', () => {
   const mtime = 1_700_000_000_000
   const packed = gzipCreate(strToU8('hi'), mtime)
