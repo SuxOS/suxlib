@@ -27,3 +27,11 @@ test('fixed(n) never admits more than n concurrently across acquire/release inte
   await Promise.all([run(), run(), run()])
   expect(maxInflight).toBe(1)
 })
+test('fixed(n) clamps n <= 0 to 1 instead of deadlocking forever', async () => {
+  const c = fixed(0)
+  await c.acquire()
+  c.release(true)
+  const c2 = fixed(-5)
+  await c2.acquire()
+  c2.release(true)
+})

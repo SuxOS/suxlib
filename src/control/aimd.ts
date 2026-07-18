@@ -2,8 +2,9 @@ import type { Concurrency } from '../op/types.js'
 import type { GovernorEventHandler } from './events.js'
 
 export function fixed(n: number): Concurrency {
+  const limit = Math.max(1, n)
   let inflight = 0; const q: Array<() => void> = []
-  const pump = () => { while (inflight < n && q.length) { inflight++; q.shift()!() } }
+  const pump = () => { while (inflight < limit && q.length) { inflight++; q.shift()!() } }
   return {
     async acquire() { await new Promise<void>(r => { q.push(r); pump() }) },
     release() { inflight--; pump() },
@@ -12,7 +13,8 @@ export function fixed(n: number): Concurrency {
 
 export interface Aimd extends Concurrency { readonly limit: number }
 export function aimd(opts: { start?: number; min?: number; max?: number; onEvent?: GovernorEventHandler } = {}): Aimd {
-  let limit = opts.start ?? 4; const min = opts.min ?? 1, max = opts.max ?? 64
+  const min = opts.min ?? 1, max = opts.max ?? 64
+  let limit = Math.min(max, Math.max(min, opts.start ?? 4))
   let inflight = 0; let successes = 0; const q: Array<() => void> = []
   const pump = () => { while (inflight < limit && q.length) { inflight++; q.shift()!() } }
   return {

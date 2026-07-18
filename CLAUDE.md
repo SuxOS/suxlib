@@ -81,6 +81,23 @@ There is no linter in this repo. Run both locally before pushing.
 - **Self-isolate work in a git worktree**: `git worktree add .scratch-worktrees/<slug>
   -b <type>/<slug>` — don't work directly on a checked-out branch that another
   session/task might also be touching.
+- **Before reimplementing a requeued issue, check for a stale closed-PR builder
+  branch**: a prior attempt's branch (`git fetch origin
+  bot/issue-build-<run-id>`, findable via the issue's own comment history/linked
+  PRs) can still exist even after its PR was closed without merging — diff it
+  against current `main` for the relevant path (`git diff main <branch> --
+  <path>`) to turn a from-scratch design task into a verify-and-adapt one. Don't
+  merge/cherry-pick it wholesale though — it may predate a feature that's since
+  landed on `main` (see #143/#162), so reimplement against current `main` using
+  it as a reference, not a patch. When several sibling stale branches exist for
+  the same issue (multiple prior batches each attempted it independently),
+  they can diverge in actual design/naming — and a since-filed follow-up issue
+  for the "next increment" may describe function/line details from a sibling
+  attempt that wasn't the one ultimately merged (#143's own follow-ups, #145
+  and #161, cite a `validatePipeShapes` name/lines that don't match the
+  `shapeCompatible`/`stepShape` implementation that actually landed from a
+  different sibling branch) — verify a follow-up issue's cited names/lines
+  against current code rather than trusting them verbatim.
 
 ## Consumers
 
@@ -136,7 +153,22 @@ There is no linter in this repo. Run both locally before pushing.
   1980-2099'` (unlike `gzipSync`, where `mtime: 0` is the documented "omit the
   timestamp" sentinel, and unlike `tarCreate`'s plain-Unix-timestamp `mtime ?? 0`).
   `zipCreate` defaults to `ZIP_EPOCH` (1980-01-01 UTC) instead, for the same
-  deterministic-output goal.
+  deterministic-output goal. Update: fflate's zip writer reads the DOS year back out
+  via *local*, not UTC, `Date` getters, so a `Date.UTC(1980, 0, 1)` constant reads
+  back as 1979 (retriggering the same throw) on any host whose TZ is behind UTC —
+  `zipCreate` now builds this fallback with the local `Date` constructor instead,
+  and recomputes it per call (not as a module-level constant) so it tracks the
+  process's TZ at call time rather than whatever TZ was active at import.
+- `src/domain/transform.ts`'s `toXml`/`parseXml` marker-attribute scheme
+  (`EMPTY_ARRAY_ATTR`/`SINGLE_ARRAY_ATTR`/`NULL_VALUE_ATTR`/`NESTED_ARRAY_ATTR`) has
+  a gotcha of its own: `attach()`'s promote-on-repeat logic used to infer "this key
+  was already promoted to an array" purely from `Array.isArray(node[name])` — which
+  breaks the instant a *value itself* is an array (a single-array or nested-array
+  child looks identical, by shape, to an already-promoted accumulator). `attach()`
+  now takes an explicit `forceArray` flag and tracks forced keys per-node in a
+  `WeakMap` instead of inferring from shape — any future marker attribute whose
+  decoded value can itself be an array must thread through that same `forceArray`
+  path rather than relying on `Array.isArray(cur)`.
 - Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
   `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
   `circuitBreaker` gating for `effect` leaves is configured separately, via
@@ -193,6 +225,15 @@ There is no linter in this repo. Run both locally before pushing.
   Handle — no extra validation beyond what the pure function already does.
   `unzip` itself stays untouched (zip-only, exact signature already depended on
   by `sux`'s tracer-bullet op tree) rather than being folded into `unpack`.
+  The same collision can happen *across* two different modules, not just
+  within one: `src/index.ts`'s `export *` barrel re-exports every top-level
+  module, so a new module whose export shares a name already used elsewhere
+  in the barrel (e.g. `src/op/reshape.ts`'s `stamp` leaf colliding with
+  `src/handles/handle.ts`'s raw `stamp(h, clock)` helper, #142/#133) fails
+  only `npm run build` (`tsc`'s "already exported a member" error) — `npm
+  test` stays green, since vitest doesn't type-check the barrel — so always
+  run both gates, and grep `src/index.ts`'s re-exported modules for an
+  existing same-named export before picking a new leaf/helper's name.
 - Memoization convention: `LeafOpts.memo` (opt-in per leaf, independent of
   `kind`/`heavy`) makes `runGoverned` (`src/control/governor.ts`) check
   `caps.cache` for a prior result — keyed by `memoKey(name, input)`
@@ -207,3 +248,70 @@ There is no linter in this repo. Run both locally before pushing.
   (that's `sux`'s op-tree construction call site, same as `heavy`/`kind`) or
   ship a durable `Cache` implementation, only `MemoryCache`
   (`src/effects/types.ts`) for inline/test use.
+- Leaf composability gotcha: each Handle-based leaf wrapper's input shape is
+  chosen independently (`shrink`/`redact`/`convert` want `{handle, ...opts}`,
+  `pack` wants `{format, files}`, `scrub`/`unzip` take a bare `Handle`), so only
+  leaf pairs whose shapes happen to already align compose directly via
+  `pipe`/`map` — e.g. `unzip`'s `Handle[]` output feeds `map(scrub)` cleanly
+  since `scrub` also takes a bare `Handle`, but nothing chains into `shrink`/
+  `redact`/`convert` without a reshaping step first, since their `{handle,
+  ...}` input never matches another leaf's raw output. `src/op/spec.ts`'s JSON
+  op spec (leaf/pipe/map over `src/op/registry.ts`, added for #113) inherits
+  this as-is rather than solving it — a caller chaining shape-incompatible
+  leaves still needs a reshape step of its own; there's no generic adapter for
+  this yet. Update: `shrink`/`redact`/`convert` all happen to use the same
+  field name (`handle`) for their `{handle, ...opts}` input, so
+  `src/op/reshape.ts`'s `wrapHandle`/`unwrapHandle` (registered as ordinary
+  leaves, #118) bridge a bare `Handle` to/from that shape generically —
+  `wrapHandle` only covers a target leaf whose other opts are all optional
+  (e.g. `shrink`'s `stripMetadata`), since it can't supply a required opt like
+  `convert`'s `to`; a leaf needing required opts merged in still needs its own
+  reshape step. Update: a leaf spec's optional `params?: Record<string,
+  unknown>` (`src/op/spec.ts`, #124) closes that last gap — `buildOp` shallow-
+  merges it onto the piped object value right before the leaf's `fn` runs
+  (guarding `__proto__`/`constructor`/`prototype`, same as `hydrate`/
+  `fieldMerge`), so `convert`'s `to`/`from` can now ride along in a JSON spec.
+  Gotcha for any future `OpSpec` field: `src/op/spec.ts`'s `buildOp` isn't the
+  only place that shape is declared — `mcp.ts`'s `opSpecSchema` (a parallel
+  zod schema, since MCP tool args need a JSON-schema-shaped input) silently
+  strips any key it doesn't know about before `buildOp` ever sees it, and
+  `http.ts`'s `POST /op/run` passes `body.spec` straight through untyped with
+  no such schema. A new `OpSpec` field needs both `buildOp` *and*
+  `opSpecSchema` updated together, or it works over HTTP and silently no-ops
+  over MCP. Output-shape gotcha, mirroring the input one above: `shrink`/
+  `redact`/`scrub` all wrap their result as `{handle, ...extra}`, but
+  `convert` returns a bare `Handle` — so `unwrapHandle` belongs after
+  `shrink`/`redact` in a pipe, never after `convert` (it would read a
+  nonexistent `.handle` off the bare Handle and produce `undefined`). Update
+  (#143): the `unwrapHandle`-after-`convert` mistake above is now caught at
+  `buildOp` time, not just documented — `LEAF_SHAPES` (`src/op/registry.ts`)
+  declares each built-in leaf's coarse input/output shape (`'handle'` |
+  `'handle[]'` | `{ object: {...} }` | `'unknown'`), and a `pipe` spec's
+  adjacent steps are checked against each other via `shapeCompatible`
+  (`src/op/spec.ts`) before the tree is built. Only a `leaf` step's shape is
+  known this way — `map`/`pipe`/`sink` steps, and any name absent from
+  `LEAF_SHAPES` (a host-registered `extraLeaves` leaf, or a future built-in
+  nobody added an entry for), read as `'unknown'` and are permissively
+  treated as compatible with anything, so those mismatches still only
+  surface at `runInline` time. A future built-in leaf needs its own
+  `LEAF_SHAPES` entry to get build-time checking; nothing enforces that the
+  table stays in sync with `LEAF_REGISTRY` beyond the test asserting their
+  key sets match. Update (#161): an object field's shape can now also be
+  `{ arrayObject: Record<string, 'handle' | 'unknown'> }` — pack's `files`
+  input field and unpack's `entries` output field (each `Array<{name,
+  handle, mtime}>`) are declared this way instead of collapsing to
+  `'unknown'`, so a pipe step mismatching one of those fields (e.g. `unpack`
+  feeding straight into `pack`, whose `files` key `unpack`'s `entries`-only
+  output never has) is now a build-time error too. This only reaches one
+  array level deep and doesn't help two leaves whose per-entry field is
+  named differently (`entries` vs `files`) actually chain — that's #168's
+  still-open design question, not solved here.
+- Prototype-pollution-guard gotcha for any future `Object.create(null)`-based
+  registry (`LEAF_REGISTRY`, and now `SINK_REGISTRY` in `src/op/sinks.ts`,
+  #147): merging one into a live config/Caps object via object-literal spread
+  (`{ ...REGISTRY, ...extra }`) silently discards the null-prototype
+  protection — spread's `CreateDataProperty` semantics always produce a
+  plain `Object.prototype`-based target, even when every source object is
+  itself null-prototype. Build the merged object with `Object.assign(
+  Object.create(null), REGISTRY, extra)` instead (see
+  `src/adapters/op-run.ts`'s `caps.sinks` construction for the pattern).

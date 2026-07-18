@@ -94,7 +94,29 @@ function gunzipCapped(bytes: Uint8Array): Uint8Array {
 // timestamp, epoch 0 is valid) zipCreate can't default a missing mtime to 0
 // — fflate throws 'date not in range 1980-2099'. Default to the earliest
 // representable DOS date instead, keeping output deterministic without a caller-supplied mtime.
-const ZIP_EPOCH = Date.UTC(1980, 0, 1)
+// fflate's zip writer reads the DOS year via local (not UTC) Date getters, so this must be
+// built with the local Date constructor — Date.UTC(1980, 0, 1) reads back as 1979 in any
+// timezone behind UTC, tripping fflate's own 'date not in range 1980-2099' guard. Computed
+// fresh per call (not a module-level constant) so it tracks the process's current TZ rather
+// than whatever TZ happened to be active at import time.
+const zipEpoch = () => new Date(1980, 0, 1).getTime()
+
+/**
+ * DOS date/time's 7-bit year field can only represent 1980-2099 (see zipEpoch
+ * above); fflate's zipSync writes it via local, not UTC, Date getters, so the
+ * bound is checked the same way here. zipCreate previously only substituted
+ * zipEpoch() for a missing mtime (`f.mtime ?? zipEpoch()`) — an *explicit*
+ * out-of-range mtime (e.g. one decoded from a tar/gzip entry, whose formats
+ * have no such bound) fell straight through to fflate's own internal
+ * 'date not in range 1980-2099' throw. Reject with a clear domain-style error
+ * instead of letting that leak through uncaught.
+ */
+function assertZipMtimeInRange(name: string, mtime: number): void {
+  const year = new Date(mtime).getFullYear()
+  if (year < 1980 || year > 2099) {
+    throw new Error(`file '${name}' has an mtime (year ${year}) outside the range zip's DOS date format can represent (1980-2099).`)
+  }
+}
 
 export function zipCreate(files: ArchiveFile[]): Uint8Array {
   if (!files.length) throw new Error('pack needs at least one file.')
@@ -124,8 +146,9 @@ export function zipCreate(files: ArchiveFile[]): Uint8Array {
     if (f.name in record) throw new Error(`duplicate entry name: '${f.name}' — every file in an archive needs a unique name.`)
     // fflate defaults a missing mtime to Date.now(), making zipCreate's output
     // wall-clock-dependent even for byte-identical input; default to
-    // ZIP_EPOCH unless the caller supplied one.
-    record[f.name] = [f.data, { mtime: f.mtime ?? ZIP_EPOCH }]
+    // zipEpoch() unless the caller supplied one.
+    if (f.mtime !== undefined) assertZipMtimeInRange(f.name, f.mtime)
+    record[f.name] = [f.data, { mtime: f.mtime ?? zipEpoch() }]
   }
   return zipSync(record, { level: 6 })
 }
@@ -215,7 +238,7 @@ const ZIP64_EOCD_SIGNATURE = 0x06064b50
  * unzipSync nor the streaming Unzip class surface mtime through fflate's
  * public API (UnzipFileInfo only carries name/size/compression), so this walks
  * the central directory the same way fflate's internal zh() does — read-only,
- * no decompression — to recover the field zipCreate writes (see ZIP_EPOCH
+ * no decompression — to recover the field zipCreate writes (see zipEpoch
  * above). Best-effort: an EOCD record that can't be found (corrupt/exotic
  * input already rejected by unzipGuarded's unzipSync validation pass) just
  * yields no mtimes rather than throwing a second time.
@@ -333,7 +356,7 @@ function tarHeader(name: string, size: number, mtime: number): Uint8Array {
   h.set(writeOctal(0, 8), 108) // uid
   h.set(writeOctal(0, 8), 116) // gid
   h.set(writeOctal(size, 12), 124) // size
-  h.set(writeOctal(Math.max(0, Math.floor(mtime)), 12), 136) // mtime
+  h.set(writeOctal(Math.max(0, Math.floor(mtime / 1000)), 12), 136) // mtime (Unix seconds, not ms)
   h.set(strToU8('        '), 148) // checksum placeholder (8 spaces)
   h[156] = '0'.charCodeAt(0) // typeflag: regular file
   h.set(strToU8('ustar\0'), 257) // magic
@@ -403,7 +426,7 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
     const nameEnd = nameBytes.indexOf(0)
     const name = strFromU8(nameEnd === -1 ? nameBytes : nameBytes.subarray(0, nameEnd))
     const size = readOctal(header.subarray(124, 136))
-    const mtime = readOctal(header.subarray(136, 148))
+    const mtime = readOctal(header.subarray(136, 148)) * 1000 // header stores Unix seconds; ArchiveFile.mtime is ms
     const typeflag = String.fromCharCode(header[156] || 0)
     off += BLOCK
 
@@ -510,7 +533,7 @@ export const unpack: LeafFn = async (input, caps) => {
   const bytes = await resolve(caps.store, handle)
   const { entries, skipped } = archiveExtract(format, bytes)
   const parts = await Promise.all(
-    entries.map(async (e) => ({ name: e.name, handle: await putBytes(caps.store, e.data, 'application/octet-stream') })),
+    entries.map(async (e) => ({ name: e.name, handle: await putBytes(caps.store, e.data, 'application/octet-stream'), mtime: e.mtime })),
   )
   return skipped ? { entries: parts, skipped } : { entries: parts }
 }

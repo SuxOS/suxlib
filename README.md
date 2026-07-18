@@ -73,6 +73,27 @@ on) and only differs in how it reads input and shapes output:
 - **MCP** — `registerFileopsTools(server, { allow? })` registers every domain function
   as an MCP tool (or a subset via `allow`) on an `@modelcontextprotocol/sdk` server.
 
+### Composable pipelines: `POST /op/run` and the `run_pipeline` MCP tool
+
+Beyond one-shot single-leaf calls, all three adapters also expose the op engine
+itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'sink' | 'reconcile', ... }` spec
+(`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`
+(`pack`/`unpack`/`shrink`/`redact`/`scrub`/`convert`/`unzip`), which gets built into a
+real `Op` tree and run via `runInline` — a multi-step job (e.g. unzip a bundle,
+transform each entry) runs as one call instead of several round trips. A `sink` step
+names its target(s) by string, resolved against `Caps.sinks`/`OpRunOpts.sinks` at run
+time, and a `reconcile` step needs only `caps.store`, which every adapter call already
+supplies — neither needs a live capability inside the spec itself, so both are
+spec-expressible. `ask` is the sole exception still not accepted from a spec, since it
+needs a host-supplied `Ask` implementation a stateless call has no way to provide.
+Handle-shaped values thread
+through as `{ $handle: true, base64, type? }` on the way in and `{ base64, type, size }`
+on the way out. `POST /op/run` and the `run_pipeline` MCP tool take this JSON directly;
+`suxlib-fileops pipeline run <spec-file>` takes the same `{ spec, input }` shape from a
+local JSON file, resolving any input value shaped `{ "$file": "<path>", "type"?:
+"<mime>" }` off disk into a Handle ref, and (with `-o <dir>`) writing dehydrated Handle
+results back to files instead of inlining base64 in the printed JSON.
+
 ## Development
 
 ```sh

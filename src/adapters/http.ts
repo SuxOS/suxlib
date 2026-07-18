@@ -9,6 +9,10 @@ import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
+import { runOpSpec } from './op-run.js'
+import type { OpSpec } from '../op/spec.js'
+import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
+import type { Cache, Store, Llm } from '../effects/types.js'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
@@ -23,7 +27,32 @@ function errorResponse(e: unknown, status = 400): Response {
 // route is open — deploying that way is only safe behind an upstream gate
 // (Cloudflare Access, mTLS, a private route) that this repo doesn't configure.
 // When set, every route below requires `Authorization: Bearer <token>`.
-export type Env = { FILEOPS_AUTH_TOKEN?: string }
+//
+// opRunGovernors/opRunCache/opRunStore: optional long-lived instances the
+// host builds once (e.g. createGovernor(name, spec) per src/op/registry.ts
+// leaf, plus a durable Cache/Store) and passes in on every `fetch` call, so
+// POST /op/run's runOpSpec actually gets the breaker/token-bucket/concurrency
+// gating and memoization the op engine offers instead of a fresh
+// governors-free Caps per request (#119) -- this file doesn't construct or
+// hold that state itself, since the thresholds/cache/store backend are a
+// host policy choice. Supplying opRunCache without opRunStore is a footgun
+// (see op-run.ts's OpRunOpts doc) -- a memoized leaf's Handle-shaped result
+// won't resolve against a fresh per-request MemoryStore on a later cache hit.
+//
+// opRunSinks: host-supplied SinkTarget instances a spec's `sink`/
+// `sink.fanout` targets can name, merged alongside op/sinks.ts's built-in
+// `store` target. Omitted entirely still leaves `store` reachable.
+//
+// opRunLlm: a host-supplied Llm implementation (real network calls to
+// whatever model backs it are the host's responsibility) so `POST /op/run`
+// can actually exercise text.ts's `extract`/`summarize` leaves. Omitted
+// entirely, those two leaves throw instead of silently running with a
+// do-nothing capability (see op-run.ts's OpRunOpts doc).
+//
+// opRunLeaves: host-registered LeafFns merged onto LEAF_REGISTRY (see
+// op-run.ts's OpRunOpts doc), so a spec's `leaf.name` can resolve against
+// logic this library never shipped.
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn> }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -84,18 +113,18 @@ async function readCappedBody(request: Request): Promise<Uint8Array> {
   return out
 }
 
-type Route = { method: string; path: string; handle: (body: unknown) => Promise<Response> }
+type Route = { method: string; path: string; handle: (body: unknown, env: Env) => Promise<Response> }
 
 const routes: Route[] = [
   {
     method: 'POST',
     path: '/archive/create',
     handle: async (rawBody) => {
-      const body = rawBody as { format?: string; files?: Array<{ name: string; base64: string }> }
+      const body = rawBody as { format?: string; files?: Array<{ name: string; base64: string; mtime?: number }> }
       const format = (body.format ?? 'zip') as ArchiveFormat
       if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, or gzip'))
       if (!Array.isArray(body.files) || !body.files.length) return errorResponse(new Error('`files` array required'))
-      const entries = body.files.map((f) => ({ name: f.name, data: b64ToBytes(f.base64) }))
+      const entries = body.files.map((f) => ({ name: f.name, data: b64ToBytes(f.base64), mtime: f.mtime }))
       const out = archiveCreate(format, entries)
       return json({ format, mime: ARCHIVE_MIME[format], bytes: out.length, base64: bytesToB64(out) })
     },
@@ -110,7 +139,7 @@ const routes: Route[] = [
       if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, or gzip'))
       const { entries, skipped } = archiveExtract(format, b64ToBytes(body.base64))
       return json({
-        entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, base64: bytesToB64(e.data) })),
+        entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, mtime: e.mtime, base64: bytesToB64(e.data) })),
         ...(skipped ? { skipped } : {}),
       })
     },
@@ -184,6 +213,16 @@ const routes: Route[] = [
       return json({ data: out })
     },
   },
+  {
+    method: 'POST',
+    path: '/op/run',
+    handle: async (rawBody, env) => {
+      const body = rawBody as { spec?: unknown; input?: unknown }
+      if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
+      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves })
+      return json({ result })
+    },
+  },
 ]
 
 export default {
@@ -216,7 +255,7 @@ export default {
       return errorResponse(e, 400)
     }
     try {
-      return await route.handle(body)
+      return await route.handle(body, env)
     } catch (e) {
       return errorResponse(e, 400)
     }
