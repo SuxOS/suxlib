@@ -204,6 +204,38 @@ test('gates an effect leaf through governor.concurrency, never exceeding its lim
   expect(maxInFlight).toBe(1)
 })
 
+test('a heavy effect leaf is gated through governor.heavyConcurrency instead of governor.concurrency', async () => {
+  const normal = fixed(4)
+  let heavyAcquireCalls = 0
+  const heavy = { acquire: async () => { heavyAcquireCalls++; await normal.acquire() }, release: (ok: boolean) => normal.release(ok) }
+  let normalAcquireCalls = 0
+  const spyNormal = { acquire: async () => { normalAcquireCalls++ }, release: () => {} }
+  const fn = async () => 'ok'
+  const result = await runGoverned('leaf', { kind: 'effect', heavy: true }, fn, null, caps(), { concurrency: spyNormal, heavyConcurrency: heavy }, noSleep)
+  expect(result).toBe('ok')
+  expect(heavyAcquireCalls).toBe(1)
+  expect(normalAcquireCalls).toBe(0)
+})
+
+test('a heavy effect leaf falls back to governor.concurrency when no heavyConcurrency is configured', async () => {
+  const limiter = fixed(1)
+  let acquireCalls = 0
+  const spy = { acquire: async () => { acquireCalls++; await limiter.acquire() }, release: (ok: boolean) => limiter.release(ok) }
+  const fn = async () => 'ok'
+  const result = await runGoverned('leaf', { kind: 'effect', heavy: true }, fn, null, caps(), { concurrency: spy }, noSleep)
+  expect(result).toBe('ok')
+  expect(acquireCalls).toBe(1)
+})
+
+test('a non-heavy effect leaf is not consulted against governor.heavyConcurrency', async () => {
+  let heavyAcquireCalls = 0
+  const heavy = { acquire: async () => { heavyAcquireCalls++ }, release: () => {} }
+  const fn = async () => 'ok'
+  const result = await runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { heavyConcurrency: heavy }, noSleep)
+  expect(result).toBe('ok')
+  expect(heavyAcquireCalls).toBe(0)
+})
+
 test('concurrency is not consulted for pure leaves', async () => {
   const limiter = fixed(1)
   let acquireCalls = 0

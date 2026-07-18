@@ -46,7 +46,11 @@ export async function runGoverned(
   const sleep = gOpts.sleep ?? defaultSleep
   const gated = opts.kind === 'effect'
   const breaker = gated ? governor?.circuitBreaker : undefined
-  const concurrency = gated ? governor?.concurrency : undefined
+  // A heavy leaf (LLM/PDF-bound) prefers its own, typically-lower ceiling
+  // (governor.heavyConcurrency) over the general one, so heavy work doesn't
+  // get scheduled as aggressively as lightweight effects; falls back to the
+  // shared governor.concurrency when no heavy-specific limiter is configured.
+  const concurrency = gated ? (opts.heavy ? governor?.heavyConcurrency ?? governor?.concurrency : governor?.concurrency) : undefined
   // Computed once, outside the retry loop, so every retry attempt hands the fn
   // the same key -- letting a capability that dedupes on it (e.g. an idempotent
   // HTTP POST) collapse retried attempts into a single side effect.
