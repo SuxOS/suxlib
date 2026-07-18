@@ -3,6 +3,7 @@ import { runGoverned, createGovernor, CircuitOpenError } from '../../src/control
 import { tokenBucket } from '../../src/control/token-bucket.js'
 import { circuitBreaker } from '../../src/control/circuit-breaker.js'
 import { fixed, aimd } from '../../src/control/aimd.js'
+import { MemoryCache } from '../../src/effects/types.js'
 
 function caps(now = 0): any {
   return { store: {}, llm: {}, clock: { now: () => now }, sinks: {} }
@@ -354,4 +355,62 @@ test('createGovernor composed with runInline-style dispatch: retry-attempt and b
   expect(events).toEqual([
     { kind: 'retry-attempt', name: 'flaky-leaf', attempt: 0, delayMs: expect.any(Number) },
   ])
+})
+
+test('a memo leaf calls fn once for repeated identical input, serving later calls from caps.cache', async () => {
+  let calls = 0
+  const fn = async (input: any) => { calls++; return { handle: input } }
+  const c = { ...caps(), cache: new MemoryCache() }
+  const first = await runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  const second = await runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  expect(calls).toBe(1)
+  expect(second).toEqual(first)
+})
+
+test('a memo leaf recomputes for a different input, keeping both results cached', async () => {
+  let calls = 0
+  const fn = async (input: any) => { calls++; return { handle: input } }
+  const c = { ...caps(), cache: new MemoryCache() }
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 2 }, c, undefined, noSleep)
+  expect(calls).toBe(2)
+})
+
+test('memo is a no-op without caps.cache: fn runs on every call', async () => {
+  let calls = 0
+  const fn = async () => { calls++; return 'ok' }
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, caps(), undefined, noSleep)
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, caps(), undefined, noSleep)
+  expect(calls).toBe(2)
+})
+
+test('a memo cache hit skips retries/breaker/concurrency entirely', async () => {
+  const fn = async () => 'ok'
+  const c = { ...caps(), cache: new MemoryCache() }
+  const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
+  breaker.onFailure(0) // trips open -- would reject a real attempt
+  await runGoverned('shrink', { kind: 'effect', memo: true }, fn, null, { ...c, clock: { now: () => 0 } }, undefined, noSleep)
+  const result = await runGoverned('shrink', { kind: 'effect', memo: true }, fn, null, { ...c, clock: { now: () => 0 } }, { circuitBreaker: breaker }, noSleep)
+  expect(result).toBe('ok')
+})
+
+test('emits memo-miss then memo-hit events across two calls with identical input', async () => {
+  const fn = async () => 'ok'
+  const c = { ...caps(), cache: new MemoryCache() }
+  const events: any[] = []
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, { ...noSleep, onEvent: e => events.push(e) })
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, { ...noSleep, onEvent: e => events.push(e) })
+  expect(events).toEqual([
+    { kind: 'memo-miss', name: 'shrink' },
+    { kind: 'memo-hit', name: 'shrink' },
+  ])
+})
+
+test('a failed attempt is not cached: a later call retries fn', async () => {
+  let calls = 0
+  const fn = async () => { calls++; throw new Error('boom') }
+  const c = { ...caps(), cache: new MemoryCache() }
+  await expect(runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, noSleep)).rejects.toThrow('boom')
+  await expect(runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, noSleep)).rejects.toThrow('boom')
+  expect(calls).toBe(2)
 })
