@@ -7,6 +7,7 @@
 import { Command } from 'commander'
 import { readFileSync, writeFileSync, mkdirSync, statSync, utimesSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
@@ -175,4 +176,11 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     console.error(`error: ${(e as Error).message}`)
     process.exitCode = 1
   }
+}
+
+// Runs main() when cli.ts is executed as the top-level script (e.g. via
+// bin/fileops.mjs's tsx shim), but not when it's merely imported (tests
+// import `transform`/`main` directly without triggering argv parsing).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main()
 }
