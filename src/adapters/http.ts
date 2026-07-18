@@ -11,8 +11,8 @@ import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/tra
 import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import type { OpSpec } from '../op/spec.js'
-import type { Governor } from '../op/types.js'
-import type { Cache, Store } from '../effects/types.js'
+import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
+import type { Cache, Store, Llm } from '../effects/types.js'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
@@ -38,7 +38,21 @@ function errorResponse(e: unknown, status = 400): Response {
 // host policy choice. Supplying opRunCache without opRunStore is a footgun
 // (see op-run.ts's OpRunOpts doc) -- a memoized leaf's Handle-shaped result
 // won't resolve against a fresh per-request MemoryStore on a later cache hit.
-export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store }
+//
+// opRunSinks: host-supplied SinkTarget instances a spec's `sink`/
+// `sink.fanout` targets can name, merged alongside op/sinks.ts's built-in
+// `store` target. Omitted entirely still leaves `store` reachable.
+//
+// opRunLlm: a host-supplied Llm implementation (real network calls to
+// whatever model backs it are the host's responsibility) so `POST /op/run`
+// can actually exercise text.ts's `extract`/`summarize` leaves. Omitted
+// entirely, those two leaves throw instead of silently running with a
+// do-nothing capability (see op-run.ts's OpRunOpts doc).
+//
+// opRunLeaves: host-registered LeafFns merged onto LEAF_REGISTRY (see
+// op-run.ts's OpRunOpts doc), so a spec's `leaf.name` can resolve against
+// logic this library never shipped.
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn> }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -205,7 +219,7 @@ const routes: Route[] = [
     handle: async (rawBody, env) => {
       const body = rawBody as { spec?: unknown; input?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore })
+      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves })
       return json({ result })
     },
   },

@@ -165,6 +165,26 @@ describe('mcp adapter', () => {
     const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'leaf', name: 'nope' }, input: null } })
     expect(result.isError).toBe(true)
   })
+
+  it('run_pipeline: a sink spec resolves the built-in `store` target with no host wiring required, echoing the piped value through', async () => {
+    const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'sink', targets: ['store'] }, input: { a: 1 } } })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ a: 1 })
+  })
+
+  it('run_pipeline: a reconcile spec reaches buildOp through the MCP tool schema (not silently stripped)', async () => {
+    const input = [
+      { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"x":1}')), type: 'application/json' },
+      { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"x":2,"y":3}')), type: 'application/json' },
+    ]
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'reconcile', opts: { mode: 'field-merge', defaultPolicy: 'last-write-wins' } }, input },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { base64: string }
+    expect(JSON.parse(atob(body.base64))).toEqual({ x: 2, y: 3 })
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {
@@ -213,5 +233,86 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
 
     await cachedClient.close()
     await cachedServer.close()
+  })
+
+  it('run_pipeline: opts.opRunSinks registers a host-supplied sink target', async () => {
+    const written: unknown[] = []
+    const sinkServer = new McpServer({ name: 'test-sinks', version: '0.0.0' })
+    registerFileopsTools(sinkServer, { opRunSinks: { log: { name: 'log', write: async (v) => { written.push(v); return v } } } })
+    const sinkClient = new Client({ name: 'test-sinks-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([sinkServer.connect(serverTransport), sinkClient.connect(clientTransport)])
+
+    const result = await sinkClient.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'sink', targets: ['log'] }, input: { a: 1 } } })
+    expect(result.isError).toBeFalsy()
+    expect(written).toEqual([{ a: 1 }])
+
+    await sinkClient.close()
+    await sinkServer.close()
+  })
+
+  it('run_pipeline: opts.opRunLlm wires a real Llm capability through to the summarize leaf', async () => {
+    const llmServer = new McpServer({ name: 'test-llm', version: '0.0.0' })
+    registerFileopsTools(llmServer, { opRunLlm: { markdownFromPdf: async () => { throw new Error('unused') }, summarize: async (text) => `summary of ${text}` } })
+    const llmClient = new Client({ name: 'test-llm-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([llmServer.connect(serverTransport), llmClient.connect(clientTransport)])
+
+    const result = await llmClient.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'leaf', name: 'summarize' }, input: { $handle: true, base64: b64('the full text') } },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toMatchObject({ abstract: 'summary of the full text' })
+
+    await llmClient.close()
+    await llmServer.close()
+  })
+
+  it('run_pipeline: opts.opRunLeaves lets a host register a custom leaf a spec can name', async () => {
+    const leavesServer = new McpServer({ name: 'test-leaves', version: '0.0.0' })
+    registerFileopsTools(leavesServer, { opRunLeaves: { shout: async (input) => ({ shouted: input }) } })
+    const leavesClient = new Client({ name: 'test-leaves-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([leavesServer.connect(serverTransport), leavesClient.connect(clientTransport)])
+
+    const result = await leavesClient.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 } } })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ shouted: { a: 1 } })
+
+    await leavesClient.close()
+    await leavesServer.close()
+  })
+
+  it('run_pipeline\'s tool description lists opts.opRunLeaves-registered leaves alongside the built-in registry (#158)', async () => {
+    const leavesServer = new McpServer({ name: 'test-leaves-desc', version: '0.0.0' })
+    registerFileopsTools(leavesServer, { opRunLeaves: { shout: async (input) => input } })
+    const leavesClient = new Client({ name: 'test-leaves-desc-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([leavesServer.connect(serverTransport), leavesClient.connect(clientTransport)])
+
+    const { tools } = await leavesClient.listTools()
+    const runPipeline = tools.find((t) => t.name === 'run_pipeline')
+    expect(runPipeline?.description).toContain('shout')
+    expect(runPipeline?.description).toContain('convert')
+
+    await leavesClient.close()
+    await leavesServer.close()
+  })
+
+  it('run_pipeline\'s tool description lists opts.opRunSinks-registered sink targets alongside the built-in registry (#166)', async () => {
+    const sinksServer = new McpServer({ name: 'test-sinks-desc', version: '0.0.0' })
+    registerFileopsTools(sinksServer, { opRunSinks: { log: { name: 'log', write: async (v) => v } } })
+    const sinksClient = new Client({ name: 'test-sinks-desc-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([sinksServer.connect(serverTransport), sinksClient.connect(clientTransport)])
+
+    const { tools } = await sinksClient.listTools()
+    const runPipeline = tools.find((t) => t.name === 'run_pipeline')
+    expect(runPipeline?.description).toContain('log')
+    expect(runPipeline?.description).toContain('store')
+
+    await sinksClient.close()
+    await sinksServer.close()
   })
 })

@@ -171,10 +171,11 @@ test('tarCreate is deterministic for identical input instead of embedding wall-c
 })
 
 test('tarCreate honors an explicit per-file mtime instead of always defaulting to epoch 0', () => {
-  const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime: 12345 }])
+  const mtime = 1_700_000_000_000
+  const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])
   const header = packed.subarray(0, 512)
   const octal = new TextDecoder().decode(header.subarray(136, 148)).replace(/\0.*$/, '').trim()
-  expect(parseInt(octal, 8)).toBe(12345)
+  expect(parseInt(octal, 8)).toBe(Math.floor(mtime / 1000))
 })
 
 test('zipCreate/zipExtract round-trips an explicit per-file mtime', () => {
@@ -258,9 +259,10 @@ test('gzipCreate/gzipExtract round-trips an explicit mtime, and omits it when no
 })
 
 test('tarCreate/tarExtract round-trips an explicit per-file mtime, including 0', () => {
-  const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime: 12345 }])
+  const mtime = 1_700_000_000_000
+  const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])
   const { entries } = tarExtract(packed)
-  expect(entries[0].mtime).toBe(12345)
+  expect(entries[0].mtime).toBe(Math.floor(mtime / 1000) * 1000)
 
   const zeroed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime: 0 }])
   expect(tarExtract(zeroed).entries[0].mtime).toBe(0)
@@ -287,10 +289,11 @@ test('pack/unpack round-trip files through Handles, for any archive format', asy
 
 test('unpack surfaces each entry mtime on the LeafFn result, not just archiveExtract', async () => {
   const store = new MemoryStore()
-  const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime: 12345 }])
+  const mtime = 1_700_000_000_000
+  const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])
   const archiveHandle = await putBytes(store, packed, 'application/x-tar')
   const { entries } = await unpack({ format: 'tar', handle: archiveHandle }, { store } as any)
-  expect(entries[0].mtime).toBe(12345)
+  expect(entries[0].mtime).toBe(Math.floor(mtime / 1000) * 1000)
 })
 
 test('pack honors an explicit per-file mtime for the gzip format (threaded through to archiveCreate)', async () => {

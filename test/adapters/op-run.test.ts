@@ -4,7 +4,7 @@ import { runOpSpec } from '../../src/adapters/op-run.js'
 import { bytesToB64 } from '../../src/adapters/base64.js'
 import type { OpSpec } from '../../src/op/spec.js'
 import { createGovernor } from '../../src/control/governor.js'
-import { MemoryStore, type Cache } from '../../src/effects/types.js'
+import { MemoryStore, type Cache, type Llm } from '../../src/effects/types.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -103,6 +103,28 @@ test('runOpSpec: hydrate() bails on the aggregate byte guard across multiple $ha
   await expect(runOpSpec({ spec, input })).rejects.toThrow(/bomb guard/)
 })
 
+test('runOpSpec: a sink spec resolves the built-in `store` target with no host wiring required, echoing the piped value through', async () => {
+  const spec: OpSpec = { tag: 'sink', targets: ['store'] }
+  const result = await runOpSpec({ spec, input: { a: 1 } })
+  expect(result).toEqual({ a: 1 })
+})
+
+test('runOpSpec: opts.sinks lets a host register/override a named target', async () => {
+  const written: unknown[] = []
+  const spec: OpSpec = { tag: 'sink', targets: ['log'] }
+  const result = await runOpSpec(
+    { spec, input: { a: 1 } },
+    { sinks: { log: { name: 'log', write: async (v) => { written.push(v); return v } } } },
+  )
+  expect(written).toEqual([{ a: 1 }])
+  expect(result).toEqual({ a: 1 })
+})
+
+test('runOpSpec: an unknown sink target surfaces an error instead of silently no-oping', async () => {
+  const spec: OpSpec = { tag: 'sink', targets: ['nope'] }
+  await expect(runOpSpec({ spec, input: {} })).rejects.toThrow()
+})
+
 test('runOpSpec: opts.governors persist breaker state across separate calls, not just within one', async () => {
   const governors = { convert: createGovernor('convert', { circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000, halfOpenSuccesses: 1 } }) }
   const spec: OpSpec = { tag: 'leaf', name: 'convert' }
@@ -111,4 +133,33 @@ test('runOpSpec: opts.governors persist breaker state across separate calls, not
 
   const validInput = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' }
   await expect(runOpSpec({ spec, input: validInput }, { governors })).rejects.toThrow(/circuit open/)
+})
+
+test('runOpSpec: summarize (an LLM-effect leaf) throws by default -- no path to a real Llm capability', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'summarize' }
+  const input = { $handle: true, base64: bytesToB64(new TextEncoder().encode('the full text')) }
+  await expect(runOpSpec({ spec, input })).rejects.toThrow(/llm capability is not available/)
+})
+
+test('runOpSpec: opts.llm lets a host wire a real Llm capability through to the summarize/extract leaves', async () => {
+  const llm: Llm = {
+    markdownFromPdf: async () => { throw new Error('unused') },
+    summarize: async (text) => `summary of ${text}`,
+  }
+  const spec: OpSpec = { tag: 'leaf', name: 'summarize' }
+  const input = { $handle: true, base64: bytesToB64(new TextEncoder().encode('the full text')) }
+  const result = await runOpSpec({ spec, input }, { llm }) as { abstract: string; summaryHandle: { base64: string } }
+  expect(result.abstract).toBe('summary of the full text')
+  expect(Buffer.from(result.summaryHandle.base64, 'base64').toString('utf8')).toBe('summary of the full text')
+})
+
+test('runOpSpec: opts.leaves lets a host register a custom leaf a spec can name', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const result = await runOpSpec({ spec, input: { a: 1 } }, { leaves: { shout: async (input) => ({ shouted: input }) } })
+  expect(result).toEqual({ shouted: { a: 1 } })
+})
+
+test('runOpSpec: an unknown leaf name still surfaces a clear error when opts.leaves is supplied but doesn\'t cover it', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'nope' }
+  await expect(runOpSpec({ spec, input: null }, { leaves: { shout: async (input) => input } })).rejects.toThrow(/unknown leaf "nope"/)
 })

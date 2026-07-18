@@ -81,6 +81,23 @@ There is no linter in this repo. Run both locally before pushing.
 - **Self-isolate work in a git worktree**: `git worktree add .scratch-worktrees/<slug>
   -b <type>/<slug>` — don't work directly on a checked-out branch that another
   session/task might also be touching.
+- **Before reimplementing a requeued issue, check for a stale closed-PR builder
+  branch**: a prior attempt's branch (`git fetch origin
+  bot/issue-build-<run-id>`, findable via the issue's own comment history/linked
+  PRs) can still exist even after its PR was closed without merging — diff it
+  against current `main` for the relevant path (`git diff main <branch> --
+  <path>`) to turn a from-scratch design task into a verify-and-adapt one. Don't
+  merge/cherry-pick it wholesale though — it may predate a feature that's since
+  landed on `main` (see #143/#162), so reimplement against current `main` using
+  it as a reference, not a patch. When several sibling stale branches exist for
+  the same issue (multiple prior batches each attempted it independently),
+  they can diverge in actual design/naming — and a since-filed follow-up issue
+  for the "next increment" may describe function/line details from a sibling
+  attempt that wasn't the one ultimately merged (#143's own follow-ups, #145
+  and #161, cite a `validatePipeShapes` name/lines that don't match the
+  `shapeCompatible`/`stepShape` implementation that actually landed from a
+  different sibling branch) — verify a follow-up issue's cited names/lines
+  against current code rather than trusting them verbatim.
 
 ## Consumers
 
@@ -208,6 +225,15 @@ There is no linter in this repo. Run both locally before pushing.
   Handle — no extra validation beyond what the pure function already does.
   `unzip` itself stays untouched (zip-only, exact signature already depended on
   by `sux`'s tracer-bullet op tree) rather than being folded into `unpack`.
+  The same collision can happen *across* two different modules, not just
+  within one: `src/index.ts`'s `export *` barrel re-exports every top-level
+  module, so a new module whose export shares a name already used elsewhere
+  in the barrel (e.g. `src/op/reshape.ts`'s `stamp` leaf colliding with
+  `src/handles/handle.ts`'s raw `stamp(h, clock)` helper, #142/#133) fails
+  only `npm run build` (`tsc`'s "already exported a member" error) — `npm
+  test` stays green, since vitest doesn't type-check the barrel — so always
+  run both gates, and grep `src/index.ts`'s re-exported modules for an
+  existing same-named export before picking a new leaf/helper's name.
 - Memoization convention: `LeafOpts.memo` (opt-in per leaf, independent of
   `kind`/`heavy`) makes `runGoverned` (`src/control/governor.ts`) check
   `caps.cache` for a prior result — keyed by `memoKey(name, input)`
@@ -256,4 +282,36 @@ There is no linter in this repo. Run both locally before pushing.
   `redact`/`scrub` all wrap their result as `{handle, ...extra}`, but
   `convert` returns a bare `Handle` — so `unwrapHandle` belongs after
   `shrink`/`redact` in a pipe, never after `convert` (it would read a
-  nonexistent `.handle` off the bare Handle and produce `undefined`).
+  nonexistent `.handle` off the bare Handle and produce `undefined`). Update
+  (#143): the `unwrapHandle`-after-`convert` mistake above is now caught at
+  `buildOp` time, not just documented — `LEAF_SHAPES` (`src/op/registry.ts`)
+  declares each built-in leaf's coarse input/output shape (`'handle'` |
+  `'handle[]'` | `{ object: {...} }` | `'unknown'`), and a `pipe` spec's
+  adjacent steps are checked against each other via `shapeCompatible`
+  (`src/op/spec.ts`) before the tree is built. Only a `leaf` step's shape is
+  known this way — `map`/`pipe`/`sink` steps, and any name absent from
+  `LEAF_SHAPES` (a host-registered `extraLeaves` leaf, or a future built-in
+  nobody added an entry for), read as `'unknown'` and are permissively
+  treated as compatible with anything, so those mismatches still only
+  surface at `runInline` time. A future built-in leaf needs its own
+  `LEAF_SHAPES` entry to get build-time checking; nothing enforces that the
+  table stays in sync with `LEAF_REGISTRY` beyond the test asserting their
+  key sets match. Update (#161): an object field's shape can now also be
+  `{ arrayObject: Record<string, 'handle' | 'unknown'> }` — pack's `files`
+  input field and unpack's `entries` output field (each `Array<{name,
+  handle, mtime}>`) are declared this way instead of collapsing to
+  `'unknown'`, so a pipe step mismatching one of those fields (e.g. `unpack`
+  feeding straight into `pack`, whose `files` key `unpack`'s `entries`-only
+  output never has) is now a build-time error too. This only reaches one
+  array level deep and doesn't help two leaves whose per-entry field is
+  named differently (`entries` vs `files`) actually chain — that's #168's
+  still-open design question, not solved here.
+- Prototype-pollution-guard gotcha for any future `Object.create(null)`-based
+  registry (`LEAF_REGISTRY`, and now `SINK_REGISTRY` in `src/op/sinks.ts`,
+  #147): merging one into a live config/Caps object via object-literal spread
+  (`{ ...REGISTRY, ...extra }`) silently discards the null-prototype
+  protection — spread's `CreateDataProperty` semantics always produce a
+  plain `Object.prototype`-based target, even when every source object is
+  itself null-prototype. Build the merged object with `Object.assign(
+  Object.create(null), REGISTRY, extra)` instead (see
+  `src/adapters/op-run.ts`'s `caps.sinks` construction for the pattern).

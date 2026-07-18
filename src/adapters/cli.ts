@@ -7,16 +7,26 @@
 import { Command } from 'commander'
 import { readFileSync, writeFileSync, mkdirSync, statSync, utimesSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, type Format } from '../domain/transform.js'
-import { runOpSpec } from './op-run.js'
-import { LEAF_REGISTRY } from '../op/registry.js'
+import { runOpSpec, type OpRunOpts } from './op-run.js'
+import { mergeLeaves } from '../op/registry.js'
 import type { OpSpec } from '../op/spec.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 const program = new Command()
+
+// Set by main() before parsing, read by the `pipeline run` action below.
+// commander's .action() closures are built once at module load time, before
+// main()'s caller has a chance to supply anything -- a module-level slot is
+// how a programmatic caller of main() (unlike bin/fileops.mjs, which has no
+// way to construct a live Llm/Store/Cache object from argv) hands runOpSpec
+// the same host-configurable capabilities HTTP's Env / MCP's
+// RegisterFileopsToolsOptions already offer.
+let cliOpRunOpts: OpRunOpts = {}
 program.name('suxlib-fileops').description('Shared file-ops CLI: archive, sanitize, transform, pdf-shrink').version('0.0.0')
 
 // ---------- archive ----------
@@ -33,7 +43,11 @@ archiveCmd
   .action((files: string[], opts: { output: string; format: string; mtime?: string }) => {
     const format = opts.format as ArchiveFormat
     if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, or gzip (got '${format}')`)
-    const mtimeOverride = opts.mtime !== undefined ? Number(opts.mtime) : undefined
+    let mtimeOverride: number | undefined
+    if (opts.mtime !== undefined) {
+      mtimeOverride = Number(opts.mtime)
+      if (Number.isNaN(mtimeOverride)) throw new Error(`--mtime must be a numeric epoch-ms value (got '${opts.mtime}')`)
+    }
     const entries = files.map((f) => ({ name: basename(f), data: new Uint8Array(readFileSync(f)), mtime: mtimeOverride ?? statSync(f).mtimeMs }))
     const out = archiveCreate(format, entries)
     writeFileSync(opts.output, out)
@@ -245,19 +259,56 @@ function extractHandleFiles(value: unknown, files: Array<{ name: string; bytes: 
   return value
 }
 
-pipelineCmd
+/**
+ * Loads `--config <path>`'s module and returns its default export as an
+ * OpRunOpts -- the shell binary's way of reaching a live Llm/Store/Cache/
+ * Governors/Sinks object, which (unlike a programmatic caller of `main()`)
+ * it has no way to construct from argv alone. tsx (already how
+ * bin/fileops.mjs runs this whole CLI) lets a dynamic `import()` load
+ * arbitrary TS at runtime, so a `--config` module can be .ts without any
+ * extra build step. `pathToFileURL` makes the resolved path import-safe on
+ * every platform (a bare absolute path isn't a valid module specifier on
+ * Windows).
+ */
+async function loadOpRunOptsConfig(configPath: string): Promise<OpRunOpts> {
+  const resolved = resolve(configPath)
+  const mod = (await import(pathToFileURL(resolved).href)) as { default?: unknown }
+  if (!mod.default || typeof mod.default !== 'object') {
+    throw new Error(`--config module '${configPath}' must have a default export (an OpRunOpts object)`)
+  }
+  return mod.default as OpRunOpts
+}
+
+// Read by main() to refresh pipelineRunCmd's description right before
+// parsing, once opRunOpts.leaves (a programmatic caller's host-registered
+// leaves) is known -- unlike mcp.ts's run_pipeline (whose opts are already in
+// scope when its description is built), this Command tree is built once at
+// module load, before main(argv, opRunOpts) is ever called. `--config`'s
+// leaves stay out of reach here regardless: that module only loads inside
+// `run`'s own action, per invocation, after --help would already have been
+// handled -- there's no point in the CLI lifecycle where it's known before a
+// help string needs to exist (#158).
+function pipelineRunDescription(leaves: Record<string, unknown>): string {
+  return 'Run a JSON op-tree pipeline spec over the leaf registry ' +
+    `(${Object.keys(leaves).join(', ')}), mirroring POST /op/run's request body.`
+}
+
+// Exported for tests: main() refreshes this command's description right
+// before parsing, based on opRunOpts.leaves (#158) -- asserting on the
+// rendered description is otherwise only reachable by shelling out to
+// `--help` and dealing with commander's process.exit-on-help behavior.
+export const pipelineRunCmd = pipelineCmd
   .command('run')
-  .description(
-    'Run a JSON op-tree pipeline spec over the leaf registry ' +
-      `(${Object.keys(LEAF_REGISTRY).join(', ')}), mirroring POST /op/run's request body.`,
-  )
+  .description(pipelineRunDescription(mergeLeaves()))
   .argument('<spec-file>', 'JSON file: { spec: OpSpec, input }. Input values shaped { "$file": "<path>", "type"?: "<mime>" } are read off disk and marshalled into Handle refs.')
   .option('-o, --output <dir>', 'write Handle-shaped result value(s) to files in this directory instead of inlining base64 in the printed JSON')
-  .action(async (specFile: string, opts: { output?: string }) => {
+  .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- llm/store/cache/governors/sinks for this run, the shell CLI\'s equivalent of a programmatic caller\'s main(argv, opRunOpts)')
+  .action(async (specFile: string, opts: { output?: string; config?: string }) => {
     const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown; input?: unknown }
     if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
     const input = resolveFileRefs(parsed.input, dirname(resolve(specFile)))
-    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input })
+    const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
+    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input }, runOpts)
     if (opts.output) {
       const files: Array<{ name: string; bytes: Uint8Array }> = []
       const shaped = extractHandleFiles(result, files)
@@ -276,8 +327,14 @@ pipelineCmd
 export const transform = dispatchTransform
 
 /** Entry point called by bin/fileops.mjs. Kept separate from module load so
- * importing `transform` (e.g. from tests) never triggers argv parsing. */
-export async function main(argv: string[] = process.argv): Promise<void> {
+ * importing `transform` (e.g. from tests) never triggers argv parsing.
+ * `opRunOpts` lets a programmatic caller (not the bin script, which has no
+ * way to construct a live JS object from argv) supply `pipeline run` the
+ * same host-configurable governors/cache/store/sinks/llm HTTP's Env and
+ * MCP's RegisterFileopsToolsOptions already offer runOpSpec. */
+export async function main(argv: string[] = process.argv, opRunOpts: OpRunOpts = {}): Promise<void> {
+  cliOpRunOpts = opRunOpts
+  pipelineRunCmd.description(pipelineRunDescription(mergeLeaves(opRunOpts.leaves)))
   try {
     await program.parseAsync(argv)
   } catch (e) {

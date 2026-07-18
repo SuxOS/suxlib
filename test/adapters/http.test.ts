@@ -163,6 +163,21 @@ describe('http adapter', () => {
     expect(res.status).toBe(400)
   })
 
+  it('POST /op/run: a sink spec resolves the built-in `store` target with no host wiring required, echoing the piped value through', async () => {
+    const res = await post('op/run', { spec: { tag: 'sink', targets: ['store'] }, input: { a: 1 } })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: { a: number } }
+    expect(body.result).toEqual({ a: 1 })
+  })
+
+  it('POST /op/run: env.opRunSinks registers a host-supplied sink target', async () => {
+    const written: unknown[] = []
+    const env: Env = { opRunSinks: { log: { name: 'log', write: async (v) => { written.push(v); return v } } } }
+    const res = await post('op/run', { spec: { tag: 'sink', targets: ['log'] }, input: { a: 1 } }, {}, env)
+    expect(res.status).toBe(200)
+    expect(written).toEqual([{ a: 1 }])
+  })
+
   it('POST /op/run: env.opRunCache is reused across requests, so a memo leaf runs only once for the same input', async () => {
     let puts = 0
     const backing = new Map<string, unknown>()
@@ -184,5 +199,28 @@ describe('http adapter', () => {
     await post('op/run', body, {}, env)
     await post('op/run', body, {}, env)
     expect(puts).toBe(1)
+  })
+
+  it('POST /op/run: summarize throws with no env.opRunLlm supplied', async () => {
+    const res = await post('op/run', { spec: { tag: 'leaf', name: 'summarize' }, input: { $handle: true, base64: b64('the full text') } })
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/llm capability is not available/)
+  })
+
+  it('POST /op/run: env.opRunLlm wires a real Llm capability through to the summarize leaf', async () => {
+    const env: Env = { opRunLlm: { markdownFromPdf: async () => { throw new Error('unused') }, summarize: async (text) => `summary of ${text}` } }
+    const res = await post('op/run', { spec: { tag: 'leaf', name: 'summarize' }, input: { $handle: true, base64: b64('the full text') } }, {}, env)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: { abstract: string } }
+    expect(body.result.abstract).toBe('summary of the full text')
+  })
+
+  it('POST /op/run: env.opRunLeaves lets a host register a custom leaf a spec can name', async () => {
+    const env: Env = { opRunLeaves: { shout: async (input) => ({ shouted: input }) } }
+    const res = await post('op/run', { spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 } }, {}, env)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: { shouted: { a: number } } }
+    expect(body.result.shouted).toEqual({ a: 1 })
   })
 })

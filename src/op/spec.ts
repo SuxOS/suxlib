@@ -1,6 +1,7 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
-import { op, pipe, map } from './combinators.js'
-import { resolveLeaf } from './registry.js'
+import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
+import { op, pipe, map, sink, reconcile } from './combinators.js'
+import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
@@ -8,12 +9,67 @@ export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
+  | { tag: 'sink'; targets: string[] }
+  | { tag: 'reconcile'; opts: ReconcileOpts }
+
+const FIELD_POLICIES: FieldPolicy[] = ['last-write-wins', 'union', 'keep-first']
+const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge']
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
 // into an unbounded retry storm or a huge fan-out.
 const MAX_LEAF_RETRIES = 5
 const MAX_MAP_CONCURRENCY = 32
+
+function shapeLabel(s: LeafShape): string {
+  if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
+  return `{${Object.keys(s.object).join(', ')}}`
+}
+
+/**
+ * A field's own shape check, one level deeper than shapeCompatible's
+ * top-level object comparison: a plain 'handle' field still just needs a
+ * matching 'handle' on the output side, but an `arrayObject` field (pack's
+ * `files`, unpack's `entries`, #161) needs the output side to also declare
+ * an `arrayObject` whose handle-bearing keys line up -- same "'unknown' is
+ * permissive, only a *declared* mismatch blocks" rule as the top level.
+ */
+function fieldCompatible(output: LeafFieldShape | undefined, input: LeafFieldShape): boolean {
+  if (input === 'unknown') return true
+  if (input === 'handle') return output === 'handle'
+  if (typeof output !== 'object' || !('arrayObject' in output)) return false
+  return Object.entries(input.arrayObject).every(([k, v]) => v !== 'handle' || output.arrayObject[k] === 'handle')
+}
+
+function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
+  if (output === 'unknown' || input === 'unknown') return true
+  if (typeof output === 'string' || typeof input === 'string') return output === input
+  return Object.entries(input.object).every(([k, v]) => fieldCompatible(output.object[k], v))
+}
+
+/**
+ * A pipe step's declared shape. `leaf` reads straight from LEAF_SHAPES. `map`
+ * derives its own boundary from its inner op's shape, one array level up
+ * (issue #145): a `handle` inner input/output means the map as a whole is
+ * `handle[]` on that side, since `unzip`'s `handle[]` output is the one
+ * representable array shape this scheme has. Anything else the inner op's
+ * shape resolves to (including 'unknown', or 'handle[]' which would need a
+ * two-level array this scheme can't represent) makes the map's own boundary
+ * 'unknown' too, rather than guessing. A nested `pipe`/`sink` step composing
+ * multiple leaves has no single input/output shape without walking further
+ * than a single adjacent-step comparison needs to, so those still read as
+ * 'unknown' on both sides.
+ */
+function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
+  if (!s || typeof s !== 'object') return 'unknown'
+  if (s.tag === 'leaf') return LEAF_SHAPES[s.name]?.[side] ?? 'unknown'
+  if (s.tag === 'map') return stepShape(s.op, side) === 'handle' ? 'handle[]' : 'unknown'
+  return 'unknown'
+}
+
+function stepLabel(s: OpSpec): string {
+  return s && typeof s === 'object' && s.tag === 'leaf' ? s.name : String((s as { tag?: unknown })?.tag)
+}
 
 /**
  * Shallow-merges a leaf spec's static `params` onto the piped value flowing
@@ -40,17 +96,42 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
 /**
  * Builds a real Op tree from a caller-supplied JSON description, resolving
  * every leaf name against the registry -- a spec can never carry a live `fn`,
- * only a name. Deliberately supports just `leaf`/`pipe`/`map`: `reconcile`,
- * `sink`, and `ask` all depend on host-provided capabilities (a sink target,
- * an Ask implementation) that a stateless adapter call has no way to supply,
- * so composing those still requires building an Op tree in-process.
+ * only a name. Supports `leaf`/`pipe`/`map`/`sink`: a `sink` spec only carries
+ * target *names*, resolved against Caps.sinks at run time (runInline's `case
+ * 'sink'`) the same way it already works for an in-process caller -- see
+ * SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks (../adapters/op-run.ts) for
+ * where those names come from. `reconcile` only needs `caps.store` (already
+ * supplied by every adapter call, see runInline's `case 'reconcile'`), so it's
+ * expressible directly as an OpSpec variant. `ask` still depends on a live Ask
+ * capability a stateless adapter call has no way to supply, so composing that
+ * still requires building an Op tree in-process.
+ *
+ * `extraLeaves`, when supplied, merges host-registered leaves onto
+ * LEAF_REGISTRY (mergeLeaves, ./registry.ts) once per top-level buildOp call
+ * -- mirroring OpRunOpts.sinks -- and every recursive leaf-name resolution
+ * within this spec (pipe steps, map's inner op) resolves against that same
+ * merged table, not just the top-level node.
+ *
+ * A `pipe`'s adjacent steps are checked against each other's declared
+ * LEAF_SHAPES (./registry.ts) before the tree is built, so a caller-supplied
+ * shape mismatch (e.g. `unwrapHandle` straight after `convert`, #132) throws
+ * a clear build-time error naming both steps instead of reaching `runInline`
+ * and failing there -- sometimes silently, per #143. A `leaf` step's shape
+ * comes straight from LEAF_SHAPES; a `map` step's own boundary is derived
+ * from its inner op's shape, one array level up (#145); a nested `pipe`/
+ * `sink` step still reads as 'unknown' (permissively compatible with
+ * anything) since it has no single input/output shape (see stepShape's doc).
  */
-export function buildOp(spec: OpSpec): Op {
+export function buildOp(spec: OpSpec, extraLeaves?: Record<string, LeafFn>): Op {
+  return buildOpNode(spec, mergeLeaves(extraLeaves))
+}
+
+function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op {
   if (!spec || typeof spec !== 'object') throw new Error('op spec must be an object')
   switch (spec.tag) {
     case 'leaf': {
       if (typeof spec.name !== 'string' || !spec.name) throw new Error('leaf spec requires a `name`')
-      const fn = resolveLeaf(spec.name)
+      const fn = resolveLeaf(spec.name, leaves)
       const o = spec.opts ?? {}
       if (o.retries !== undefined && (!Number.isInteger(o.retries) || o.retries < 0 || o.retries > MAX_LEAF_RETRIES)) {
         throw new Error(`leaf "${spec.name}": \`retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}`)
@@ -60,21 +141,66 @@ export function buildOp(spec: OpSpec): Op {
       }
       const opts: LeafOpts = { kind: o.kind ?? 'effect', retries: o.retries ?? 0, heavy: o.heavy, memo: o.memo }
       const params = spec.params
-      const leafFn: LeafFn = params ? (input, caps, idempotencyKey) => fn(mergeParams(input, params), caps, idempotencyKey) : fn
-      return op(spec.name, leafFn, opts)
+      const leafOp = op(spec.name, fn, opts)
+      if (!params) return leafOp
+      // Merge params in a preceding pure step rather than inside fn's own closure,
+      // so a memoized leaf (opts.memo) computes its cache key -- runGoverned's
+      // memoKey(name, input), see src/control/governor.ts -- from the *merged*
+      // input. Folding params into fn's closure instead would let memoKey see only
+      // the pre-merge piped value, hashing two differently-parameterized calls
+      // (e.g. convert's `to: 'yaml'` vs `to: 'json'`) to the same key (#131).
+      const mergeOp = op(`${spec.name}:params`, async (input) => mergeParams(input, params), { kind: 'pure', retries: 0 })
+      return pipe(mergeOp, leafOp)
     }
     case 'pipe': {
       if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('pipe spec requires a non-empty `steps` array')
-      return pipe(...spec.steps.map(buildOp))
+      for (let i = 0; i + 1 < spec.steps.length; i++) {
+        const prev = spec.steps[i]; const next = spec.steps[i + 1]
+        const output = stepShape(prev, 'output'); const input = stepShape(next, 'input')
+        if (!shapeCompatible(output, input)) {
+          throw new Error(
+            `pipe step ${i + 1} ("${stepLabel(next)}") expects ${shapeLabel(input)} input, but step ${i} ` +
+            `("${stepLabel(prev)}") produces ${shapeLabel(output)}`,
+          )
+        }
+      }
+      return pipe(...spec.steps.map((s) => buildOpNode(s, leaves)))
     }
     case 'map': {
       if (!spec.op) throw new Error('map spec requires an `op`')
       if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
         throw new Error(`map spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
       }
-      return map(buildOp(spec.op), { concurrency: fixed(spec.concurrency) })
+      return map(buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency) })
+    }
+    case 'sink': {
+      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
+        throw new Error('sink spec requires a non-empty `targets` array of non-empty strings')
+      }
+      return sink.fanout(...spec.targets)
+    }
+    case 'reconcile': {
+      const o = spec.opts
+      if (!o || typeof o !== 'object' || !RECONCILE_MODES.includes(o.mode as string)) {
+        throw new Error(`reconcile spec's \`opts.mode\` must be one of: ${RECONCILE_MODES.join(', ')}`)
+      }
+      if (o.mode === 'field-merge') {
+        if (o.defaultPolicy !== undefined && !FIELD_POLICIES.includes(o.defaultPolicy)) {
+          throw new Error(`reconcile spec's \`opts.defaultPolicy\` must be one of: ${FIELD_POLICIES.join(', ')}`)
+        }
+        if (o.policy !== undefined) {
+          if (typeof o.policy !== 'object' || o.policy === null || Array.isArray(o.policy)) {
+            throw new Error('reconcile spec\'s `opts.policy` must be an object')
+          }
+          for (const [k, v] of Object.entries(o.policy)) {
+            if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
+            if (!FIELD_POLICIES.includes(v)) throw new Error(`reconcile spec's \`opts.policy["${k}"]\` must be one of: ${FIELD_POLICIES.join(', ')}`)
+          }
+        }
+      }
+      return reconcile(o)
     }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, sink, reconcile)`)
   }
 }

@@ -1,5 +1,6 @@
 import type { LeafFn } from './types.js'
 import type { Handle } from '../effects/types.js'
+import { stamp } from '../handles/handle.js'
 
 // Reshape leaves: every {handle, ...opts}-shaped leaf (pdf.ts's shrink,
 // sanitize.ts's redact, transform.ts's convert) already agrees on the field
@@ -13,4 +14,18 @@ import type { Handle } from '../effects/types.js'
 // these two only bridge the `handle` field itself.
 export const wrapHandle: LeafFn = async (handle) => ({ handle: handle as Handle })
 
-export const unwrapHandle: LeafFn = async (input) => (input as { handle: Handle }).handle
+export const unwrapHandle: LeafFn = async (input) => {
+  const handle = (input as { handle?: Handle }).handle
+  if (handle === undefined) throw new Error('unwrapHandle: input has no `handle` field -- did a bare-Handle-returning leaf (e.g. convert) precede it in the pipe?')
+  return handle
+}
+
+// Stamps a bare Handle with caps.clock's current time, so it satisfies
+// reconcile.ts's lastWriteWins() (which requires every input Handle to carry
+// producedAt) -- registered in LEAF_REGISTRY (as "stamp") so a JSON op spec
+// can reach it without a host-side non-registered leaf. Named stampLeaf, not
+// stamp, so index.ts's `export *` barrel doesn't collide with handle.ts's
+// raw stamp(h, clock) helper this wraps -- same class of gotcha CLAUDE.md's
+// "Leaf-naming convention" documents for domain pure fn vs. LeafFn wrapper
+// pairs, just surfacing here across two different modules instead of one.
+export const stampLeaf: LeafFn = async (handle, caps) => stamp(handle as Handle, caps.clock)

@@ -15,8 +15,9 @@
 
 import type { Handle, Llm, Cache, Store } from '../effects/types.js'
 import { MemoryStore } from '../effects/types.js'
-import type { Caps, Governor } from '../op/types.js'
+import type { Caps, Governor, SinkTarget, LeafFn } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
+import { SINK_REGISTRY } from '../op/sinks.js'
 import { runInline } from '../runtime/inline.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
@@ -107,8 +108,30 @@ export type OpRunRequest = { spec: OpSpec; input: unknown }
  * per-call MemoryStore will throw ("handle not found") the moment the result
  * is dehydrated, not silently misbehave. Pass the same `store` alongside
  * `cache` (both long-lived) for cross-call memoization to actually work.
+ *
+ * `sinks`: host-supplied SinkTarget instances (a log, a queue, a second
+ * store), merged alongside SINK_REGISTRY's built-in `store` target -- a spec
+ * name matching a key here wins over SINK_REGISTRY, letting a host override
+ * `store` too if it wants different re-put semantics. Omitted entirely still
+ * leaves the built-in `store` target reachable, unlike governors/cache which
+ * are pure no-ops when omitted.
+ *
+ * `llm`: a host-supplied Llm implementation (real network calls to whatever
+ * model backs it are the host's responsibility -- this repo stays
+ * dependency-light and never constructs one itself), threaded through to
+ * `text.ts`'s `extract`/`summarize` leaves the same way `store`/`cache` are.
+ * Omitted entirely, `caps.llm` falls back to `llmUnavailable` below, so those
+ * two leaves throw a clear error instead of silently running with a
+ * do-nothing capability.
+ *
+ * `leaves`: host-registered LeafFns merged onto LEAF_REGISTRY (src/op/
+ * registry.ts's `mergeLeaves`, same host-overrides-built-in order as
+ * `sinks`/SINK_REGISTRY), letting a caller-supplied OpSpec's `leaf.name`
+ * resolve against logic this library never shipped -- a host embedding
+ * suxlib (e.g. `sux`) registering its own leaf. Omitted entirely still
+ * resolves every built-in registry leaf as before.
  */
-export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn> }
 
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
@@ -123,8 +146,9 @@ export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; s
  */
 export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
   const store = opts.store ?? new MemoryStore()
-  const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks: {}, governors: opts.governors, cache: opts.cache }
-  const tree = buildOp(spec)
+  const sinks = Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks) as Record<string, SinkTarget>
+  const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache }
+  const tree = buildOp(spec, opts.leaves)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
   const result = await runInline(tree, hydrated, caps)
   return dehydrate(store, result)
