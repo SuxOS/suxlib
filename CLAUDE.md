@@ -183,3 +183,13 @@ There is no linter in this repo. Run both locally before pushing.
   `sux`-side `Ask` implementation owns defining/parsing the timeout format as
   part of building real pause/resume — don't add parsing here without a scoped
   design pass.
+- Leaf-naming convention: each `src/domain/*.ts` pure function that also gets a
+  Handle-based `LeafFn` wrapper (for op-tree use, `unzip`'s pattern) needs a
+  *different* export name than the pure function, since both live in the same
+  module — `archiveCreate`/`archiveExtract` → `pack`/`unpack`, `pdfShrink` →
+  `shrink`, `redactText`/`sanitizeImage` → `redact`/`scrub`, `dispatchTransform`
+  → `convert`. Each wrapper resolves its input Handle(s) via `caps.store`, calls
+  the pure function unchanged, and `putBytes`/`putText`s the result back to a
+  Handle — no extra validation beyond what the pure function already does.
+  `unzip` itself stays untouched (zip-only, exact signature already depended on
+  by `sux`'s tracer-bullet op tree) rather than being folded into `unpack`.

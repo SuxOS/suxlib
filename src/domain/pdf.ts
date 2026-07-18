@@ -6,6 +6,9 @@
 // loadBoundedPdf below for its own bomb-guarded PDFDocument.load() call).
 
 import { PDFDocument } from 'pdf-lib'
+import type { LeafFn } from '../op/types.js'
+import type { Handle } from '../effects/types.js'
+import { resolve, putBytes } from '../handles/handle.js'
 
 /**
  * Reject a PDF larger than this before handing it to pdf-lib. Bounds the raw
@@ -130,4 +133,15 @@ export async function pdfShrink(input: Uint8Array, opts: PdfShrinkOptions = {}):
 export async function pdfPageCount(input: Uint8Array): Promise<number> {
   const doc = await loadBoundedPdf(input)
   return doc.getPageCount()
+}
+
+// shrink: Handle-based wrapper around pdfShrink, following archive.ts's
+// pack/unpack — resolve the input Handle, run the pure function, put the
+// result back as a Handle.
+export type ShrinkInput = { handle: Handle } & PdfShrinkOptions
+export const shrink: LeafFn = async (input, caps) => {
+  const { handle, ...opts } = input as ShrinkInput
+  const bytes = await resolve(caps.store, handle)
+  const result = await pdfShrink(bytes, opts)
+  return { handle: await putBytes(caps.store, result.bytes, 'application/pdf'), inputBytes: result.inputBytes, outputBytes: result.outputBytes, savedPct: result.savedPct }
 }

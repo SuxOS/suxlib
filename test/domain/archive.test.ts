@@ -2,9 +2,11 @@ import { test, expect } from 'vitest'
 import { zipSync, gzipSync, strToU8 } from 'fflate'
 import { crc32 } from 'node:zlib'
 import { MemoryStore } from '../../src/effects/types.js'
-import { putBytes, resolveText } from '../../src/handles/handle.js'
+import { putBytes, resolve, resolveText } from '../../src/handles/handle.js'
 import {
   unzip,
+  pack,
+  unpack,
   zipCreate,
   zipExtract,
   gzipCreate,
@@ -134,6 +136,14 @@ test('gzipCreate is deterministic — two calls with identical input produce byt
   expect(secondTgz).toEqual(firstTgz)
 })
 
+test('archiveCreate honors an explicit per-file mtime for the gzip format instead of always defaulting to epoch 0', () => {
+  const data = strToU8('AAA')
+  const viaArchiveCreate = archiveCreate('gzip', [{ name: 'a.txt', data, mtime: 12345 }])
+  const viaGzipCreate = gzipCreate(data, 12345)
+  expect(viaArchiveCreate).toEqual(viaGzipCreate)
+  expect(viaArchiveCreate).not.toEqual(gzipCreate(data, 0))
+})
+
 test('tarCreate/tarExtract round-trips multiple files and reports skipped non-regular entries', () => {
   const packed = tarCreate([
     { name: 'a.txt', data: strToU8('AAA') },
@@ -160,6 +170,27 @@ test('tarExtract throws on a truncated entry instead of silently returning a sho
   const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAAAAAAAAA') }])
   const truncated = packed.subarray(0, 512 + 5) // header intact, only 5 of the declared 10 data bytes present
   expect(() => tarExtract(truncated)).toThrow(/malformed\/truncated tar/)
+})
+
+test('pack/unpack round-trip files through Handles, for any archive format', async () => {
+  const store = new MemoryStore()
+  for (const format of ['zip', 'tar'] as const) {
+    const ha = await putBytes(store, strToU8('AAA'), 'text/plain')
+    const hb = await putBytes(store, strToU8('BBB'), 'text/plain')
+    const archiveHandle = await pack({ format, files: [{ name: 'a.txt', handle: ha }, { name: 'b.txt', handle: hb }] }, { store } as any)
+    const { entries } = await unpack({ format, handle: archiveHandle }, { store } as any)
+    expect(entries.length).toBe(2)
+    const texts = await Promise.all(entries.map((e: any) => resolveText(store, e.handle)))
+    expect(texts.sort()).toEqual(['AAA', 'BBB'])
+  }
+})
+
+test('pack honors an explicit per-file mtime for the gzip format (threaded through to archiveCreate)', async () => {
+  const store = new MemoryStore()
+  const h = await putBytes(store, strToU8('AAA'), 'text/plain')
+  const archiveHandle = await pack({ format: 'gzip', files: [{ name: 'a.txt', handle: h, mtime: 12345 }] }, { store } as any)
+  const bytes = await resolve(store, archiveHandle)
+  expect(bytes).toEqual(gzipCreate(strToU8('AAA'), 12345))
 })
 
 test('archiveCreate/archiveExtract dispatch by format, and ARCHIVE_MIME covers every format', () => {

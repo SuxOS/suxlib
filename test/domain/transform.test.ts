@@ -15,7 +15,10 @@ import {
   markdownToHtml,
   MAX_TRANSFORM_INPUT_BYTES,
   MAX_TRANSFORM_DEPTH,
+  convert,
 } from '../../src/domain/transform.js'
+import { MemoryStore } from '../../src/effects/types.js'
+import { putText, resolveText } from '../../src/handles/handle.js'
 
 test('detectFormat recognizes json/yaml/csv/xml, including bare scalars and header-only csv', () => {
   expect(detectFormat('42')).toBe('json')
@@ -151,6 +154,13 @@ test('dispatchTransform rejects mixing markdown/html with the structured formats
 test('dispatchTransform rejects input over MAX_TRANSFORM_INPUT_BYTES', () => {
   const big = 'a'.repeat(MAX_TRANSFORM_INPUT_BYTES + 1)
   expect(() => dispatchTransform(big, 'json', 'json')).toThrow(/bomb guard/)
+})
+
+test('convert (Handle-based leaf) round-trips data through a Store via dispatchTransform', async () => {
+  const store = new MemoryStore()
+  const handle = await putText(store, '{"a":1}')
+  const outHandle = await convert({ handle, from: 'json', to: 'yaml' }, { store } as any)
+  expect(await resolveText(store, outHandle)).toBe('a: 1')
 })
 
 test('markdownToHtml sanitizes an unsafe link scheme to a harmless anchor', () => {

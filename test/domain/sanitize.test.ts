@@ -1,5 +1,7 @@
 import { test, expect } from 'vitest'
-import { redactText, sanitizeImage, detectImageKind, MAX_IMAGE_INPUT_BYTES, MAX_TEXT_INPUT_BYTES } from '../../src/domain/sanitize.js'
+import { redactText, sanitizeImage, detectImageKind, redact, scrub, MAX_IMAGE_INPUT_BYTES, MAX_TEXT_INPUT_BYTES } from '../../src/domain/sanitize.js'
+import { MemoryStore } from '../../src/effects/types.js'
+import { putBytes, putText, resolve, resolveText } from '../../src/handles/handle.js'
 
 test('redactText rejects text over MAX_TEXT_INPUT_BYTES', () => {
   const big = 'a'.repeat(MAX_TEXT_INPUT_BYTES + 1)
@@ -36,6 +38,21 @@ test('redactText only redacts a bare 9-digit SSN when nearby context labels it',
   expect(unlabeled.redacted).toContain('123456789')
 })
 
+test('redact (Handle-based leaf) round-trips text through a Store and reports the same counts as redactText', async () => {
+  const store = new MemoryStore()
+  const handle = await putText(store, 'contact a@b.com')
+  const result = await redact({ handle }, { store } as any)
+  expect(result.counts.email).toBe(1)
+  expect(await resolveText(store, result.handle)).toBe('contact [REDACTED:email]')
+})
+
+test('redact (Handle-based leaf) honors the types subset', async () => {
+  const store = new MemoryStore()
+  const handle = await putText(store, 'a@b.com and 10.0.0.1')
+  const result = await redact({ handle, types: ['email'] }, { store } as any)
+  expect(await resolveText(store, result.handle)).toBe('[REDACTED:email] and 10.0.0.1')
+})
+
 test('detectImageKind reads magic bytes for jpeg/png and returns null otherwise', () => {
   expect(detectImageKind(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe('jpeg')
   expect(detectImageKind(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).toBe('png')
@@ -49,6 +66,16 @@ test('sanitizeImage strips PNG ancillary metadata chunks and keeps critical ones
   expect(result.strippedBytes).toBeGreaterThan(0)
   // Critical chunks (IHDR/IDAT/IEND) must survive; re-run detectImageKind on the output.
   expect(detectImageKind(result.bytes)).toBe('png')
+})
+
+test('scrub (Handle-based leaf) round-trips a PNG through a Store and reports the same stats as sanitizeImage', async () => {
+  const store = new MemoryStore()
+  const png = buildMinimalPng({ tEXt: true })
+  const handle = await putBytes(store, png, 'image/png')
+  const result = await scrub(handle, { store } as any)
+  expect(result.kind).toBe('png')
+  expect(result.strippedBytes).toBeGreaterThan(0)
+  expect(detectImageKind(await resolve(store, result.handle))).toBe('png')
 })
 
 test('sanitizeImage rejects an image over MAX_IMAGE_INPUT_BYTES', () => {

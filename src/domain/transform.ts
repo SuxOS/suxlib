@@ -8,6 +8,10 @@
 // numeric-entity decoding, and more defensive CSV delimiter escaping/header
 // dedup — so no caller regresses on either fork's fixes.
 
+import type { LeafFn } from '../op/types.js'
+import type { Handle } from '../effects/types.js'
+import { resolveText, putText } from '../handles/handle.js'
+
 export type Format = 'json' | 'yaml' | 'csv' | 'xml' | 'markdown' | 'html'
 
 /** All valid `to`/`from` values, shared by the CLI/HTTP/MCP adapters so `from`
@@ -695,4 +699,15 @@ export function markdownToHtml(md: string): string {
     out.push(`<p>${inlineMdToHtml(para.join(' ').trim())}</p>`)
   }
   return out.join('\n')
+}
+
+// convert: Handle-based wrapper around dispatchTransform, following
+// archive.ts's pack/unpack, pdf.ts's shrink, and sanitize.ts's redact/scrub —
+// resolve the input Handle, run the pure function, put the result back as a Handle.
+export type ConvertInput = { handle: Handle; from: Format | 'auto'; to: Format; delimiter?: string }
+export const convert: LeafFn = async (input, caps) => {
+  const { handle, from, to, delimiter } = input as ConvertInput
+  const data = await resolveText(caps.store, handle)
+  const out = dispatchTransform(data, from, to, delimiter)
+  return putText(caps.store, out)
 }
