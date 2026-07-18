@@ -12,6 +12,7 @@ export type Op =
   | { tag: 'leaf'; name: string; fn: LeafFn; opts: LeafOpts }
   | { tag: 'pipe'; steps: Op[] }
   | { tag: 'map'; op: Op; concurrency: Concurrency }
+  | { tag: 'mapField'; arrayField: string; elementField: string; op: Op; concurrency: Concurrency; renameTo?: string }
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'sink'; targets: string[] }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }

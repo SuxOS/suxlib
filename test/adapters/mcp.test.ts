@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { registerFileopsTools } from '../../src/adapters/mcp.js'
 import { MemoryStore } from '../../src/effects/types.js'
-import { bytesToB64 } from '../../src/adapters/base64.js'
+import { b64ToBytes, bytesToB64 } from '../../src/adapters/base64.js'
 
 const b64 = (s: string) => btoa(s)
 
@@ -170,6 +170,30 @@ describe('mcp adapter', () => {
     const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'sink', targets: ['store'] }, input: { a: 1 } } })
     expect(result.isError).toBeFalsy()
     expect(parseResult(result)).toEqual({ a: 1 })
+  })
+
+  it('run_pipeline: a mapField spec reaches buildOp through the MCP tool schema (not silently stripped), bridging unpack\'s `entries` into pack\'s `files` (#168)', async () => {
+    const zipMod = await import('fflate')
+    const zip = zipMod.zipSync({ 'a.txt': new TextEncoder().encode('hello') })
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: {
+          tag: 'pipe',
+          steps: [
+            { tag: 'leaf', name: 'wrapHandle' },
+            { tag: 'leaf', name: 'unpack', params: { format: 'zip' } },
+            { tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2, renameTo: 'files' },
+            { tag: 'leaf', name: 'pack', params: { format: 'zip' } },
+          ],
+        },
+        input: { $handle: true, base64: bytesToB64(zip), type: 'application/zip' },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { base64: string }
+    const unzipped = zipMod.unzipSync(b64ToBytes(body.base64))
+    expect(new TextDecoder().decode(unzipped['a.txt'])).toBe('hello')
   })
 
   it('run_pipeline: a reconcile spec reaches buildOp through the MCP tool schema (not silently stripped)', async () => {

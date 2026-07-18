@@ -1,6 +1,6 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, sink, reconcile } from './combinators.js'
+import { op, pipe, map, mapField, sink, reconcile } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
@@ -9,6 +9,7 @@ export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
+  | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: number; renameTo?: string }
   | { tag: 'sink'; targets: string[] }
   | { tag: 'reconcile'; opts: ReconcileOpts }
 
@@ -55,15 +56,27 @@ function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
  * representable array shape this scheme has. Anything else the inner op's
  * shape resolves to (including 'unknown', or 'handle[]' which would need a
  * two-level array this scheme can't represent) makes the map's own boundary
- * 'unknown' too, rather than guessing. A nested `pipe`/`sink` step composing
- * multiple leaves has no single input/output shape without walking further
- * than a single adjacent-step comparison needs to, so those still read as
- * 'unknown' on both sides.
+ * 'unknown' too, rather than guessing. `mapField` derives its boundary the
+ * same way, one level narrower: its inner op's shape becomes the *element
+ * field*'s shape (only representable when the inner op's side is a bare
+ * `handle` -- anything else collapses to 'unknown', same rule as an
+ * `arrayObject` field elsewhere in this scheme), nested under the array
+ * field's own name (`arrayField` on the input side, `renameTo ?? arrayField`
+ * on the output side, since that's the one field name `mapField` actually
+ * changes). A nested `pipe`/`sink` step composing multiple leaves has no
+ * single input/output shape without walking further than a single
+ * adjacent-step comparison needs to, so those still read as 'unknown' on
+ * both sides.
  */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (!s || typeof s !== 'object') return 'unknown'
   if (s.tag === 'leaf') return LEAF_SHAPES[s.name]?.[side] ?? 'unknown'
   if (s.tag === 'map') return stepShape(s.op, side) === 'handle' ? 'handle[]' : 'unknown'
+  if (s.tag === 'mapField') {
+    const field: LeafFieldShape = stepShape(s.op, side) === 'handle' ? 'handle' : 'unknown'
+    const arrayField = side === 'output' ? (s.renameTo ?? s.arrayField) : s.arrayField
+    return { object: { [arrayField]: { arrayObject: { [s.elementField]: field } } } }
+  }
   return 'unknown'
 }
 
@@ -96,15 +109,22 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
 /**
  * Builds a real Op tree from a caller-supplied JSON description, resolving
  * every leaf name against the registry -- a spec can never carry a live `fn`,
- * only a name. Supports `leaf`/`pipe`/`map`/`sink`: a `sink` spec only carries
- * target *names*, resolved against Caps.sinks at run time (runInline's `case
- * 'sink'`) the same way it already works for an in-process caller -- see
- * SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks (../adapters/op-run.ts) for
- * where those names come from. `reconcile` only needs `caps.store` (already
- * supplied by every adapter call, see runInline's `case 'reconcile'`), so it's
- * expressible directly as an OpSpec variant. `ask` still depends on a live Ask
- * capability a stateless adapter call has no way to supply, so composing that
- * still requires building an Op tree in-process.
+ * only a name. Supports `leaf`/`pipe`/`map`/`mapField`/`sink`: a `sink` spec
+ * only carries target *names*, resolved against Caps.sinks at run time
+ * (runInline's `case 'sink'`) the same way it already works for an in-process
+ * caller -- see SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks
+ * (../adapters/op-run.ts) for where those names come from. `mapField` (#168)
+ * runs its inner op over one named field of each element of a named array
+ * field, reattaching the untouched rest of each element and optionally
+ * renaming the array field itself -- e.g. bridging unpack's `entries` into
+ * pack's `files` while transforming each entry's `handle` in between, which
+ * `map` alone can't do since it only replaces a whole array element, never
+ * reshapes/renames the array's own field. `reconcile` only needs
+ * `caps.store` (already supplied by every adapter call, see runInline's
+ * `case 'reconcile'`), so it's expressible directly as an OpSpec variant.
+ * `ask` still depends on a live Ask capability a stateless adapter call has
+ * no way to supply, so composing that still requires building an Op tree
+ * in-process.
  *
  * `extraLeaves`, when supplied, merges host-registered leaves onto
  * LEAF_REGISTRY (mergeLeaves, ./registry.ts) once per top-level buildOp call
@@ -173,6 +193,23 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       return map(buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency) })
     }
+    case 'mapField': {
+      if (!spec.op) throw new Error('mapField spec requires an `op`')
+      const isBadFieldName = (f: unknown) => typeof f !== 'string' || !f || f === '__proto__' || f === 'constructor' || f === 'prototype'
+      if (isBadFieldName(spec.arrayField)) {
+        throw new Error('mapField spec\'s `arrayField` must be a non-empty string (not `__proto__`/`constructor`/`prototype`)')
+      }
+      if (isBadFieldName(spec.elementField)) {
+        throw new Error('mapField spec\'s `elementField` must be a non-empty string (not `__proto__`/`constructor`/`prototype`)')
+      }
+      if (spec.renameTo !== undefined && isBadFieldName(spec.renameTo)) {
+        throw new Error('mapField spec\'s `renameTo`, if present, must be a non-empty string (not `__proto__`/`constructor`/`prototype`)')
+      }
+      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
+        throw new Error(`mapField spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
+      }
+      return mapField(spec.arrayField, spec.elementField, buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency), renameTo: spec.renameTo })
+    }
     case 'sink': {
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
         throw new Error('sink spec requires a non-empty `targets` array of non-empty strings')
@@ -201,6 +238,6 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       return reconcile(o)
     }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, sink, reconcile)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile)`)
   }
 }

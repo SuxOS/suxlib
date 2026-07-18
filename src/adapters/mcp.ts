@@ -52,6 +52,14 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   z.object({ tag: z.literal('leaf'), name: z.string(), opts: opSpecLeafOptsSchema, params: z.record(z.string(), z.unknown()).optional() }),
   z.object({ tag: z.literal('pipe'), steps: z.array(opSpecSchema).min(1) }),
   z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(32) }),
+  z.object({
+    tag: z.literal('mapField'),
+    arrayField: z.string(),
+    elementField: z.string(),
+    op: opSpecSchema,
+    concurrency: z.number().int().min(1).max(32),
+    renameTo: z.string().optional(),
+  }),
   z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1) }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
 ]))
@@ -255,7 +263,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
       'run_pipeline',
       {
         description:
-          `Run a JSON-described op-tree pipeline (leaf/pipe/map/sink) over the op engine's registered leaves ` +
+          `Run a JSON-described op-tree pipeline (leaf/pipe/map/mapField/sink) over the op engine's registered leaves ` +
           `(${leafNames.join(', ')}) and sink targets (${sinkNames.join(', ')}), ` +
           `instead of calling one tool per step. ` +
           `Handle-shaped values in \`input\`/the result are marshalled as { $handle: true, base64, type } / { base64, type, size }.`,
