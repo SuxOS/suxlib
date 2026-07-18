@@ -11,7 +11,7 @@ import { sanitizeImage, redactText, REDACT_TYPES } from '../domain/sanitize.js'
 import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
-import { LEAF_REGISTRY } from '../op/registry.js'
+import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import type { OpSpec } from '../op/spec.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
@@ -240,12 +240,19 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
   }
 
   if (enabled('run_pipeline')) {
+    // mergeLeaves(opts.opRunLeaves), not the bare LEAF_REGISTRY: this help
+    // text needs to name every leaf a `run_pipeline` spec's `leaf.name` can
+    // actually resolve against, including host-registered ones (#158) -- and
+    // unlike cli.ts's `pipeline run` (whose description is built at module
+    // load, before argv/--config are known), `opts` is already in scope here
+    // at registerFileopsTools call time, so this can just read it directly.
+    const leafNames = Object.keys(mergeLeaves(opts.opRunLeaves))
     server.registerTool(
       'run_pipeline',
       {
         description:
           `Run a JSON-described op-tree pipeline (leaf/pipe/map/sink) over the op engine's registered leaves ` +
-          `(${Object.keys(LEAF_REGISTRY).join(', ')}) and sink targets (${Object.keys(SINK_REGISTRY).join(', ')}), ` +
+          `(${leafNames.join(', ')}) and sink targets (${Object.keys(SINK_REGISTRY).join(', ')}), ` +
           `instead of calling one tool per step. ` +
           `Handle-shaped values in \`input\`/the result are marshalled as { $handle: true, base64, type } / { base64, type, size }.`,
         inputSchema: {

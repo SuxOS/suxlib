@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { LEAF_REGISTRY, resolveLeaf, mergeLeaves } from '../../src/op/registry.js'
+import { LEAF_REGISTRY, LEAF_SHAPES, resolveLeaf, mergeLeaves } from '../../src/op/registry.js'
 import type { LeafFn } from '../../src/op/types.js'
 import { pack, unpack, unzip } from '../../src/domain/archive.js'
 import { shrink } from '../../src/domain/pdf.js'
@@ -49,4 +49,16 @@ test('mergeLeaves rejects inherited Object.prototype member names the same way t
   for (const name of ['constructor', 'toString', 'hasOwnProperty']) {
     expect(() => resolveLeaf(name, table)).toThrow(new RegExp(`unknown leaf "${name}"`))
   }
+})
+
+test('LEAF_SHAPES declares an input/output shape for every LEAF_REGISTRY name', () => {
+  expect(Object.keys(LEAF_SHAPES).sort()).toEqual(Object.keys(LEAF_REGISTRY).sort())
+})
+
+test('LEAF_SHAPES matches each leaf\'s actual {handle, ...} vs bare-Handle wrapper shape (CLAUDE.md\'s "Leaf composability gotcha")', () => {
+  expect(LEAF_SHAPES.unzip).toEqual({ input: 'handle', output: 'handle[]' })
+  expect(LEAF_SHAPES.convert).toEqual({ input: { object: { handle: 'handle' } }, output: 'handle' })
+  expect(LEAF_SHAPES.shrink).toEqual({ input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } })
+  expect(LEAF_SHAPES.wrapHandle).toEqual({ input: 'handle', output: { object: { handle: 'handle' } } })
+  expect(LEAF_SHAPES.unwrapHandle).toEqual({ input: { object: { handle: 'handle' } }, output: 'handle' })
 })

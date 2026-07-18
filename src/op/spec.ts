@@ -1,7 +1,7 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
 import { op, pipe, map, sink, reconcile } from './combinators.js'
-import { resolveLeaf, mergeLeaves } from './registry.js'
+import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
@@ -20,6 +20,35 @@ const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge']
 // into an unbounded retry storm or a huge fan-out.
 const MAX_LEAF_RETRIES = 5
 const MAX_MAP_CONCURRENCY = 32
+
+function shapeLabel(s: LeafShape): string {
+  if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
+  return `{${Object.keys(s.object).join(', ')}}`
+}
+
+function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
+  if (output === 'unknown' || input === 'unknown') return true
+  if (typeof output === 'string' || typeof input === 'string') return output === input
+  return Object.entries(input.object).every(([k, v]) => v !== 'handle' || output.object[k] === 'handle')
+}
+
+/**
+ * A pipe step's declared shape, for the one tag (`leaf`) LEAF_SHAPES actually
+ * describes -- `map`/`pipe`/`sink` steps read as 'unknown' on both sides
+ * rather than guessing: a `map` step's own boundary (its inner op's shape,
+ * one array level up) is a real question with its own design surface (issue
+ * #145's deliberate follow-up), and a nested `pipe`/`sink` step composing
+ * multiple leaves has no single input/output shape without walking further
+ * than a single adjacent-step comparison needs to.
+ */
+function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
+  if (!s || typeof s !== 'object') return 'unknown'
+  return s.tag === 'leaf' ? LEAF_SHAPES[s.name]?.[side] ?? 'unknown' : 'unknown'
+}
+
+function stepLabel(s: OpSpec): string {
+  return s && typeof s === 'object' && s.tag === 'leaf' ? s.name : String((s as { tag?: unknown })?.tag)
+}
 
 /**
  * Shallow-merges a leaf spec's static `params` onto the piped value flowing
@@ -61,6 +90,15 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * -- mirroring OpRunOpts.sinks -- and every recursive leaf-name resolution
  * within this spec (pipe steps, map's inner op) resolves against that same
  * merged table, not just the top-level node.
+ *
+ * A `pipe`'s adjacent steps are checked against each other's declared
+ * LEAF_SHAPES (./registry.ts) before the tree is built, so a caller-supplied
+ * shape mismatch (e.g. `unwrapHandle` straight after `convert`, #132) throws
+ * a clear build-time error naming both steps instead of reaching `runInline`
+ * and failing there -- sometimes silently, per #143. Only a *leaf* step's
+ * shape is known; `map`/`pipe`/`sink` steps read as 'unknown' (permissively
+ * compatible with anything) since their own boundary isn't modeled yet (see
+ * stepShape's doc and issue #145).
  */
 export function buildOp(spec: OpSpec, extraLeaves?: Record<string, LeafFn>): Op {
   return buildOpNode(spec, mergeLeaves(extraLeaves))
@@ -94,6 +132,16 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
     }
     case 'pipe': {
       if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('pipe spec requires a non-empty `steps` array')
+      for (let i = 0; i + 1 < spec.steps.length; i++) {
+        const prev = spec.steps[i]; const next = spec.steps[i + 1]
+        const output = stepShape(prev, 'output'); const input = stepShape(next, 'input')
+        if (!shapeCompatible(output, input)) {
+          throw new Error(
+            `pipe step ${i + 1} ("${stepLabel(next)}") expects ${shapeLabel(input)} input, but step ${i} ` +
+            `("${stepLabel(prev)}") produces ${shapeLabel(output)}`,
+          )
+        }
+      }
       return pipe(...spec.steps.map((s) => buildOpNode(s, leaves)))
     }
     case 'map': {

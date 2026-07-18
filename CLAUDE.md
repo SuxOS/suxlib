@@ -274,7 +274,21 @@ There is no linter in this repo. Run both locally before pushing.
   `redact`/`scrub` all wrap their result as `{handle, ...extra}`, but
   `convert` returns a bare `Handle` — so `unwrapHandle` belongs after
   `shrink`/`redact` in a pipe, never after `convert` (it would read a
-  nonexistent `.handle` off the bare Handle and produce `undefined`).
+  nonexistent `.handle` off the bare Handle and produce `undefined`). Update
+  (#143): the `unwrapHandle`-after-`convert` mistake above is now caught at
+  `buildOp` time, not just documented — `LEAF_SHAPES` (`src/op/registry.ts`)
+  declares each built-in leaf's coarse input/output shape (`'handle'` |
+  `'handle[]'` | `{ object: {...} }` | `'unknown'`), and a `pipe` spec's
+  adjacent steps are checked against each other via `shapeCompatible`
+  (`src/op/spec.ts`) before the tree is built. Only a `leaf` step's shape is
+  known this way — `map`/`pipe`/`sink` steps, and any name absent from
+  `LEAF_SHAPES` (a host-registered `extraLeaves` leaf, or a future built-in
+  nobody added an entry for), read as `'unknown'` and are permissively
+  treated as compatible with anything, so those mismatches still only
+  surface at `runInline` time. A future built-in leaf needs its own
+  `LEAF_SHAPES` entry to get build-time checking; nothing enforces that the
+  table stays in sync with `LEAF_REGISTRY` beyond the test asserting their
+  key sets match.
 - Prototype-pollution-guard gotcha for any future `Object.create(null)`-based
   registry (`LEAF_REGISTRY`, and now `SINK_REGISTRY` in `src/op/sinks.ts`,
   #147): merging one into a live config/Caps object via object-literal spread

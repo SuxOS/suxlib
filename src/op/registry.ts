@@ -27,6 +27,47 @@ export const LEAF_REGISTRY: Readonly<Record<string, LeafFn>> = Object.freeze(
 )
 
 /**
+ * A leaf's declared input/output shape, coarse enough to cover every
+ * LEAF_REGISTRY entry without guessing at field richness `buildOp` (./spec.ts)
+ * has no real use for: a bare Handle, an array of Handles (unzip's only
+ * output shape), an object whose fields are each either a Handle or
+ * 'unknown', or 'unknown' itself for anything this scheme can't represent
+ * (e.g. unpack's `{ entries: [...] }`, whose Handles are nested inside an
+ * array of objects, not a top-level field). 'unknown' is the deliberately
+ * permissive default on either side of a comparison (spec.ts's
+ * shapeCompatible) -- CLAUDE.md's "Leaf composability gotcha" scoping note
+ * says how much shape richness is worth encoding needs its own design pass,
+ * so this only ever blocks a *provably* mismatched Handle-shaped pipe step,
+ * never a plausibly-fine one.
+ */
+export type LeafShape = 'unknown' | 'handle' | 'handle[]' | { object: Record<string, 'handle' | 'unknown'> }
+
+/**
+ * Per-leaf declared shape, keyed by the same LEAF_REGISTRY name -- used by
+ * buildOp's 'pipe' case (./spec.ts) to catch a build-time-detectable shape
+ * mismatch between adjacent steps instead of letting it reach `runInline`
+ * (silently, per #143/#132: an `undefined` flowing through `dehydrate` into
+ * an HTTP 200 with an empty body). A name absent here (a host-registered
+ * `extraLeaves` leaf, or any future built-in this table falls behind) reads
+ * as 'unknown' on both sides via LEAF_SHAPES[name]?.[side] -- same permissive
+ * default as an unrepresentable shape.
+ */
+export const LEAF_SHAPES: Readonly<Record<string, { input: LeafShape; output: LeafShape }>> = Object.freeze({
+  pack: { input: { object: { format: 'unknown', files: 'unknown' } }, output: 'handle' },
+  unpack: { input: { object: { format: 'unknown', handle: 'handle' } }, output: 'unknown' },
+  unzip: { input: 'handle', output: 'handle[]' },
+  shrink: { input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } },
+  redact: { input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } },
+  scrub: { input: 'handle', output: { object: { handle: 'handle' } } },
+  convert: { input: { object: { handle: 'handle' } }, output: 'handle' },
+  extract: { input: 'handle', output: 'handle' },
+  summarize: { input: 'handle', output: { object: { summaryHandle: 'handle' } } },
+  wrapHandle: { input: 'handle', output: { object: { handle: 'handle' } } },
+  unwrapHandle: { input: { object: { handle: 'handle' } }, output: 'handle' },
+  stamp: { input: 'handle', output: 'handle' },
+})
+
+/**
  * Merges host-supplied leaves onto LEAF_REGISTRY, same override order as
  * SINK_REGISTRY's host-overrides-built-in merge (src/adapters/op-run.ts's
  * `Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks)`).

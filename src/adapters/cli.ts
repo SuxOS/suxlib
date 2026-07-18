@@ -13,7 +13,7 @@ import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, type Format } from '../domain/transform.js'
 import { runOpSpec, type OpRunOpts } from './op-run.js'
-import { LEAF_REGISTRY } from '../op/registry.js'
+import { mergeLeaves } from '../op/registry.js'
 import type { OpSpec } from '../op/spec.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
@@ -275,12 +275,27 @@ async function loadOpRunOptsConfig(configPath: string): Promise<OpRunOpts> {
   return mod.default as OpRunOpts
 }
 
-pipelineCmd
+// Read by main() to refresh pipelineRunCmd's description right before
+// parsing, once opRunOpts.leaves (a programmatic caller's host-registered
+// leaves) is known -- unlike mcp.ts's run_pipeline (whose opts are already in
+// scope when its description is built), this Command tree is built once at
+// module load, before main(argv, opRunOpts) is ever called. `--config`'s
+// leaves stay out of reach here regardless: that module only loads inside
+// `run`'s own action, per invocation, after --help would already have been
+// handled -- there's no point in the CLI lifecycle where it's known before a
+// help string needs to exist (#158).
+function pipelineRunDescription(leaves: Record<string, unknown>): string {
+  return 'Run a JSON op-tree pipeline spec over the leaf registry ' +
+    `(${Object.keys(leaves).join(', ')}), mirroring POST /op/run's request body.`
+}
+
+// Exported for tests: main() refreshes this command's description right
+// before parsing, based on opRunOpts.leaves (#158) -- asserting on the
+// rendered description is otherwise only reachable by shelling out to
+// `--help` and dealing with commander's process.exit-on-help behavior.
+export const pipelineRunCmd = pipelineCmd
   .command('run')
-  .description(
-    'Run a JSON op-tree pipeline spec over the leaf registry ' +
-      `(${Object.keys(LEAF_REGISTRY).join(', ')}), mirroring POST /op/run's request body.`,
-  )
+  .description(pipelineRunDescription(mergeLeaves()))
   .argument('<spec-file>', 'JSON file: { spec: OpSpec, input }. Input values shaped { "$file": "<path>", "type"?: "<mime>" } are read off disk and marshalled into Handle refs.')
   .option('-o, --output <dir>', 'write Handle-shaped result value(s) to files in this directory instead of inlining base64 in the printed JSON')
   .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- llm/store/cache/governors/sinks for this run, the shell CLI\'s equivalent of a programmatic caller\'s main(argv, opRunOpts)')
@@ -315,6 +330,7 @@ export const transform = dispatchTransform
  * MCP's RegisterFileopsToolsOptions already offer runOpSpec. */
 export async function main(argv: string[] = process.argv, opRunOpts: OpRunOpts = {}): Promise<void> {
   cliOpRunOpts = opRunOpts
+  pipelineRunCmd.description(pipelineRunDescription(mergeLeaves(opRunOpts.leaves)))
   try {
     await program.parseAsync(argv)
   } catch (e) {
