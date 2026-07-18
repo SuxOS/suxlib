@@ -246,13 +246,17 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
     // unlike cli.ts's `pipeline run` (whose description is built at module
     // load, before argv/--config are known), `opts` is already in scope here
     // at registerFileopsTools call time, so this can just read it directly.
+    // Same reasoning applies to sink targets: merge opts.opRunSinks onto
+    // SINK_REGISTRY (host-overrides-built-in, same order as op-run.ts's own
+    // merge) rather than naming only the bare built-in registry.
     const leafNames = Object.keys(mergeLeaves(opts.opRunLeaves))
+    const sinkNames = Object.keys(Object.assign(Object.create(null), SINK_REGISTRY, opts.opRunSinks))
     server.registerTool(
       'run_pipeline',
       {
         description:
           `Run a JSON-described op-tree pipeline (leaf/pipe/map/sink) over the op engine's registered leaves ` +
-          `(${leafNames.join(', ')}) and sink targets (${Object.keys(SINK_REGISTRY).join(', ')}), ` +
+          `(${leafNames.join(', ')}) and sink targets (${sinkNames.join(', ')}), ` +
           `instead of calling one tool per step. ` +
           `Handle-shaped values in \`input\`/the result are marshalled as { $handle: true, base64, type } / { base64, type, size }.`,
         inputSchema: {

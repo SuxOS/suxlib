@@ -299,4 +299,20 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await leavesClient.close()
     await leavesServer.close()
   })
+
+  it('run_pipeline\'s tool description lists opts.opRunSinks-registered sink targets alongside the built-in registry (#166)', async () => {
+    const sinksServer = new McpServer({ name: 'test-sinks-desc', version: '0.0.0' })
+    registerFileopsTools(sinksServer, { opRunSinks: { log: { name: 'log', write: async (v) => v } } })
+    const sinksClient = new Client({ name: 'test-sinks-desc-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([sinksServer.connect(serverTransport), sinksClient.connect(clientTransport)])
+
+    const { tools } = await sinksClient.listTools()
+    const runPipeline = tools.find((t) => t.name === 'run_pipeline')
+    expect(runPipeline?.description).toContain('log')
+    expect(runPipeline?.description).toContain('store')
+
+    await sinksClient.close()
+    await sinksServer.close()
+  })
 })
