@@ -15,7 +15,7 @@
 
 import type { Handle, Llm, Cache, Store } from '../effects/types.js'
 import { MemoryStore } from '../effects/types.js'
-import type { Caps, Governor, SinkTarget } from '../op/types.js'
+import type { Caps, Governor, SinkTarget, LeafFn } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import { runInline } from '../runtime/inline.js'
@@ -123,8 +123,15 @@ export type OpRunRequest = { spec: OpSpec; input: unknown }
  * Omitted entirely, `caps.llm` falls back to `llmUnavailable` below, so those
  * two leaves throw a clear error instead of silently running with a
  * do-nothing capability.
+ *
+ * `leaves`: host-registered LeafFns merged onto LEAF_REGISTRY (src/op/
+ * registry.ts's `mergeLeaves`, same host-overrides-built-in order as
+ * `sinks`/SINK_REGISTRY), letting a caller-supplied OpSpec's `leaf.name`
+ * resolve against logic this library never shipped -- a host embedding
+ * suxlib (e.g. `sux`) registering its own leaf. Omitted entirely still
+ * resolves every built-in registry leaf as before.
  */
-export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn> }
 
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
@@ -141,7 +148,7 @@ export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts =
   const store = opts.store ?? new MemoryStore()
   const sinks = Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks) as Record<string, SinkTarget>
   const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache }
-  const tree = buildOp(spec)
+  const tree = buildOp(spec, opts.leaves)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
   const result = await runInline(tree, hydrated, caps)
   return dehydrate(store, result)

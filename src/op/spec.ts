@@ -1,6 +1,6 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import { op, pipe, map, sink } from './combinators.js'
-import { resolveLeaf } from './registry.js'
+import { resolveLeaf, mergeLeaves } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
@@ -49,13 +49,23 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * host-provided capabilities (a live Ask implementation; reconcile has no
  * OpSpec variant yet) that a stateless adapter call has no way to supply, so
  * composing those still requires building an Op tree in-process.
+ *
+ * `extraLeaves`, when supplied, merges host-registered leaves onto
+ * LEAF_REGISTRY (mergeLeaves, ./registry.ts) once per top-level buildOp call
+ * -- mirroring OpRunOpts.sinks -- and every recursive leaf-name resolution
+ * within this spec (pipe steps, map's inner op) resolves against that same
+ * merged table, not just the top-level node.
  */
-export function buildOp(spec: OpSpec): Op {
+export function buildOp(spec: OpSpec, extraLeaves?: Record<string, LeafFn>): Op {
+  return buildOpNode(spec, mergeLeaves(extraLeaves))
+}
+
+function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op {
   if (!spec || typeof spec !== 'object') throw new Error('op spec must be an object')
   switch (spec.tag) {
     case 'leaf': {
       if (typeof spec.name !== 'string' || !spec.name) throw new Error('leaf spec requires a `name`')
-      const fn = resolveLeaf(spec.name)
+      const fn = resolveLeaf(spec.name, leaves)
       const o = spec.opts ?? {}
       if (o.retries !== undefined && (!Number.isInteger(o.retries) || o.retries < 0 || o.retries > MAX_LEAF_RETRIES)) {
         throw new Error(`leaf "${spec.name}": \`retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}`)
@@ -70,14 +80,14 @@ export function buildOp(spec: OpSpec): Op {
     }
     case 'pipe': {
       if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('pipe spec requires a non-empty `steps` array')
-      return pipe(...spec.steps.map(buildOp))
+      return pipe(...spec.steps.map((s) => buildOpNode(s, leaves)))
     }
     case 'map': {
       if (!spec.op) throw new Error('map spec requires an `op`')
       if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
         throw new Error(`map spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
       }
-      return map(buildOp(spec.op), { concurrency: fixed(spec.concurrency) })
+      return map(buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency) })
     }
     case 'sink': {
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {

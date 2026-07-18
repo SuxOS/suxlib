@@ -152,3 +152,14 @@ test('runOpSpec: opts.llm lets a host wire a real Llm capability through to the 
   expect(result.abstract).toBe('summary of the full text')
   expect(Buffer.from(result.summaryHandle.base64, 'base64').toString('utf8')).toBe('summary of the full text')
 })
+
+test('runOpSpec: opts.leaves lets a host register a custom leaf a spec can name', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const result = await runOpSpec({ spec, input: { a: 1 } }, { leaves: { shout: async (input) => ({ shouted: input }) } })
+  expect(result).toEqual({ shouted: { a: 1 } })
+})
+
+test('runOpSpec: an unknown leaf name still surfaces a clear error when opts.leaves is supplied but doesn\'t cover it', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'nope' }
+  await expect(runOpSpec({ spec, input: null }, { leaves: { shout: async (input) => input } })).rejects.toThrow(/unknown leaf "nope"/)
+})

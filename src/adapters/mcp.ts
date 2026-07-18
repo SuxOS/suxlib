@@ -14,7 +14,7 @@ import { runOpSpec } from './op-run.js'
 import { LEAF_REGISTRY } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import type { OpSpec } from '../op/spec.js'
-import type { Governor, SinkTarget } from '../op/types.js'
+import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm } from '../effects/types.js'
 
 function textResult(obj: unknown) {
@@ -85,6 +85,14 @@ export type RegisterFileopsToolsOptions = {
    * OpRunOpts doc).
    */
   opRunLlm?: Llm
+  /**
+   * Host-registered LeafFns merged onto LEAF_REGISTRY (op/registry.ts's
+   * `mergeLeaves`, same host-overrides-built-in order as `opRunSinks`), so a
+   * `run_pipeline` spec's `leaf.name` can resolve against logic this library
+   * never shipped. Omitted entirely still resolves every built-in registry
+   * leaf as before.
+   */
+  opRunLeaves?: Record<string, LeafFn>
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -232,7 +240,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           input: z.unknown(),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm })),
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves })),
     )
   }
 }

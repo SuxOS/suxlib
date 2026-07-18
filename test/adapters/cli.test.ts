@@ -279,6 +279,22 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     logSpy.mockRestore()
   })
 
+  it('a programmatic caller can supply main()\'s opRunOpts.leaves to reach a custom leaf', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 } }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(
+      ['node', 'suxlib-fileops', 'pipeline', 'run', specPath],
+      { leaves: { shout: async (input) => ({ shouted: input }) } },
+    )
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { shouted: { a: number } }
+    expect(printed.shouted).toEqual({ a: 1 })
+    logSpy.mockRestore()
+  })
+
   it('--config surfaces a module with no default export as a clean error', async () => {
     const work = tmpDir()
     const specPath = join(work, 'spec.json')
