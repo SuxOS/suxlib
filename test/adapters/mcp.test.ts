@@ -171,6 +171,20 @@ describe('mcp adapter', () => {
     expect(result.isError).toBeFalsy()
     expect(parseResult(result)).toEqual({ a: 1 })
   })
+
+  it('run_pipeline: a reconcile spec reaches buildOp through the MCP tool schema (not silently stripped)', async () => {
+    const input = [
+      { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"x":1}')), type: 'application/json' },
+      { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"x":2,"y":3}')), type: 'application/json' },
+    ]
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'reconcile', opts: { mode: 'field-merge', defaultPolicy: 'last-write-wins' } }, input },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { base64: string }
+    expect(JSON.parse(atob(body.base64))).toEqual({ x: 2, y: 3 })
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {

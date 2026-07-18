@@ -96,6 +96,22 @@ test('leaf spec `params` cannot inject `to` via a "__proto__" key', async () => 
   await expect(runInline(tree, handle, { store, ...rest })).rejects.toThrow(/Unsupported target format/)
 })
 
+test('leaf spec `params` is folded into the memo cache key, so two differently-parameterized calls with the same piped input don\'t collide (#131)', async () => {
+  const { store, ...rest } = caps()
+  const backing = new Map<string, unknown>()
+  const cache = { async get(key: string) { return backing.get(key) }, async put(key: string, value: unknown) { backing.set(key, value) } }
+  const handle = await putBytes(store, new TextEncoder().encode('{"a":1}'), 'application/json')
+
+  const specYaml: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'leaf', name: 'convert', opts: { memo: true }, params: { from: 'json', to: 'yaml' } }] }
+  const specJson: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'leaf', name: 'convert', opts: { memo: true }, params: { from: 'json', to: 'json' } }] }
+
+  const yamlResult = await runInline(buildOp(specYaml), handle, { store, ...rest, cache }) as import('../../src/effects/types.js').Handle
+  const jsonResult = await runInline(buildOp(specJson), handle, { store, ...rest, cache }) as import('../../src/effects/types.js').Handle
+
+  expect(await resolveText(store, yamlResult)).toBe('a: 1')
+  expect(JSON.parse(await resolveText(store, jsonResult))).toEqual({ a: 1 })
+})
+
 test('buildOp rejects a non-object `params`', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'convert', params: [] as unknown as Record<string, unknown> })).toThrow(/params/)
 })
@@ -104,8 +120,30 @@ test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })
 
-test('buildOp rejects an unsupported tag (e.g. ask/reconcile, which need host capabilities)', () => {
+test('buildOp rejects an unsupported tag (e.g. ask, which needs a host Ask capability)', () => {
   expect(() => buildOp({ tag: 'ask' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "ask"/)
+})
+
+test('buildOp builds a reconcile node that merges Handles via caps.store, no extra host capability needed', async () => {
+  const { store, ...rest } = caps()
+  const a = await putBytes(store, new TextEncoder().encode('{"x":1}'), 'application/json')
+  const b = await putBytes(store, new TextEncoder().encode('{"x":2,"y":3}'), 'application/json')
+  const spec: OpSpec = { tag: 'reconcile', opts: { mode: 'field-merge', defaultPolicy: 'last-write-wins' } }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, [a, b], { store, ...rest })
+  expect(JSON.parse(await resolveText(store, result))).toEqual({ x: 2, y: 3 })
+})
+
+test('buildOp rejects a reconcile spec with an unknown mode', () => {
+  expect(() => buildOp({ tag: 'reconcile', opts: { mode: 'nope' } } as unknown as OpSpec)).toThrow(/opts\.mode/)
+})
+
+test('buildOp rejects a reconcile field-merge spec with an unknown defaultPolicy', () => {
+  expect(() => buildOp({ tag: 'reconcile', opts: { mode: 'field-merge', defaultPolicy: 'nope' as any } })).toThrow(/opts\.defaultPolicy/)
+})
+
+test('buildOp rejects a reconcile field-merge spec with an unknown per-field policy', () => {
+  expect(() => buildOp({ tag: 'reconcile', opts: { mode: 'field-merge', policy: { x: 'nope' as any } } })).toThrow(/opts\.policy\["x"\]/)
 })
 
 test('buildOp builds a sink/fanout node whose targets resolve against caps.sinks at run time', async () => {

@@ -14,7 +14,11 @@ import { stamp } from '../handles/handle.js'
 // these two only bridge the `handle` field itself.
 export const wrapHandle: LeafFn = async (handle) => ({ handle: handle as Handle })
 
-export const unwrapHandle: LeafFn = async (input) => (input as { handle: Handle }).handle
+export const unwrapHandle: LeafFn = async (input) => {
+  const handle = (input as { handle?: Handle }).handle
+  if (handle === undefined) throw new Error('unwrapHandle: input has no `handle` field -- did a bare-Handle-returning leaf (e.g. convert) precede it in the pipe?')
+  return handle
+}
 
 // Stamps a bare Handle with caps.clock's current time, so it satisfies
 // reconcile.ts's lastWriteWins() (which requires every input Handle to carry
