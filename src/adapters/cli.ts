@@ -234,7 +234,11 @@ function extractHandleFiles(value: unknown, files: Array<{ name: string; bytes: 
   }
   if (Array.isArray(value)) return value.map((v) => extractHandleFiles(v, files))
   if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {}
+    // Object.create(null), not {}: mirrors resolveFileRefs' guard above — a
+    // result key literally named "__proto__" assigned onto a plain {}
+    // accumulator would hit the inherited Annex-B setter instead of becoming
+    // an ordinary own property.
+    const out: Record<string, unknown> = Object.create(null)
     for (const [k, v] of Object.entries(value)) out[k] = extractHandleFiles(v, files)
     return out
   }
