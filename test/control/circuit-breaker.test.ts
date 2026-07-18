@@ -61,3 +61,31 @@ test('releaseHalfOpenProbe without a prior reservation is a harmless no-op', () 
   b.releaseHalfOpenProbe()
   expect(b.reserveHalfOpenProbe()).toBe(true)
 })
+
+test('onEvent fires breaker-open, breaker-half-open, and breaker-close at each state transition', () => {
+  const events: any[] = []
+  const b = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1, onEvent: e => events.push(e) })
+  b.onFailure(0) // closed -> open
+  b.allow(100)   // open -> half-open
+  b.onSuccess(100) // half-open -> closed
+  expect(events).toEqual([
+    { type: 'breaker-open', nowMs: 0 },
+    { type: 'breaker-half-open', nowMs: 100 },
+    { type: 'breaker-close', nowMs: 100 },
+  ])
+})
+
+test('onEvent fires breaker-open again when a half-open probe fails', () => {
+  const events: any[] = []
+  const b = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1, onEvent: e => events.push(e) })
+  b.onFailure(0)   // -> open
+  b.allow(100)     // -> half-open
+  b.onFailure(100) // -> open again
+  expect(events.map(e => e.type)).toEqual(['breaker-open', 'breaker-half-open', 'breaker-open'])
+})
+
+test('without onEvent, state transitions still work (the hook is optional)', () => {
+  const b = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
+  b.onFailure(0)
+  expect(b.state).toBe('open')
+})

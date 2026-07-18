@@ -1,3 +1,5 @@
+import type { GovernorEventHandler } from './events.js'
+
 export type BreakerState = 'closed' | 'open' | 'half-open'
 
 export interface CircuitBreaker {
@@ -19,6 +21,7 @@ export function circuitBreaker(opts: {
   failureThreshold: number
   cooldownMs: number
   halfOpenSuccesses: number
+  onEvent?: GovernorEventHandler
 }): CircuitBreaker {
   let state: BreakerState = 'closed'
   let consecutiveFailures = 0
@@ -41,18 +44,20 @@ export function circuitBreaker(opts: {
         if (nowMs - openedAtMs >= opts.cooldownMs) {
           state = 'half-open'
           consecutiveSuccesses = 0
+          opts.onEvent?.({ type: 'breaker-half-open', nowMs })
           return true
         }
         return false
       }
       return true
     },
-    onSuccess(_nowMs) {
+    onSuccess(nowMs) {
       if (state === 'half-open') {
         if (++consecutiveSuccesses >= opts.halfOpenSuccesses) {
           state = 'closed'
           consecutiveFailures = 0
           consecutiveSuccesses = 0
+          opts.onEvent?.({ type: 'breaker-close', nowMs })
         }
         return
       }
@@ -63,11 +68,13 @@ export function circuitBreaker(opts: {
         state = 'open'
         openedAtMs = nowMs
         consecutiveSuccesses = 0
+        opts.onEvent?.({ type: 'breaker-open', nowMs })
         return
       }
       if (++consecutiveFailures >= opts.failureThreshold) {
         state = 'open'
         openedAtMs = nowMs
+        opts.onEvent?.({ type: 'breaker-open', nowMs })
       }
     },
   }

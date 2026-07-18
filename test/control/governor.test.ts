@@ -21,6 +21,18 @@ test('retries an effect leaf up to LeafOpts.retries with full-jitter backoff, th
   expect(sleeps.length).toBe(2)
 })
 
+test('reports a retry event per attempt via governor.onEvent, but not after retries are exhausted', async () => {
+  let calls = 0
+  const fn = async () => { calls++; if (calls < 3) throw new Error('flaky'); return 'ok' }
+  const events: any[] = []
+  const result = await runGoverned('leaf', { kind: 'effect', retries: 3 }, fn, null, caps(), { onEvent: e => events.push(e) }, noSleep)
+  expect(result).toBe('ok')
+  expect(events).toEqual([
+    { type: 'retry', leaf: 'leaf', attempt: 0, err: expect.any(Error) },
+    { type: 'retry', leaf: 'leaf', attempt: 1, err: expect.any(Error) },
+  ])
+})
+
 test('rethrows the original error once retries are exhausted', async () => {
   const fn = async () => { throw new Error('always fails') }
   await expect(

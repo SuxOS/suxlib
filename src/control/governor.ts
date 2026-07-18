@@ -73,6 +73,7 @@ export async function runGoverned(
       if (acquired) concurrency!.release(false)
       breaker?.onFailure(caps.clock.now())
       if (attempt >= maxRetries) throw err
+      governor?.onEvent?.({ type: 'retry', leaf: name, attempt, err })
       await sleep(backoffFullJitter(attempt, backoff, gOpts.rand))
     } finally {
       if (probeReserved) breaker!.releaseHalfOpenProbe()

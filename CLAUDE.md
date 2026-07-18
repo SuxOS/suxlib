@@ -157,7 +157,16 @@ There is no linter in this repo. Run both locally before pushing.
   `runGoverned` after the token-bucket take and before the effect call, same as
   breaker/token-bucket: only for `'effect'` leaves, and freshly per retry
   attempt (not held across a backoff sleep), so a slow/failing leaf doesn't pin
-  a slot idle while it waits to retry.
+  a slot idle while it waits to retry. Update: the primitives now also emit
+  observability events (`GovernorEvent` in `src/control/events.ts`) — no-op
+  unless a caller opts in. `circuitBreaker()`/`aimd()` take their own
+  `onEvent` in their construction opts (breaker open/half-open/close; AIMD
+  increase/decrease, only when the limit actually moves) since those
+  factories are leaf-agnostic and built before being slotted into
+  `Caps.governors`; `Governor.onEvent` is the separate hook `runGoverned`
+  calls for per-attempt retry events, since only `runGoverned` knows the leaf
+  name. A future shared `caps.telemetry` capability, if one gets built,
+  should probably subsume both rather than adding a third hook shape.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
