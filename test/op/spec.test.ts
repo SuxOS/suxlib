@@ -240,6 +240,28 @@ test('buildOp rejects a pipe step whose declared shape mismatches deep inside a 
   expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("convert"\) produces handle/)
 })
 
+test('buildOp catches a shape mismatch at a map step\'s own boundary (#145): a bare-`handle`-producing step feeding a map whose inner leaf wants `handle[]`', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } },
+      { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("map"\) expects handle\[\] input, but step 0 \("convert"\) produces handle/)
+})
+
+test('buildOp\'s map-boundary shape check allows unzip\'s `handle[]` feeding map(scrub), whose inner leaf wants a bare `handle`', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unzip' },
+      { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
 test('buildOp allows a pipe step next to a host-registered extraLeaves leaf, treating its undeclared shape as compatible with anything', async () => {
   // `shout` has no LEAF_SHAPES entry (only built-in registry leaves do), so
   // its output reads as 'unknown' and is permissively compatible with

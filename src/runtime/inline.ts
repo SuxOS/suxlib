@@ -23,7 +23,14 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       return out
     }
     case 'reconcile': return runReconcile(node.opts, input, caps.store)
-    case 'sink': { await Promise.all(node.targets.map(t => caps.sinks[t].write(input, caps))); return input }
+    case 'sink': {
+      await Promise.all(node.targets.map(t => {
+        const s = caps.sinks[t]
+        if (!s) throw new Error(`unknown sink "${t}" (registered: ${Object.keys(caps.sinks).join(', ')})`)
+        return s.write(input, caps)
+      }))
+      return input
+    }
     case 'ask': {
       // No Ask capability: there is no way to pause for a human answer, so an
       // immediate "timeout" is the honest default -- honor onTimeout rather than

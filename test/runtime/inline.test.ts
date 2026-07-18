@@ -18,3 +18,9 @@ test('runInline threads a pipe: split → map → reconcile → sink', async () 
   expect(written.length).toBe(1)
   expect(await resolveText(store, result)).toContain('alpha')
 })
+
+test('runInline throws a clear error for an unregistered sink target', async () => {
+  const store = new MemoryStore()
+  const caps: any = { store, llm: {}, clock: { now: () => 0 }, sinks: { out: { name: 'out', write: async (v: any) => v } } }
+  await expect(runInline(sink('missing'), 'value', caps)).rejects.toThrow(/unknown sink "missing".*out/)
+})
