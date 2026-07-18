@@ -222,3 +222,15 @@ There is no linter in this repo. Run both locally before pushing.
   (that's `sux`'s op-tree construction call site, same as `heavy`/`kind`) or
   ship a durable `Cache` implementation, only `MemoryCache`
   (`src/effects/types.ts`) for inline/test use.
+- Leaf composability gotcha: each Handle-based leaf wrapper's input shape is
+  chosen independently (`shrink`/`redact`/`convert` want `{handle, ...opts}`,
+  `pack` wants `{format, files}`, `scrub`/`unzip` take a bare `Handle`), so only
+  leaf pairs whose shapes happen to already align compose directly via
+  `pipe`/`map` — e.g. `unzip`'s `Handle[]` output feeds `map(scrub)` cleanly
+  since `scrub` also takes a bare `Handle`, but nothing chains into `shrink`/
+  `redact`/`convert` without a reshaping step first, since their `{handle,
+  ...}` input never matches another leaf's raw output. `src/op/spec.ts`'s JSON
+  op spec (leaf/pipe/map over `src/op/registry.ts`, added for #113) inherits
+  this as-is rather than solving it — a caller chaining shape-incompatible
+  leaves still needs a reshape step of its own; there's no generic adapter for
+  this yet.
