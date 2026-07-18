@@ -53,6 +53,15 @@ describe('mcp adapter', () => {
     expect(entries[0]).toMatchObject({ name: 'a.txt', text: 'hello' })
   })
 
+  it('archive_create + archive_extract: threads an explicit per-file mtime through', async () => {
+    const mtime = new Date(2022, 4, 17, 10, 30, 0).getTime()
+    const created = await client.callTool({ name: 'archive_create', arguments: { format: 'zip', files: [{ name: 'a.txt', base64: b64('hello'), mtime }] } })
+    const { base64 } = parseResult(created) as { base64: string }
+    const extracted = await client.callTool({ name: 'archive_extract', arguments: { format: 'zip', base64 } })
+    const { entries } = parseResult(extracted) as { entries: Array<{ name: string; mtime?: number }> }
+    expect(entries[0].mtime).toBe(mtime)
+  })
+
   it('pdf_shrink: happy path shrinks a valid PDF', async () => {
     const { PDFDocument } = await import('pdf-lib')
     const doc = await PDFDocument.create()

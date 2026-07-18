@@ -184,6 +184,16 @@ test('zipCreate/zipExtract round-trips an explicit per-file mtime', () => {
   expect(entry.mtime).toBe(mtime)
 })
 
+test('zipCreate rejects an explicit mtime before 1980 with a clear error instead of leaking fflate\'s internal throw', () => {
+  const mtime = new Date(1970, 0, 1).getTime()
+  expect(() => zipCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])).toThrow(/1980-2099/)
+})
+
+test('zipCreate rejects an explicit mtime after 2099 with a clear error instead of leaking fflate\'s internal throw', () => {
+  const mtime = new Date(2100, 0, 1).getTime()
+  expect(() => zipCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])).toThrow(/1980-2099/)
+})
+
 test('zipExtract recovers mtime from the zip64 end-of-central-directory record when the plain EOCD fields are the zip64 sentinel', () => {
   const mtime = new Date(2022, 4, 17, 10, 30, 0).getTime()
   const packed = zipCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])

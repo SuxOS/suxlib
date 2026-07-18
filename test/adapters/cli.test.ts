@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -35,6 +35,14 @@ describe('extractArchiveTo (CLI filesystem extract path)', () => {
     expect(written).toBe(1)
     expect(skipped).toEqual([])
     expect(readFileSync(join(out, 'a.txt'), 'utf8')).toBe('hello')
+  })
+
+  it("restores an entry's mtime on the extracted file via utimesSync", () => {
+    const out = tmpDir()
+    const mtime = new Date(2022, 4, 17, 10, 30, 0).getTime()
+    const packed = archiveCreate('zip', [{ name: 'a.txt', data: new TextEncoder().encode('hello'), mtime }])
+    extractArchiveTo('zip', packed, out)
+    expect(statSync(join(out, 'a.txt')).mtimeMs).toBeCloseTo(mtime, -3)
   })
 
   it('refuses to extract (and writes nothing outside the output dir) for a zip-slip entry name', () => {
@@ -89,5 +97,18 @@ describe('cli `archive create` (real CLI entry point)', () => {
     expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/duplicate/i))
     process.exitCode = 0
     errSpy.mockRestore()
+  })
+
+  it('honors an explicit --mtime override for every packed file', async () => {
+    const work = tmpDir()
+    const inPath = join(work, 'in.txt')
+    const outPath = join(work, 'out.zip')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(inPath, 'hello')
+    const mtime = new Date(2022, 4, 17, 10, 30, 0).getTime()
+    await main(['node', 'suxlib-fileops', 'archive', 'create', '-o', outPath, '-m', String(mtime), inPath])
+    const { archiveExtract } = await import('../../src/domain/archive.js')
+    const entry = archiveExtract('zip', new Uint8Array(readFileSync(outPath))).entries.find((e) => e.name === 'in.txt')!
+    expect(entry.mtime).toBe(mtime)
   })
 })
