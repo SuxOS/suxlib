@@ -305,7 +305,20 @@ There is no linter in this repo. Run both locally before pushing.
   output never has) is now a build-time error too. This only reaches one
   array level deep and doesn't help two leaves whose per-entry field is
   named differently (`entries` vs `files`) actually chain — that's #168's
-  still-open design question, not solved here.
+  still-open design question, not solved here. Update (#172/#174): a leaf
+  spec's `params` (`buildOp`'s `'leaf'` case, `src/op/spec.ts`) is now denied
+  outright — not just shape-checked for pipe adjacency — whenever the target
+  leaf's declared `LEAF_SHAPES[name].input` is `'handle'`/`'handle[]'`, *or*
+  the name has no `LEAF_SHAPES` entry at all (a host-registered `extraLeaves`
+  leaf, or a future built-in nobody added an entry for): merging `params`
+  onto a bare Handle would let a caller overwrite its own `r2Key`/`sha256`
+  identity fields and redirect the leaf at an arbitrary `Store` entry, and an
+  undeclared shape *could* be a bare Handle too, so it defaults to deny
+  rather than inheriting `shapeCompatible`'s separate "unknown passes"
+  permissiveness (that one exists only to avoid false-positive pipe-adjacency
+  build errors, not to gate a security-sensitive merge). A future extraLeaves
+  mechanism that wants `params` support on a non-Handle-shaped host leaf will
+  need its own opt-in shape declaration, not a change to this default.
 - Prototype-pollution-guard gotcha for any future `Object.create(null)`-based
   registry (`LEAF_REGISTRY`, and now `SINK_REGISTRY` in `src/op/sinks.ts`,
   #147): merging one into a live config/Caps object via object-literal spread
