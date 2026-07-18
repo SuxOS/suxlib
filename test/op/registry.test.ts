@@ -62,3 +62,14 @@ test('LEAF_SHAPES matches each leaf\'s actual {handle, ...} vs bare-Handle wrapp
   expect(LEAF_SHAPES.wrapHandle).toEqual({ input: 'handle', output: { object: { handle: 'handle' } } })
   expect(LEAF_SHAPES.unwrapHandle).toEqual({ input: { object: { handle: 'handle' } }, output: 'handle' })
 })
+
+test('LEAF_SHAPES models pack/unpack\'s per-entry array-of-Handle-object fields via the `arrayObject` variant (#161), instead of collapsing to \'unknown\'', () => {
+  expect(LEAF_SHAPES.pack).toEqual({
+    input: { object: { format: 'unknown', files: { arrayObject: { name: 'unknown', handle: 'handle', mtime: 'unknown' } } } },
+    output: 'handle',
+  })
+  expect(LEAF_SHAPES.unpack).toEqual({
+    input: { object: { format: 'unknown', handle: 'handle' } },
+    output: { object: { entries: { arrayObject: { name: 'unknown', handle: 'handle', mtime: 'unknown' } }, skipped: 'unknown' } },
+  })
+})
