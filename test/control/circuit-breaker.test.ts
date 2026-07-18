@@ -61,3 +61,16 @@ test('releaseHalfOpenProbe without a prior reservation is a harmless no-op', () 
   b.releaseHalfOpenProbe()
   expect(b.reserveHalfOpenProbe()).toBe(true)
 })
+
+test('emits breaker-open, breaker-half-open, and breaker-close events at their respective transitions', () => {
+  const events: any[] = []
+  const b = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1, onEvent: (e) => events.push(e) })
+  b.onFailure(0) // -> open
+  b.allow(100)   // -> half-open
+  b.onSuccess(100) // -> closed
+  expect(events).toEqual([
+    { kind: 'breaker-open', nowMs: 0 },
+    { kind: 'breaker-half-open', nowMs: 100 },
+    { kind: 'breaker-close', nowMs: 100 },
+  ])
+})

@@ -41,3 +41,25 @@ test('take() rejects a cost greater than capacity instead of spinning forever', 
   const b = tokenBucket({ capacity: 5, refillPerMs: 1, clock })
   await expect(b.take(6, clock)).rejects.toThrow(/exceeds bucket capacity/)
 })
+
+test('take() emits a token-wait event on every backoff iteration while starved', async () => {
+  let simulatedNow = 0
+  const clock = { now: () => simulatedNow }
+  const events: any[] = []
+  const b = tokenBucket({ capacity: 5, refillPerMs: 1, clock, onEvent: (e) => events.push(e) })
+  b.tryTake(5, 0) // drain it
+  const p = b.take(3, clock)
+  for (let i = 0; i < 10 && b.tokens < 3; i++) { simulatedNow += 1; await Promise.resolve() }
+  await p
+  expect(events.length).toBeGreaterThan(0)
+  expect(events.every(e => e.kind === 'token-wait')).toBe(true)
+  expect(events[0]).toMatchObject({ kind: 'token-wait', attempt: 0 })
+})
+
+test('take() never emits an event when tokens are already available', async () => {
+  const clock = { now: () => 0 }
+  const events: any[] = []
+  const b = tokenBucket({ capacity: 5, refillPerMs: 0, clock, onEvent: (e) => events.push(e) })
+  await b.take(3, clock)
+  expect(events).toEqual([])
+})
