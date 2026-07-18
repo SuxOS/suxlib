@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import handler, { type Env } from '../../src/adapters/http.js'
+import { MemoryStore } from '../../src/effects/types.js'
 
 function post(path: string, body: unknown, headers: Record<string, string> = {}, env?: Env): Promise<Response> {
   return handler.fetch(
@@ -160,5 +161,28 @@ describe('http adapter', () => {
   it('POST /op/run: a missing `spec` surfaces a 400', async () => {
     const res = await post('op/run', { input: null })
     expect(res.status).toBe(400)
+  })
+
+  it('POST /op/run: env.opRunCache is reused across requests, so a memo leaf runs only once for the same input', async () => {
+    let puts = 0
+    const backing = new Map<string, unknown>()
+    // opRunStore must be shared alongside opRunCache: the cached result is
+    // Handle-shaped, and a Handle only resolves against the Store that
+    // produced it -- otherwise the second request's cache hit would fail to
+    // dehydrate against its own fresh per-request MemoryStore.
+    const env: Env = {
+      opRunCache: {
+        async get(key) { return backing.get(key) },
+        async put(key, value) { puts++; backing.set(key, value) },
+      },
+      opRunStore: new MemoryStore(),
+    }
+    const body = {
+      spec: { tag: 'leaf', name: 'convert', opts: { memo: true } },
+      input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+    }
+    await post('op/run', body, {}, env)
+    await post('op/run', body, {}, env)
+    expect(puts).toBe(1)
   })
 })

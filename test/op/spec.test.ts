@@ -1,5 +1,6 @@
 import { test, expect } from 'vitest'
 import { zipSync } from 'fflate'
+import { PDFDocument } from 'pdf-lib'
 import { buildOp, type OpSpec } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
@@ -71,4 +72,27 @@ test('buildOp rejects an out-of-range map concurrency', () => {
 
 test('buildOp rejects an out-of-range leaf retries', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { retries: 6 } })).toThrow(/retries/)
+})
+
+test('wrapHandle/unwrapHandle bridge unzip\'s bare-Handle output into shrink\'s {handle, ...opts} shape and back', async () => {
+  const { store, ...rest } = caps()
+  const pdfBytes = await (await PDFDocument.create()).save()
+  const zip = zipSync({ 'a.pdf': pdfBytes })
+  const zipHandle = await putBytes(store, zip, 'application/zip')
+
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unzip' },
+      {
+        tag: 'map',
+        op: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'leaf', name: 'shrink' }, { tag: 'leaf', name: 'unwrapHandle' }] },
+        concurrency: 2,
+      },
+    ],
+  }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, zipHandle, { store, ...rest })
+  expect(result).toHaveLength(1)
+  expect(result[0]).toMatchObject({ type: 'application/pdf' })
 })

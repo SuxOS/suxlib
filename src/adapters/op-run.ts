@@ -7,13 +7,15 @@
 // Store), not bytes -- but an adapter request is JSON in, JSON out. So the
 // caller marks any Handle it wants to seed as input with `{ $handle: true,
 // base64, type? }`; hydrate() walks the input and turns those into real
-// Handles in a fresh per-request MemoryStore before the run. dehydrate() does
-// the reverse to the result, turning any Handle-shaped value it finds back
-// into base64 -- the caller never sees or invents a Store key itself.
+// Handles in the run's Store (a fresh per-call MemoryStore by default, or a
+// host-supplied persistent one -- see OpRunOpts below) before the run.
+// dehydrate() does the reverse to the result, turning any Handle-shaped value
+// it finds back into base64 -- the caller never sees or invents a Store key
+// itself.
 
-import type { Handle, Llm } from '../effects/types.js'
+import type { Handle, Llm, Cache, Store } from '../effects/types.js'
 import { MemoryStore } from '../effects/types.js'
-import type { Caps } from '../op/types.js'
+import type { Caps, Governor } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
 import { runInline } from '../runtime/inline.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
@@ -31,7 +33,7 @@ function isResolvedHandle(v: unknown): v is Handle {
   return typeof h.r2Key === 'string' && typeof h.sha256 === 'string' && typeof h.type === 'string' && typeof h.size === 'number'
 }
 
-async function hydrate(store: MemoryStore, value: unknown): Promise<unknown> {
+async function hydrate(store: Store, value: unknown): Promise<unknown> {
   if (isHandleRef(value)) return store.put(b64ToBytes(value.base64), value.type ?? 'application/octet-stream')
   if (Array.isArray(value)) return Promise.all(value.map((v) => hydrate(store, v)))
   if (value && typeof value === 'object') {
@@ -49,7 +51,7 @@ async function hydrate(store: MemoryStore, value: unknown): Promise<unknown> {
   return value
 }
 
-async function dehydrate(store: MemoryStore, value: unknown): Promise<unknown> {
+async function dehydrate(store: Store, value: unknown): Promise<unknown> {
   if (isResolvedHandle(value)) {
     const bytes = await store.get(value)
     return { base64: bytesToB64(bytes), type: value.type, size: value.size }
@@ -71,16 +73,40 @@ const llmUnavailable: Llm = {
 export type OpRunRequest = { spec: OpSpec; input: unknown }
 
 /**
- * Executes one adapter-triggered pipeline run end to end: builds the Op tree
- * from `spec`, hydrates `input` into a fresh MemoryStore, runs it via
- * runInline, and dehydrates the result back to plain JSON. Each call gets its
- * own Store (and so its own governors-free Caps) -- there's no cross-request
- * state, matching the stateless request/response shape of an HTTP route or
- * an MCP tool call.
+ * Governors/cache/store a host wants shared across calls (createGovernor per
+ * registry leaf, a persistent Cache, a persistent Store) -- CLAUDE.md's
+ * "Governor convention" puts policy choices (thresholds, whether to cache at
+ * all, what backs the Store) on the host, not this library, so these are
+ * threaded through as-is rather than constructed here. Omitted entirely (the
+ * pre-#119 behavior) still runs fine: retries still apply,
+ * breaker/tokenBucket/concurrency gating and memoization just stay no-ops per
+ * runGoverned's own degrade-gracefully pattern, and a fresh MemoryStore backs
+ * each call as before.
+ *
+ * `cache` without also supplying `store` is a real footgun worth calling out:
+ * every registry leaf's result is Handle-shaped somewhere in its output, and
+ * a Handle only resolves against the Store instance that produced it -- a
+ * cache hit on a *later* call whose Handle points into a now-discarded
+ * per-call MemoryStore will throw ("handle not found") the moment the result
+ * is dehydrated, not silently misbehave. Pass the same `store` alongside
+ * `cache` (both long-lived) for cross-call memoization to actually work.
  */
-export async function runOpSpec({ spec, input }: OpRunRequest): Promise<unknown> {
-  const store = new MemoryStore()
-  const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks: {} }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store }
+
+/**
+ * Executes one adapter-triggered pipeline run end to end: builds the Op tree
+ * from `spec`, hydrates `input` into a Store (a fresh per-call MemoryStore by
+ * default, or `opts.store` when the host supplies one), runs it via
+ * runInline, and dehydrates the result back to plain JSON. `opts.governors`/
+ * `opts.cache`/`opts.store`, when supplied, are expected to be long-lived
+ * instances the host constructs once and passes to every call, so the
+ * reliability primitives they gate (breaker trip state, token-bucket fill,
+ * memoized results, handle data) actually persist across requests instead of
+ * resetting on every stateless HTTP route / MCP tool call.
+ */
+export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
+  const store = opts.store ?? new MemoryStore()
+  const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks: {}, governors: opts.governors, cache: opts.cache }
   const tree = buildOp(spec)
   const hydrated = await hydrate(store, input)
   const result = await runInline(tree, hydrated, caps)

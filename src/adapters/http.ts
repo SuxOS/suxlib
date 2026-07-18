@@ -11,6 +11,8 @@ import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/tra
 import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import type { OpSpec } from '../op/spec.js'
+import type { Governor } from '../op/types.js'
+import type { Cache, Store } from '../effects/types.js'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
@@ -25,7 +27,18 @@ function errorResponse(e: unknown, status = 400): Response {
 // route is open — deploying that way is only safe behind an upstream gate
 // (Cloudflare Access, mTLS, a private route) that this repo doesn't configure.
 // When set, every route below requires `Authorization: Bearer <token>`.
-export type Env = { FILEOPS_AUTH_TOKEN?: string }
+//
+// opRunGovernors/opRunCache/opRunStore: optional long-lived instances the
+// host builds once (e.g. createGovernor(name, spec) per src/op/registry.ts
+// leaf, plus a durable Cache/Store) and passes in on every `fetch` call, so
+// POST /op/run's runOpSpec actually gets the breaker/token-bucket/concurrency
+// gating and memoization the op engine offers instead of a fresh
+// governors-free Caps per request (#119) -- this file doesn't construct or
+// hold that state itself, since the thresholds/cache/store backend are a
+// host policy choice. Supplying opRunCache without opRunStore is a footgun
+// (see op-run.ts's OpRunOpts doc) -- a memoized leaf's Handle-shaped result
+// won't resolve against a fresh per-request MemoryStore on a later cache hit.
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -86,7 +99,7 @@ async function readCappedBody(request: Request): Promise<Uint8Array> {
   return out
 }
 
-type Route = { method: string; path: string; handle: (body: unknown) => Promise<Response> }
+type Route = { method: string; path: string; handle: (body: unknown, env: Env) => Promise<Response> }
 
 const routes: Route[] = [
   {
@@ -189,10 +202,10 @@ const routes: Route[] = [
   {
     method: 'POST',
     path: '/op/run',
-    handle: async (rawBody) => {
+    handle: async (rawBody, env) => {
       const body = rawBody as { spec?: unknown; input?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input })
+      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore })
       return json({ result })
     },
   },
@@ -228,7 +241,7 @@ export default {
       return errorResponse(e, 400)
     }
     try {
-      return await route.handle(body)
+      return await route.handle(body, env)
     } catch (e) {
       return errorResponse(e, 400)
     }

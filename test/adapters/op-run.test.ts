@@ -3,6 +3,8 @@ import { zipSync } from 'fflate'
 import { runOpSpec } from '../../src/adapters/op-run.js'
 import { bytesToB64 } from '../../src/adapters/base64.js'
 import type { OpSpec } from '../../src/op/spec.js'
+import { createGovernor } from '../../src/control/governor.js'
+import { MemoryStore, type Cache } from '../../src/effects/types.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -66,4 +68,39 @@ test('runOpSpec: a "__proto__"-keyed input cannot inject an inherited `to` into 
     `{"handle":{"$handle":true,"base64":"${bytesToB64(new TextEncoder().encode('{"a":1}'))}","type":"application/json"},"from":"json","__proto__":{"to":"yaml"}}`,
   )
   await expect(runOpSpec({ spec, input: maliciousInput })).rejects.toThrow(/Unsupported target format/)
+})
+
+test('runOpSpec: opts.cache is a long-lived instance a host reuses across calls, so a memo leaf runs only once for repeated input', async () => {
+  let gets = 0
+  let puts = 0
+  const backing = new Map<string, unknown>()
+  const cache: Cache = {
+    async get(key) { gets++; return backing.get(key) },
+    async put(key, value) { puts++; backing.set(key, value) },
+  }
+  // A memoized leaf's cached result is Handle-shaped, and a Handle only
+  // resolves against the Store instance that produced it -- opts.store must
+  // be shared across both calls too (see OpRunOpts's doc), or the second
+  // call's cache hit would fail to dehydrate against its own fresh Store.
+  const store = new MemoryStore()
+  const spec: OpSpec = { tag: 'leaf', name: 'convert', opts: { memo: true } }
+  const input = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' }
+
+  const first = await runOpSpec({ spec, input }, { cache, store }) as { base64: string }
+  const second = await runOpSpec({ spec, input }, { cache, store }) as { base64: string }
+
+  expect(Buffer.from(first.base64, 'base64').toString('utf8')).toBe('a: 1')
+  expect(second).toEqual(first)
+  expect(gets).toBe(2)
+  expect(puts).toBe(1)
+})
+
+test('runOpSpec: opts.governors persist breaker state across separate calls, not just within one', async () => {
+  const governors = { convert: createGovernor('convert', { circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000, halfOpenSuccesses: 1 } }) }
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const failingInput = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('not json')), type: 'application/json' }, from: 'json', to: 'yaml' }
+  await expect(runOpSpec({ spec, input: failingInput }, { governors })).rejects.toThrow()
+
+  const validInput = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' }
+  await expect(runOpSpec({ spec, input: validInput }, { governors })).rejects.toThrow(/circuit open/)
 })

@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { registerFileopsTools } from '../../src/adapters/mcp.js'
+import { MemoryStore } from '../../src/effects/types.js'
 
 const b64 = (s: string) => btoa(s)
 
@@ -147,5 +148,38 @@ describe('mcp adapter: allow-listed registration', () => {
 
     await scopedClient.close()
     await scopedServer.close()
+  })
+})
+
+describe('mcp adapter: persistent op-run cache/governors', () => {
+  it('run_pipeline reuses opts.opRunCache across separate tool calls, so a memo leaf runs only once', async () => {
+    let puts = 0
+    const backing = new Map<string, unknown>()
+    const cachedServer = new McpServer({ name: 'test-cached', version: '0.0.0' })
+    // opRunStore must be shared alongside opRunCache: the cached result is
+    // Handle-shaped, and a Handle only resolves against the Store that
+    // produced it -- otherwise the second call's cache hit would fail to
+    // dehydrate against its own fresh per-call MemoryStore.
+    registerFileopsTools(cachedServer, {
+      opRunCache: {
+        async get(key) { return backing.get(key) },
+        async put(key, value) { puts++; backing.set(key, value) },
+      },
+      opRunStore: new MemoryStore(),
+    })
+    const cachedClient = new Client({ name: 'test-cached-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([cachedServer.connect(serverTransport), cachedClient.connect(clientTransport)])
+
+    const args = {
+      spec: { tag: 'leaf', name: 'convert', opts: { memo: true } },
+      input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+    }
+    await cachedClient.callTool({ name: 'run_pipeline', arguments: args })
+    await cachedClient.callTool({ name: 'run_pipeline', arguments: args })
+    expect(puts).toBe(1)
+
+    await cachedClient.close()
+    await cachedServer.close()
   })
 })
