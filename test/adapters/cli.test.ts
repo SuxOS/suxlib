@@ -259,4 +259,40 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     expect(printed.abstract).toBe('summary of the full text')
     logSpy.mockRestore()
   })
+
+  it('--config loads an OpRunOpts.llm from a module\'s default export, reaching the summarize leaf from the real bin entry point', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'summarize' }, input: { $file: 'in.txt' } }))
+    writeFileSync(join(work, 'in.txt'), 'the full text')
+    writeFileSync(
+      configPath,
+      'export default { llm: { markdownFromPdf: async () => { throw new Error("unused") }, summarize: async (text) => `config summary of ${text}` } }\n',
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '--config', configPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { abstract: string }
+    expect(printed.abstract).toBe('config summary of the full text')
+    logSpy.mockRestore()
+  })
+
+  it('--config surfaces a module with no default export as a clean error', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'summarize' }, input: { $file: 'in.txt' } }))
+    writeFileSync(join(work, 'in.txt'), 'the full text')
+    writeFileSync(configPath, 'export const notDefault = {}\n')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '--config', configPath])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/must have a default export/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
 })

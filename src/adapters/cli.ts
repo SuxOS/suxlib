@@ -7,6 +7,7 @@
 import { Command } from 'commander'
 import { readFileSync, writeFileSync, mkdirSync, statSync, utimesSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
@@ -254,6 +255,26 @@ function extractHandleFiles(value: unknown, files: Array<{ name: string; bytes: 
   return value
 }
 
+/**
+ * Loads `--config <path>`'s module and returns its default export as an
+ * OpRunOpts -- the shell binary's way of reaching a live Llm/Store/Cache/
+ * Governors/Sinks object, which (unlike a programmatic caller of `main()`)
+ * it has no way to construct from argv alone. tsx (already how
+ * bin/fileops.mjs runs this whole CLI) lets a dynamic `import()` load
+ * arbitrary TS at runtime, so a `--config` module can be .ts without any
+ * extra build step. `pathToFileURL` makes the resolved path import-safe on
+ * every platform (a bare absolute path isn't a valid module specifier on
+ * Windows).
+ */
+async function loadOpRunOptsConfig(configPath: string): Promise<OpRunOpts> {
+  const resolved = resolve(configPath)
+  const mod = (await import(pathToFileURL(resolved).href)) as { default?: unknown }
+  if (!mod.default || typeof mod.default !== 'object') {
+    throw new Error(`--config module '${configPath}' must have a default export (an OpRunOpts object)`)
+  }
+  return mod.default as OpRunOpts
+}
+
 pipelineCmd
   .command('run')
   .description(
@@ -262,11 +283,13 @@ pipelineCmd
   )
   .argument('<spec-file>', 'JSON file: { spec: OpSpec, input }. Input values shaped { "$file": "<path>", "type"?: "<mime>" } are read off disk and marshalled into Handle refs.')
   .option('-o, --output <dir>', 'write Handle-shaped result value(s) to files in this directory instead of inlining base64 in the printed JSON')
-  .action(async (specFile: string, opts: { output?: string }) => {
+  .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- llm/store/cache/governors/sinks for this run, the shell CLI\'s equivalent of a programmatic caller\'s main(argv, opRunOpts)')
+  .action(async (specFile: string, opts: { output?: string; config?: string }) => {
     const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown; input?: unknown }
     if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
     const input = resolveFileRefs(parsed.input, dirname(resolve(specFile)))
-    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input }, cliOpRunOpts)
+    const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
+    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input }, runOpts)
     if (opts.output) {
       const files: Array<{ name: string; bytes: Uint8Array }> = []
       const shaped = extractHandleFiles(result, files)
