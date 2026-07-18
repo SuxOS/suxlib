@@ -15,7 +15,7 @@ import { LEAF_REGISTRY } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import type { OpSpec } from '../op/spec.js'
 import type { Governor, SinkTarget } from '../op/types.js'
-import type { Cache, Store } from '../effects/types.js'
+import type { Cache, Store, Llm } from '../effects/types.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
@@ -75,6 +75,16 @@ export type RegisterFileopsToolsOptions = {
    * half of that reachable over MCP.
    */
   opRunSinks?: Record<string, SinkTarget>
+  /**
+   * A host-supplied Llm implementation (real network calls to whatever model
+   * backs it are the host's responsibility — this repo stays
+   * dependency-light and never constructs one itself), so `run_pipeline` can
+   * actually exercise text.ts's `extract`/`summarize` leaves (registered in
+   * LEAF_REGISTRY). Omitted entirely, those two leaves throw instead of
+   * silently running with a do-nothing capability (see op-run.ts's
+   * OpRunOpts doc).
+   */
+  opRunLlm?: Llm
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -222,7 +232,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           input: z.unknown(),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks })),
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm })),
     )
   }
 }

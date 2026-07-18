@@ -4,7 +4,7 @@ import { runOpSpec } from '../../src/adapters/op-run.js'
 import { bytesToB64 } from '../../src/adapters/base64.js'
 import type { OpSpec } from '../../src/op/spec.js'
 import { createGovernor } from '../../src/control/governor.js'
-import { MemoryStore, type Cache } from '../../src/effects/types.js'
+import { MemoryStore, type Cache, type Llm } from '../../src/effects/types.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -133,4 +133,22 @@ test('runOpSpec: opts.governors persist breaker state across separate calls, not
 
   const validInput = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' }
   await expect(runOpSpec({ spec, input: validInput }, { governors })).rejects.toThrow(/circuit open/)
+})
+
+test('runOpSpec: summarize (an LLM-effect leaf) throws by default -- no path to a real Llm capability', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'summarize' }
+  const input = { $handle: true, base64: bytesToB64(new TextEncoder().encode('the full text')) }
+  await expect(runOpSpec({ spec, input })).rejects.toThrow(/llm capability is not available/)
+})
+
+test('runOpSpec: opts.llm lets a host wire a real Llm capability through to the summarize/extract leaves', async () => {
+  const llm: Llm = {
+    markdownFromPdf: async () => { throw new Error('unused') },
+    summarize: async (text) => `summary of ${text}`,
+  }
+  const spec: OpSpec = { tag: 'leaf', name: 'summarize' }
+  const input = { $handle: true, base64: bytesToB64(new TextEncoder().encode('the full text')) }
+  const result = await runOpSpec({ spec, input }, { llm }) as { abstract: string; summaryHandle: { base64: string } }
+  expect(result.abstract).toBe('summary of the full text')
+  expect(Buffer.from(result.summaryHandle.base64, 'base64').toString('utf8')).toBe('summary of the full text')
 })

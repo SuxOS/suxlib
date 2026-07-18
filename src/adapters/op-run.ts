@@ -115,8 +115,16 @@ export type OpRunRequest = { spec: OpSpec; input: unknown }
  * `store` too if it wants different re-put semantics. Omitted entirely still
  * leaves the built-in `store` target reachable, unlike governors/cache which
  * are pure no-ops when omitted.
+ *
+ * `llm`: a host-supplied Llm implementation (real network calls to whatever
+ * model backs it are the host's responsibility -- this repo stays
+ * dependency-light and never constructs one itself), threaded through to
+ * `text.ts`'s `extract`/`summarize` leaves the same way `store`/`cache` are.
+ * Omitted entirely, `caps.llm` falls back to `llmUnavailable` below, so those
+ * two leaves throw a clear error instead of silently running with a
+ * do-nothing capability.
  */
-export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget> }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm }
 
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
@@ -132,7 +140,7 @@ export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; s
 export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
   const store = opts.store ?? new MemoryStore()
   const sinks = Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks) as Record<string, SinkTarget>
-  const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache }
+  const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache }
   const tree = buildOp(spec)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
   const result = await runInline(tree, hydrated, caps)

@@ -236,4 +236,22 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await sinkClient.close()
     await sinkServer.close()
   })
+
+  it('run_pipeline: opts.opRunLlm wires a real Llm capability through to the summarize leaf', async () => {
+    const llmServer = new McpServer({ name: 'test-llm', version: '0.0.0' })
+    registerFileopsTools(llmServer, { opRunLlm: { markdownFromPdf: async () => { throw new Error('unused') }, summarize: async (text) => `summary of ${text}` } })
+    const llmClient = new Client({ name: 'test-llm-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([llmServer.connect(serverTransport), llmClient.connect(clientTransport)])
+
+    const result = await llmClient.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'leaf', name: 'summarize' }, input: { $handle: true, base64: b64('the full text') } },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toMatchObject({ abstract: 'summary of the full text' })
+
+    await llmClient.close()
+    await llmServer.close()
+  })
 })
