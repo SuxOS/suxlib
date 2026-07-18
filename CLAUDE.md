@@ -264,14 +264,20 @@ There is no linter in this repo. Run both locally before pushing.
   'handle' | 'unknown'> } | 'unknown'`; `'unknown'` deliberately opts out
   fields/leaves that aren't Handle-shaped, e.g. `pack`'s `files`, rather than
   guessing), and `buildOp`'s `pipe` case (`src/op/spec.ts`) walks consecutive
-  `leaf`/`reconcile` steps' declared shapes, throwing a clear error instead of
-  letting the mismatch reach `runInline`. It only checks direct step-to-step
-  adjacency within one `pipe.steps` array — it does not reason across a `map`
-  boundary (a `map`'s own input/output shape isn't modeled) — so a future
-  richer check would need to extend `stepShape`/`shapeCompatible`, not
-  replace them. A new registry leaf needs a `LEAF_SHAPES` entry alongside its
-  `LEAF_REGISTRY` one (a test asserts the two key sets match) or it silently
-  opts out of the check via the `?? 'unknown'` fallback.
+  `leaf`/`reconcile`/`map` steps' declared shapes, throwing a clear error
+  instead of letting the mismatch reach `runInline`. It only checks direct
+  step-to-step adjacency within one `pipe.steps` array. A new registry leaf
+  needs a `LEAF_SHAPES` entry alongside its `LEAF_REGISTRY` one (a test
+  asserts the two key sets match) or it silently opts out of the check via
+  the `?? 'unknown'` fallback. Update: `stepShape` now also derives a `map`
+  step's own shape from its inner op, but only for the one array shape
+  `LeafShape` can represent -- `map`'s input is `'handle[]'` exactly when its
+  inner op's input is a bare `'handle'` (unwrapping one array level onto each
+  element), and likewise for its output; an inner op whose shape is an object
+  or `'unknown'` (a nested `pipe`, or a leaf like `shrink` that wants
+  `{handle, ...opts}` per element) makes the `map` step `'unknown'` on that
+  side too rather than guessing at a richer "array of object" shape — that
+  remains unmodeled, a further scoped design pass if ever needed.
 - Prototype-pollution-guard gotcha for any future `Object.create(null)`-based
   registry (`LEAF_REGISTRY`, and now `SINK_REGISTRY` in `src/op/sinks.ts`,
   #147): merging one into a live config/Caps object via object-literal spread

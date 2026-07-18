@@ -17,9 +17,28 @@ const RECONCILE_MODES = new Set(['faithful-union', 'last-write-wins', 'field-mer
 /** reconcile always consumes the Handle[] a prior map/unzip step produced and always emits one merged Handle (runReconcile, src/op/reconcile.ts) -- fixed regardless of `opts.mode`. */
 const RECONCILE_SHAPE: { input: LeafShape; output: LeafShape } = { input: 'handle[]', output: 'handle' }
 
+/**
+ * `'handle[]'` is the only array shape LeafShape can represent, so a `map`
+ * step's own declared shape is only ever derivable in that one case: its
+ * input is `'handle[]'` exactly when its inner op's input is a bare
+ * `'handle'` (unwrapping one array level onto each element), and likewise
+ * for its output -- e.g. `map(scrub)` (scrub: `'handle'` -> `{handle}`) has
+ * declared input `'handle[]'` and output `'unknown'` (`{handle}` isn't
+ * unwrappable). An inner op whose own shape is an object or `'unknown'`
+ * (anything requiring per-element field richness LeafShape doesn't model)
+ * makes the map step's shape `'unknown'` on that side too, rather than
+ * guessing -- see CLAUDE.md's "Leaf composability gotcha" update for the
+ * scoping rationale.
+ */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
+  // A malformed step (not an object, no `tag`) degrades to 'unknown' here --
+  // buildOp's own per-tag validation (run right after, via `.map(buildOp)`)
+  // is what surfaces the real error for it; this loop only asserts shapes it
+  // can actually read.
+  if (!s || typeof s !== 'object') return 'unknown'
   if (s.tag === 'leaf') return LEAF_SHAPES[s.name]?.[side] ?? 'unknown'
   if (s.tag === 'reconcile') return RECONCILE_SHAPE[side]
+  if (s.tag === 'map') return s.op && stepShape(s.op, side) === 'handle' ? 'handle[]' : 'unknown'
   return 'unknown'
 }
 

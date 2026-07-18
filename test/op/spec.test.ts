@@ -144,6 +144,33 @@ test('buildOp does not flag pack/unpack\'s non-Handle-typed fields (`files`, `en
   expect(() => buildOp(spec)).not.toThrow()
 })
 
+test('buildOp rejects a pipe feeding a single object into a map whose inner leaf wants a bare-Handle array (the #145 motivating example)', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 }] }
+  expect(() => buildOp(spec)).toThrow(/"map"\) expects handle\[\] input, but step 0 \("wrapHandle"\) produces \{handle\}/)
+})
+
+test('buildOp derives a `map` step\'s own output shape from its inner leaf, so map(convert) -> reconcile is validated as Handle[] -> Handle[]', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'map', op: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } }, concurrency: 2 },
+      { tag: 'reconcile', opts: { mode: 'last-write-wins' } },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp leaves a map wrapping a non-leaf inner op (e.g. a nested pipe) unchecked at the map boundary -- its shape is not derivable', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unzip' },
+      { tag: 'map', op: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'leaf', name: 'shrink' }, { tag: 'leaf', name: 'unwrapHandle' }] }, concurrency: 2 },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
 test('buildOp builds a sink/fanout node whose targets resolve against caps.sinks at run time', async () => {
   const { store } = caps()
   const written: any[] = []
