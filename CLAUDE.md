@@ -296,7 +296,16 @@ There is no linter in this repo. Run both locally before pushing.
   surface at `runInline` time. A future built-in leaf needs its own
   `LEAF_SHAPES` entry to get build-time checking; nothing enforces that the
   table stays in sync with `LEAF_REGISTRY` beyond the test asserting their
-  key sets match.
+  key sets match. Update (#161): an object field's shape can now also be
+  `{ arrayObject: Record<string, 'handle' | 'unknown'> }` — pack's `files`
+  input field and unpack's `entries` output field (each `Array<{name,
+  handle, mtime}>`) are declared this way instead of collapsing to
+  `'unknown'`, so a pipe step mismatching one of those fields (e.g. `unpack`
+  feeding straight into `pack`, whose `files` key `unpack`'s `entries`-only
+  output never has) is now a build-time error too. This only reaches one
+  array level deep and doesn't help two leaves whose per-entry field is
+  named differently (`entries` vs `files`) actually chain — that's #168's
+  still-open design question, not solved here.
 - Prototype-pollution-guard gotcha for any future `Object.create(null)`-based
   registry (`LEAF_REGISTRY`, and now `SINK_REGISTRY` in `src/op/sinks.ts`,
   #147): merging one into a live config/Caps object via object-literal spread

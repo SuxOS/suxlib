@@ -251,6 +251,11 @@ test('buildOp catches a shape mismatch at a map step\'s own boundary (#145): a b
   expect(() => buildOp(spec)).toThrow(/pipe step 1 \("map"\) expects handle\[\] input, but step 0 \("convert"\) produces handle/)
 })
 
+test('buildOp rejects unpack feeding straight into pack (#161): unpack\'s `entries` field doesn\'t satisfy pack\'s `files` field now that both are declared as array-of-Handle-object shapes instead of \'unknown\'', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'unpack', params: { format: 'zip' } }, { tag: 'leaf', name: 'pack', params: { format: 'zip' } }] }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("pack"\) expects \{format, files\} input, but step 0 \("unpack"\) produces \{entries, skipped\}/)
+})
+
 test('buildOp\'s map-boundary shape check allows unzip\'s `handle[]` feeding map(scrub), whose inner leaf wants a bare `handle`', () => {
   const spec: OpSpec = {
     tag: 'pipe',

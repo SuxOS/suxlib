@@ -1,7 +1,7 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
 import { op, pipe, map, sink, reconcile } from './combinators.js'
-import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape } from './registry.js'
+import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
@@ -26,10 +26,25 @@ function shapeLabel(s: LeafShape): string {
   return `{${Object.keys(s.object).join(', ')}}`
 }
 
+/**
+ * A field's own shape check, one level deeper than shapeCompatible's
+ * top-level object comparison: a plain 'handle' field still just needs a
+ * matching 'handle' on the output side, but an `arrayObject` field (pack's
+ * `files`, unpack's `entries`, #161) needs the output side to also declare
+ * an `arrayObject` whose handle-bearing keys line up -- same "'unknown' is
+ * permissive, only a *declared* mismatch blocks" rule as the top level.
+ */
+function fieldCompatible(output: LeafFieldShape | undefined, input: LeafFieldShape): boolean {
+  if (input === 'unknown') return true
+  if (input === 'handle') return output === 'handle'
+  if (typeof output !== 'object' || !('arrayObject' in output)) return false
+  return Object.entries(input.arrayObject).every(([k, v]) => v !== 'handle' || output.arrayObject[k] === 'handle')
+}
+
 function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
   if (output === 'unknown' || input === 'unknown') return true
   if (typeof output === 'string' || typeof input === 'string') return output === input
-  return Object.entries(input.object).every(([k, v]) => v !== 'handle' || output.object[k] === 'handle')
+  return Object.entries(input.object).every(([k, v]) => fieldCompatible(output.object[k], v))
 }
 
 /**

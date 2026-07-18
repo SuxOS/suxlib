@@ -30,17 +30,18 @@ export const LEAF_REGISTRY: Readonly<Record<string, LeafFn>> = Object.freeze(
  * A leaf's declared input/output shape, coarse enough to cover every
  * LEAF_REGISTRY entry without guessing at field richness `buildOp` (./spec.ts)
  * has no real use for: a bare Handle, an array of Handles (unzip's only
- * output shape), an object whose fields are each either a Handle or
- * 'unknown', or 'unknown' itself for anything this scheme can't represent
- * (e.g. unpack's `{ entries: [...] }`, whose Handles are nested inside an
- * array of objects, not a top-level field). 'unknown' is the deliberately
- * permissive default on either side of a comparison (spec.ts's
- * shapeCompatible) -- CLAUDE.md's "Leaf composability gotcha" scoping note
- * says how much shape richness is worth encoding needs its own design pass,
- * so this only ever blocks a *provably* mismatched Handle-shaped pipe step,
- * never a plausibly-fine one.
+ * output shape), an object whose fields are each a Handle, an array of
+ * Handle-bearing objects (`arrayObject` -- pack's `files` input field and
+ * unpack's `entries` output field, #161), or 'unknown' itself for anything
+ * else this scheme can't represent. 'unknown' is the deliberately permissive
+ * default on either side of a comparison (spec.ts's shapeCompatible) --
+ * CLAUDE.md's "Leaf composability gotcha" scoping note says how much shape
+ * richness is worth encoding needs its own design pass, so this only ever
+ * blocks a *provably* mismatched Handle-shaped pipe step, never a
+ * plausibly-fine one.
  */
-export type LeafShape = 'unknown' | 'handle' | 'handle[]' | { object: Record<string, 'handle' | 'unknown'> }
+export type LeafFieldShape = 'handle' | 'unknown' | { arrayObject: Record<string, 'handle' | 'unknown'> }
+export type LeafShape = 'unknown' | 'handle' | 'handle[]' | { object: Record<string, LeafFieldShape> }
 
 /**
  * Per-leaf declared shape, keyed by the same LEAF_REGISTRY name -- used by
@@ -53,8 +54,8 @@ export type LeafShape = 'unknown' | 'handle' | 'handle[]' | { object: Record<str
  * default as an unrepresentable shape.
  */
 export const LEAF_SHAPES: Readonly<Record<string, { input: LeafShape; output: LeafShape }>> = Object.freeze({
-  pack: { input: { object: { format: 'unknown', files: 'unknown' } }, output: 'handle' },
-  unpack: { input: { object: { format: 'unknown', handle: 'handle' } }, output: 'unknown' },
+  pack: { input: { object: { format: 'unknown', files: { arrayObject: { name: 'unknown', handle: 'handle', mtime: 'unknown' } } } }, output: 'handle' },
+  unpack: { input: { object: { format: 'unknown', handle: 'handle' } }, output: { object: { entries: { arrayObject: { name: 'unknown', handle: 'handle', mtime: 'unknown' } }, skipped: 'unknown' } } },
   unzip: { input: 'handle', output: 'handle[]' },
   shrink: { input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } },
   redact: { input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } },
