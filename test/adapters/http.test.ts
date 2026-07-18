@@ -163,6 +163,21 @@ describe('http adapter', () => {
     expect(res.status).toBe(400)
   })
 
+  it('POST /op/run: a sink spec resolves the built-in `store` target with no host wiring required, echoing the piped value through', async () => {
+    const res = await post('op/run', { spec: { tag: 'sink', targets: ['store'] }, input: { a: 1 } })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: { a: number } }
+    expect(body.result).toEqual({ a: 1 })
+  })
+
+  it('POST /op/run: env.opRunSinks registers a host-supplied sink target', async () => {
+    const written: unknown[] = []
+    const env: Env = { opRunSinks: { log: { name: 'log', write: async (v) => { written.push(v); return v } } } }
+    const res = await post('op/run', { spec: { tag: 'sink', targets: ['log'] }, input: { a: 1 } }, {}, env)
+    expect(res.status).toBe(200)
+    expect(written).toEqual([{ a: 1 }])
+  })
+
   it('POST /op/run: env.opRunCache is reused across requests, so a memo leaf runs only once for the same input', async () => {
     let puts = 0
     const backing = new Map<string, unknown>()

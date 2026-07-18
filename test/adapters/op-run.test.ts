@@ -103,6 +103,28 @@ test('runOpSpec: hydrate() bails on the aggregate byte guard across multiple $ha
   await expect(runOpSpec({ spec, input })).rejects.toThrow(/bomb guard/)
 })
 
+test('runOpSpec: a sink spec resolves the built-in `store` target with no host wiring required, echoing the piped value through', async () => {
+  const spec: OpSpec = { tag: 'sink', targets: ['store'] }
+  const result = await runOpSpec({ spec, input: { a: 1 } })
+  expect(result).toEqual({ a: 1 })
+})
+
+test('runOpSpec: opts.sinks lets a host register/override a named target', async () => {
+  const written: unknown[] = []
+  const spec: OpSpec = { tag: 'sink', targets: ['log'] }
+  const result = await runOpSpec(
+    { spec, input: { a: 1 } },
+    { sinks: { log: { name: 'log', write: async (v) => { written.push(v); return v } } } },
+  )
+  expect(written).toEqual([{ a: 1 }])
+  expect(result).toEqual({ a: 1 })
+})
+
+test('runOpSpec: an unknown sink target surfaces an error instead of silently no-oping', async () => {
+  const spec: OpSpec = { tag: 'sink', targets: ['nope'] }
+  await expect(runOpSpec({ spec, input: {} })).rejects.toThrow()
+})
+
 test('runOpSpec: opts.governors persist breaker state across separate calls, not just within one', async () => {
   const governors = { convert: createGovernor('convert', { circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000, halfOpenSuccesses: 1 } }) }
   const spec: OpSpec = { tag: 'leaf', name: 'convert' }

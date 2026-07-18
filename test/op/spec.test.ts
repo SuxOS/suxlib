@@ -104,8 +104,27 @@ test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })
 
-test('buildOp rejects an unsupported tag (e.g. sink/ask/reconcile, which need host capabilities)', () => {
-  expect(() => buildOp({ tag: 'sink' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "sink"/)
+test('buildOp rejects an unsupported tag (e.g. ask/reconcile, which need host capabilities)', () => {
+  expect(() => buildOp({ tag: 'ask' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "ask"/)
+})
+
+test('buildOp builds a sink/fanout node whose targets resolve against caps.sinks at run time', async () => {
+  const { store } = caps()
+  const written: any[] = []
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'wrapHandle' }, { tag: 'sink', targets: ['out'] }] }
+  const tree = buildOp(spec)
+  const handle = await putBytes(store, new TextEncoder().encode('hi'), 'text/plain')
+  const result = await runInline(tree, handle, { store, llm: {} as any, clock: { now: () => 0 }, sinks: { out: { name: 'out', write: async (v: any) => { written.push(v); return v } } } })
+  expect(written).toEqual([{ handle }])
+  expect(result).toEqual({ handle })
+})
+
+test('buildOp rejects a sink spec with an empty `targets` array', () => {
+  expect(() => buildOp({ tag: 'sink', targets: [] })).toThrow(/targets/)
+})
+
+test('buildOp rejects a sink spec with a non-string target', () => {
+  expect(() => buildOp({ tag: 'sink', targets: [1 as unknown as string] })).toThrow(/targets/)
 })
 
 test('buildOp rejects an empty pipe', () => {
