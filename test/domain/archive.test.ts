@@ -51,6 +51,17 @@ test('zipCreate is deterministic — two calls with identical input produce byte
   expect(second).toEqual(first)
 })
 
+test('zipCreate with no mtime does not throw in a timezone behind UTC', () => {
+  const prevTz = process.env.TZ
+  process.env.TZ = 'America/Los_Angeles'
+  try {
+    expect(() => zipCreate([{ name: 'a.txt', data: strToU8('AAA') }])).not.toThrow()
+  } finally {
+    if (prevTz === undefined) delete process.env.TZ
+    else process.env.TZ = prevTz
+  }
+})
+
 test('zipCreate rejects duplicate entry names instead of silently dropping one', () => {
   expect(() => zipCreate([{ name: 'a', data: strToU8('1') }, { name: 'a', data: strToU8('2') }])).toThrow(/duplicate entry name/)
 })

@@ -116,6 +116,30 @@ test('toXml/parseXml round-trip a single-element array of objects', () => {
   expect(parseXml(xml)).toEqual({ root: obj })
 })
 
+test('toXml/parseXml round-trip an array-of-arrays instead of silently flattening it', () => {
+  const obj = { a: [['1', '2'], ['3', '4']] }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
+})
+
+test('toXml/parseXml round-trip an array-of-arrays whose sub-arrays have varying length, including single-element and empty sub-arrays', () => {
+  const obj = { a: [['1'], [], ['2', '3'], ['4']] }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
+})
+
+test('toXml/parseXml round-trip a doubly-nested array (array of array of arrays)', () => {
+  const obj = { a: [[['1', '2']], ['3']] }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
+})
+
+test('toXml/parseXml round-trip an array mixing plain values and nested arrays', () => {
+  const obj = { a: [['1', '2'], '3', ['4']] }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
+})
+
 test('parseXml does not truncate a tag at a `>` inside a quoted attribute value', () => {
   expect(parseXml('<tag attr="a>b">text</tag>')).toEqual({ tag: { '@attr': 'a>b', '#text': 'text' } })
 })

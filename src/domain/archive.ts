@@ -94,7 +94,12 @@ function gunzipCapped(bytes: Uint8Array): Uint8Array {
 // timestamp, epoch 0 is valid) zipCreate can't default a missing mtime to 0
 // — fflate throws 'date not in range 1980-2099'. Default to the earliest
 // representable DOS date instead, keeping output deterministic without a caller-supplied mtime.
-const ZIP_EPOCH = Date.UTC(1980, 0, 1)
+// fflate's zip writer reads the DOS year via local (not UTC) Date getters, so this must be
+// built with the local Date constructor — Date.UTC(1980, 0, 1) reads back as 1979 in any
+// timezone behind UTC, tripping fflate's own 'date not in range 1980-2099' guard. Computed
+// fresh per call (not a module-level constant) so it tracks the process's current TZ rather
+// than whatever TZ happened to be active at import time.
+const zipEpoch = () => new Date(1980, 0, 1).getTime()
 
 export function zipCreate(files: ArchiveFile[]): Uint8Array {
   if (!files.length) throw new Error('pack needs at least one file.')
@@ -124,8 +129,8 @@ export function zipCreate(files: ArchiveFile[]): Uint8Array {
     if (f.name in record) throw new Error(`duplicate entry name: '${f.name}' — every file in an archive needs a unique name.`)
     // fflate defaults a missing mtime to Date.now(), making zipCreate's output
     // wall-clock-dependent even for byte-identical input; default to
-    // ZIP_EPOCH unless the caller supplied one.
-    record[f.name] = [f.data, { mtime: f.mtime ?? ZIP_EPOCH }]
+    // zipEpoch() unless the caller supplied one.
+    record[f.name] = [f.data, { mtime: f.mtime ?? zipEpoch() }]
   }
   return zipSync(record, { level: 6 })
 }
@@ -215,7 +220,7 @@ const ZIP64_EOCD_SIGNATURE = 0x06064b50
  * unzipSync nor the streaming Unzip class surface mtime through fflate's
  * public API (UnzipFileInfo only carries name/size/compression), so this walks
  * the central directory the same way fflate's internal zh() does — read-only,
- * no decompression — to recover the field zipCreate writes (see ZIP_EPOCH
+ * no decompression — to recover the field zipCreate writes (see zipEpoch
  * above). Best-effort: an EOCD record that can't be found (corrupt/exotic
  * input already rejected by unzipGuarded's unzipSync validation pass) just
  * yields no mtimes rather than throwing a second time.
