@@ -533,7 +533,7 @@ export const unpack: LeafFn = async (input, caps) => {
   const bytes = await resolve(caps.store, handle)
   const { entries, skipped } = archiveExtract(format, bytes)
   const parts = await Promise.all(
-    entries.map(async (e) => ({ name: e.name, handle: await putBytes(caps.store, e.data, 'application/octet-stream') })),
+    entries.map(async (e) => ({ name: e.name, handle: await putBytes(caps.store, e.data, 'application/octet-stream'), mtime: e.mtime })),
   )
   return skipped ? { entries: parts, skipped } : { entries: parts }
 }
