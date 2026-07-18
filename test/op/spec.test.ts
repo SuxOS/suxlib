@@ -140,6 +140,48 @@ test('buildOp rejects an out-of-range leaf retries', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { retries: 6 } })).toThrow(/retries/)
 })
 
+test('buildOp resolves a host-registered leaf via its `extraLeaves` param', async () => {
+  const { store, ...rest } = caps()
+  const handle = await putBytes(store, new TextEncoder().encode('hi'), 'text/plain')
+  const shout: (input: unknown) => Promise<unknown> = async (input) => ({ shouted: input })
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const tree = buildOp(spec, { shout })
+  const result = await runInline(tree, handle, { store, ...rest }) as { shouted: unknown }
+  expect(result.shouted).toEqual(handle)
+})
+
+test('buildOp resolves an `extraLeaves` leaf nested inside pipe/map, not just a top-level leaf node', async () => {
+  const { store, ...rest } = caps()
+  const png = buildMinimalPng()
+  const zip = zipSync({ 'a.png': png })
+  const zipHandle = await putBytes(store, zip, 'application/zip')
+  const tag: (input: unknown) => Promise<unknown> = async (input) => ({ tagged: true, input })
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unzip' },
+      { tag: 'map', op: { tag: 'leaf', name: 'tag' }, concurrency: 2 },
+    ],
+  }
+  const tree = buildOp(spec, { tag })
+  const result = await runInline(tree, zipHandle, { store, ...rest }) as Array<{ tagged: boolean }>
+  expect(result).toHaveLength(1)
+  expect(result[0].tagged).toBe(true)
+})
+
+test('buildOp still rejects an unknown leaf name when `extraLeaves` is supplied but doesn\'t cover it', () => {
+  expect(() => buildOp({ tag: 'leaf', name: 'nope' }, { shout: async (i) => i })).toThrow(/unknown leaf "nope"/)
+})
+
+test('buildOp\'s `extraLeaves` lets a host-registered leaf shadow a built-in name', async () => {
+  const { store, ...rest } = caps()
+  const handle = await putBytes(store, new TextEncoder().encode('hi'), 'text/plain')
+  const overriddenScrub: (input: unknown) => Promise<unknown> = async () => ({ overridden: true })
+  const tree = buildOp({ tag: 'leaf', name: 'scrub' }, { scrub: overriddenScrub })
+  const result = await runInline(tree, handle, { store, ...rest })
+  expect(result).toEqual({ overridden: true })
+})
+
 test('wrapHandle/unwrapHandle bridge unzip\'s bare-Handle output into shrink\'s {handle, ...opts} shape and back', async () => {
   const { store, ...rest } = caps()
   const pdfBytes = await (await PDFDocument.create()).save()

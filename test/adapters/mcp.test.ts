@@ -254,4 +254,19 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await llmClient.close()
     await llmServer.close()
   })
+
+  it('run_pipeline: opts.opRunLeaves lets a host register a custom leaf a spec can name', async () => {
+    const leavesServer = new McpServer({ name: 'test-leaves', version: '0.0.0' })
+    registerFileopsTools(leavesServer, { opRunLeaves: { shout: async (input) => ({ shouted: input }) } })
+    const leavesClient = new Client({ name: 'test-leaves-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([leavesServer.connect(serverTransport), leavesClient.connect(clientTransport)])
+
+    const result = await leavesClient.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 } } })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ shouted: { a: 1 } })
+
+    await leavesClient.close()
+    await leavesServer.close()
+  })
 })
