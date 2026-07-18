@@ -257,3 +257,12 @@ There is no linter in this repo. Run both locally before pushing.
   `convert` returns a bare `Handle` — so `unwrapHandle` belongs after
   `shrink`/`redact` in a pipe, never after `convert` (it would read a
   nonexistent `.handle` off the bare Handle and produce `undefined`).
+- Prototype-pollution-guard gotcha for any future `Object.create(null)`-based
+  registry (`LEAF_REGISTRY`, and now `SINK_REGISTRY` in `src/op/sinks.ts`,
+  #147): merging one into a live config/Caps object via object-literal spread
+  (`{ ...REGISTRY, ...extra }`) silently discards the null-prototype
+  protection — spread's `CreateDataProperty` semantics always produce a
+  plain `Object.prototype`-based target, even when every source object is
+  itself null-prototype. Build the merged object with `Object.assign(
+  Object.create(null), REGISTRY, extra)` instead (see
+  `src/adapters/op-run.ts`'s `caps.sinks` construction for the pattern).
