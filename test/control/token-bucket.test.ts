@@ -63,3 +63,14 @@ test('take() never emits an event when tokens are already available', async () =
   await b.take(3, clock)
   expect(events).toEqual([])
 })
+
+test('take() uses an injected sleep instead of a real setTimeout wait', async () => {
+  let simulatedNow = 0
+  const clock = { now: () => simulatedNow }
+  const b = tokenBucket({ capacity: 5, refillPerMs: 1, clock })
+  b.tryTake(5, 0) // drain it
+  const sleepCalls: number[] = []
+  const sleep = async (ms: number) => { sleepCalls.push(ms); simulatedNow += ms }
+  await b.take(3, clock, sleep)
+  expect(sleepCalls.length).toBeGreaterThan(0)
+})
