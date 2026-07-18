@@ -185,4 +185,19 @@ describe('http adapter', () => {
     await post('op/run', body, {}, env)
     expect(puts).toBe(1)
   })
+
+  it('POST /op/run: env.opRunLlm backs the `extract` leaf, absent by default (llmUnavailable throws a 400)', async () => {
+    const spec = { tag: 'leaf', name: 'extract' }
+    const input = { $handle: true, base64: b64('pdf-bytes'), type: 'application/pdf' }
+    const withoutLlm = await post('op/run', { spec, input })
+    expect(withoutLlm.status).toBe(400)
+    expect(((await withoutLlm.json()) as { error: string }).error).toMatch(/llm capability is not available/)
+
+    const env: Env = { opRunLlm: { markdownFromPdf: async (bytes) => `# md for ${new TextDecoder().decode(bytes)}`, summarize: async () => { throw new Error('unused') } } }
+    const withLlm = await post('op/run', { spec, input }, {}, env)
+    expect(withLlm.status).toBe(200)
+    const body = (await withLlm.json()) as { result: { base64: string; type: string } }
+    expect(body.result.type).toBe('text/markdown')
+    expect(atob(body.result.base64)).toBe('# md for pdf-bytes')
+  })
 })

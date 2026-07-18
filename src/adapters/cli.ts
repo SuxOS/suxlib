@@ -7,6 +7,7 @@
 import { Command } from 'commander'
 import { readFileSync, writeFileSync, mkdirSync, statSync, utimesSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
@@ -14,6 +15,7 @@ import { dispatchTransform, type Format } from '../domain/transform.js'
 import { runOpSpec } from './op-run.js'
 import { LEAF_REGISTRY } from '../op/registry.js'
 import type { OpSpec } from '../op/spec.js'
+import type { Llm } from '../effects/types.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 const program = new Command()
@@ -241,6 +243,27 @@ function extractHandleFiles(value: unknown, files: Array<{ name: string; bytes: 
   return value
 }
 
+/**
+ * Loads a host-supplied `Llm` capability (backing `extract`/`summarize`,
+ * src/domain/text.ts's LLM-effect leaves) from a JS/TS module path via
+ * dynamic import -- the CLI already shells out to tsx (bin/fileops.mjs), so
+ * a .ts module here needs no separate build step either. This repo stays
+ * dependency-light and ships no concrete Llm implementation of its own
+ * (op-run.ts's llmUnavailable default); a host wanting `extract`/`summarize`
+ * from the CLI supplies its own module exporting one (default export, or a
+ * named `llm` export) shaped `{ markdownFromPdf(bytes), summarize(text) }`.
+ * Resolved relative to cwd via pathToFileURL, not import()'s own module-
+ * relative resolution, since the path comes from the invoking user's shell.
+ */
+async function loadLlmModule(path: string): Promise<Llm> {
+  const mod = (await import(pathToFileURL(resolve(path)).href)) as Record<string, unknown>
+  const candidate = (mod.default ?? mod.llm ?? mod) as Partial<Llm>
+  if (typeof candidate.markdownFromPdf !== 'function' || typeof candidate.summarize !== 'function') {
+    throw new Error(`--llm-module ${path} must export (as default or \`llm\`) an object with markdownFromPdf(bytes) and summarize(text) methods`)
+  }
+  return candidate as Llm
+}
+
 pipelineCmd
   .command('run')
   .description(
@@ -249,11 +272,13 @@ pipelineCmd
   )
   .argument('<spec-file>', 'JSON file: { spec: OpSpec, input }. Input values shaped { "$file": "<path>", "type"?: "<mime>" } are read off disk and marshalled into Handle refs.')
   .option('-o, --output <dir>', 'write Handle-shaped result value(s) to files in this directory instead of inlining base64 in the printed JSON')
-  .action(async (specFile: string, opts: { output?: string }) => {
+  .option('--llm-module <path>', 'path to a module supplying the Llm capability for extract/summarize (default or `llm` export shaped { markdownFromPdf, summarize }); omit if the spec doesn\'t use those leaves')
+  .action(async (specFile: string, opts: { output?: string; llmModule?: string }) => {
     const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown; input?: unknown }
     if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
     const input = resolveFileRefs(parsed.input, dirname(resolve(specFile)))
-    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input })
+    const llm = opts.llmModule ? await loadLlmModule(opts.llmModule) : undefined
+    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input }, { llm })
     if (opts.output) {
       const files: Array<{ name: string; bytes: Uint8Array }> = []
       const shaped = extractHandleFiles(result, files)

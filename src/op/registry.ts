@@ -3,6 +3,7 @@ import { pack, unpack, unzip } from '../domain/archive.js'
 import { shrink } from '../domain/pdf.js'
 import { redact, scrub } from '../domain/sanitize.js'
 import { convert } from '../domain/transform.js'
+import { extract, summarize } from '../domain/text.js'
 import { wrapHandle, unwrapHandle } from './reshape.js'
 
 /**
@@ -22,7 +23,7 @@ import { wrapHandle, unwrapHandle } from './reshape.js'
 // JSON op spec (src/op/spec.ts's buildOp), same class of bug CLAUDE.md
 // documents for fieldMerge/parseXml/canonicalize/op-run.ts's hydrate.
 export const LEAF_REGISTRY: Readonly<Record<string, LeafFn>> = Object.freeze(
-  Object.assign(Object.create(null), { pack, unpack, unzip, shrink, redact, scrub, convert, wrapHandle, unwrapHandle }),
+  Object.assign(Object.create(null), { pack, unpack, unzip, shrink, redact, scrub, convert, extract, summarize, wrapHandle, unwrapHandle }),
 )
 
 export function resolveLeaf(name: string): LeafFn {

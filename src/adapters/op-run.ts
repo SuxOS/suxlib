@@ -107,8 +107,15 @@ export type OpRunRequest = { spec: OpSpec; input: unknown }
  * per-call MemoryStore will throw ("handle not found") the moment the result
  * is dehydrated, not silently misbehave. Pass the same `store` alongside
  * `cache` (both long-lived) for cross-call memoization to actually work.
+ *
+ * `llm`, when supplied, backs `extract`/`summarize` (src/domain/text.ts's
+ * LLM-`effect` leaves) with a real capability instead of the always-throwing
+ * `llmUnavailable` default below -- a host constructs it once (it typically
+ * wraps a stateless API client) and passes it in the same long-lived way as
+ * `store`/`cache`, since this repo stays dependency-light and doesn't ship a
+ * concrete `Llm` implementation of its own.
  */
-export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; llm?: Llm }
 
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
@@ -123,7 +130,7 @@ export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; s
  */
 export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
   const store = opts.store ?? new MemoryStore()
-  const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks: {}, governors: opts.governors, cache: opts.cache }
+  const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks: {}, governors: opts.governors, cache: opts.cache }
   const tree = buildOp(spec)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
   const result = await runInline(tree, hydrated, caps)

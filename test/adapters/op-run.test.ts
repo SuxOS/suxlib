@@ -4,7 +4,7 @@ import { runOpSpec } from '../../src/adapters/op-run.js'
 import { bytesToB64 } from '../../src/adapters/base64.js'
 import type { OpSpec } from '../../src/op/spec.js'
 import { createGovernor } from '../../src/control/governor.js'
-import { MemoryStore, type Cache } from '../../src/effects/types.js'
+import { MemoryStore, type Cache, type Llm } from '../../src/effects/types.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -111,4 +111,22 @@ test('runOpSpec: opts.governors persist breaker state across separate calls, not
 
   const validInput = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' }
   await expect(runOpSpec({ spec, input: validInput }, { governors })).rejects.toThrow(/circuit open/)
+})
+
+test('runOpSpec: the `extract` leaf throws via the llmUnavailable default when opts.llm is omitted', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'extract' }
+  const input = { $handle: true, base64: bytesToB64(new TextEncoder().encode('pdf-bytes')), type: 'application/pdf' }
+  await expect(runOpSpec({ spec, input })).rejects.toThrow(/llm capability is not available/)
+})
+
+test('runOpSpec: opts.llm backs the `extract` leaf through the composable pipeline', async () => {
+  const llm: Llm = {
+    markdownFromPdf: async (bytes) => `# md for ${new TextDecoder().decode(bytes)}`,
+    summarize: async () => { throw new Error('unused') },
+  }
+  const spec: OpSpec = { tag: 'leaf', name: 'extract' }
+  const input = { $handle: true, base64: bytesToB64(new TextEncoder().encode('pdf-bytes')), type: 'application/pdf' }
+  const result = await runOpSpec({ spec, input }, { llm }) as { base64: string; type: string }
+  expect(result.type).toBe('text/markdown')
+  expect(Buffer.from(result.base64, 'base64').toString('utf8')).toBe('# md for pdf-bytes')
 })

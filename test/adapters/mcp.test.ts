@@ -165,6 +165,14 @@ describe('mcp adapter', () => {
     const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'leaf', name: 'nope' }, input: null } })
     expect(result.isError).toBe(true)
   })
+
+  it('run_pipeline: the `extract` leaf surfaces a tool error via the llmUnavailable default when opts.opRunLlm is omitted', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'leaf', name: 'extract' }, input: { $handle: true, base64: b64('pdf-bytes'), type: 'application/pdf' } },
+    })
+    expect(result.isError).toBe(true)
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {
@@ -213,5 +221,27 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
 
     await cachedClient.close()
     await cachedServer.close()
+  })
+
+  it('run_pipeline: opts.opRunLlm backs the `extract` leaf through the composable pipeline', async () => {
+    const spec = { tag: 'leaf', name: 'extract' }
+    const input = { $handle: true, base64: b64('pdf-bytes'), type: 'application/pdf' }
+
+    const llmServer = new McpServer({ name: 'test-llm', version: '0.0.0' })
+    registerFileopsTools(llmServer, {
+      opRunLlm: { markdownFromPdf: async (bytes) => `# md for ${new TextDecoder().decode(bytes)}`, summarize: async () => { throw new Error('unused') } },
+    })
+    const llmClient = new Client({ name: 'test-llm-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([llmServer.connect(serverTransport), llmClient.connect(clientTransport)])
+
+    const withLlm = await llmClient.callTool({ name: 'run_pipeline', arguments: { spec, input } })
+    expect(withLlm.isError).toBeFalsy()
+    const body = parseResult(withLlm) as { base64: string; type: string }
+    expect(body.type).toBe('text/markdown')
+    expect(atob(body.base64)).toBe('# md for pdf-bytes')
+
+    await llmClient.close()
+    await llmServer.close()
   })
 })

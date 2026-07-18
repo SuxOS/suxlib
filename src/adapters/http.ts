@@ -12,7 +12,7 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import type { OpSpec } from '../op/spec.js'
 import type { Governor } from '../op/types.js'
-import type { Cache, Store } from '../effects/types.js'
+import type { Cache, Llm, Store } from '../effects/types.js'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
@@ -38,7 +38,12 @@ function errorResponse(e: unknown, status = 400): Response {
 // host policy choice. Supplying opRunCache without opRunStore is a footgun
 // (see op-run.ts's OpRunOpts doc) -- a memoized leaf's Handle-shaped result
 // won't resolve against a fresh per-request MemoryStore on a later cache hit.
-export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store }
+// opRunLlm: same long-lived pattern, backing `extract`/`summarize` (the
+// domain/text.ts LLM-effect leaves) with a real capability -- omitted, those
+// two leaves still resolve via the registry but throw when run, since this
+// repo ships no concrete Llm implementation of its own (op-run.ts's
+// llmUnavailable default).
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunLlm?: Llm }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -205,7 +210,7 @@ const routes: Route[] = [
     handle: async (rawBody, env) => {
       const body = rawBody as { spec?: unknown; input?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore })
+      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, llm: env.opRunLlm })
       return json({ result })
     },
   },

@@ -211,4 +211,65 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     process.exitCode = 0
     errSpy.mockRestore()
   })
+
+  it('runs the `extract` leaf without --llm-module and surfaces the llmUnavailable error, not a crash', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(join(work, 'pdf.bin'), 'pdf-bytes')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'extract' }, input: { $file: 'pdf.bin', type: 'application/pdf' } }))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/llm capability is not available/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
+
+  it('pipeline run --llm-module loads a host Llm capability, so the `extract` leaf runs through the composable pipeline', async () => {
+    const work = tmpDir()
+    const outDir = join(work, 'out')
+    const llmModulePath = join(work, 'llm.mjs')
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(
+      llmModulePath,
+      'export default {\n' +
+        '  markdownFromPdf: async (bytes) => `# md for ${Buffer.from(bytes).toString("utf8")}`,\n' +
+        '  summarize: async () => { throw new Error("unused") },\n' +
+        '}\n',
+    )
+    writeFileSync(join(work, 'pdf.bin'), 'pdf-bytes')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'extract' }, input: { $file: 'pdf.bin', type: 'application/pdf' } }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    // Passes -o explicitly rather than relying on its absence: main() reuses
+    // one commander Command singleton across every test in this file (each
+    // simulating a separate CLI invocation), and commander only overwrites a
+    // stored option value when its flag is actually present in argv -- so an
+    // omitted -o here would silently inherit whichever directory the most
+    // recent --output-passing test left behind.
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '--llm-module', llmModulePath, '-o', outDir])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { file: string; type: string }
+    expect(printed.type).toBe('text/markdown')
+    expect(readFileSync(join(outDir, printed.file), 'utf8')).toBe('# md for pdf-bytes')
+    logSpy.mockRestore()
+  })
+
+  it('pipeline run --llm-module rejects a module whose export is not Llm-shaped', async () => {
+    const work = tmpDir()
+    const llmModulePath = join(work, 'bad-llm.mjs')
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(llmModulePath, 'export default { notAnLlm: true }\n')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'extract' }, input: null }))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '--llm-module', llmModulePath])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/must export.*markdownFromPdf/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
 })

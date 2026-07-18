@@ -14,7 +14,7 @@ import { runOpSpec } from './op-run.js'
 import { LEAF_REGISTRY } from '../op/registry.js'
 import type { OpSpec } from '../op/spec.js'
 import type { Governor } from '../op/types.js'
-import type { Cache, Store } from '../effects/types.js'
+import type { Cache, Llm, Store } from '../effects/types.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
@@ -64,6 +64,14 @@ export type RegisterFileopsToolsOptions = {
   opRunGovernors?: Record<string, Governor>
   opRunCache?: Cache
   opRunStore?: Store
+  /**
+   * Same long-lived pattern as opRunGovernors/opRunCache/opRunStore, backing
+   * `extract`/`summarize` (domain/text.ts's LLM-effect leaves) with a real
+   * capability. Omitted, `run_pipeline` still resolves those two leaf names
+   * but throws when run, since this repo ships no concrete Llm
+   * implementation of its own (op-run.ts's llmUnavailable default).
+   */
+  opRunLlm?: Llm
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -210,7 +218,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           input: z.unknown(),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore })),
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, llm: opts.opRunLlm })),
     )
   }
 }
