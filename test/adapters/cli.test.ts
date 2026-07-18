@@ -10,6 +10,29 @@ import { extractArchiveTo, main, transform } from '../../src/adapters/cli.js'
 // the real attack surface the zip-slip guard protects, as opposed to
 // domain/archive.test.ts which only exercises the pure parse/decode step.
 
+// Mirrors test/adapters/op-run.test.ts's buildMinimalPng — scrub (sanitizeImage)
+// only accepts real JPEG/PNG magic bytes, so the `pipeline run` unzip->scrub
+// test below needs an actual (if minimal) PNG, not arbitrary bytes.
+function chunk(type: string, data: Uint8Array): Uint8Array {
+  const len = new Uint8Array(4)
+  new DataView(len.buffer).setUint32(0, data.length)
+  const typeBytes = new TextEncoder().encode(type)
+  const crc = new Uint8Array(4)
+  const out = new Uint8Array(4 + typeBytes.length + data.length + 4)
+  out.set(len, 0); out.set(typeBytes, 4); out.set(data, 4 + typeBytes.length); out.set(crc, 4 + typeBytes.length + data.length)
+  return out
+}
+
+function buildMinimalPng(): Uint8Array {
+  const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const parts = [sig, chunk('IHDR', new Uint8Array(13)), chunk('IDAT', new Uint8Array([0])), chunk('IEND', new Uint8Array(0))]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) { out.set(p, off); off += p.length }
+  return out
+}
+
 const dirs: string[] = []
 function tmpDir(): string {
   const d = mkdtempSync(join(tmpdir(), 'suxlib-fileops-extract-'))
@@ -110,5 +133,82 @@ describe('cli `archive create` (real CLI entry point)', () => {
     const { archiveExtract } = await import('../../src/domain/archive.js')
     const entry = archiveExtract('zip', new Uint8Array(readFileSync(outPath))).entries.find((e) => e.name === 'in.txt')!
     expect(entry.mtime).toBe(mtime)
+  })
+})
+
+describe('cli `pipeline run` (real CLI entry point)', () => {
+  it('runs a single-leaf spec, resolving a $file input marker off disk and printing the dehydrated result', async () => {
+    const work = tmpDir()
+    const dataPath = join(work, 'data.json')
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(dataPath, '{"a":1}')
+    writeFileSync(
+      specPath,
+      JSON.stringify({
+        spec: { tag: 'leaf', name: 'convert' },
+        input: { handle: { $file: 'data.json', type: 'application/json' }, from: 'json', to: 'yaml' },
+      }),
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { base64: string }
+    expect(Buffer.from(printed.base64, 'base64').toString('utf8')).toBe('a: 1')
+    logSpy.mockRestore()
+  })
+
+  it('runs a pipe(unzip, map(scrub)) spec and writes dehydrated Handle results to --output instead of inlining base64', async () => {
+    const work = tmpDir()
+    const outDir = join(work, 'out')
+    const zipPath = join(work, 'bundle.zip')
+    const specPath = join(work, 'spec.json')
+    const packed = archiveCreate('zip', [{ name: 'a.png', data: buildMinimalPng() }])
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(zipPath, packed)
+    writeFileSync(
+      specPath,
+      JSON.stringify({
+        spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'unzip' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 }] },
+        input: { $file: 'bundle.zip', type: 'application/zip' },
+      }),
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '-o', outDir])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as Array<{ kind: string; handle: { file: string; type: string; size: number } }>
+    expect(printed).toHaveLength(1)
+    expect(printed[0].kind).toBe('png')
+    expect(existsSync(join(outDir, printed[0].handle.file))).toBe(true)
+    expect(readFileSync(join(outDir, printed[0].handle.file)).length).toBeGreaterThan(0)
+    logSpy.mockRestore()
+  })
+
+  it('surfaces a missing `spec` field as a clean error instead of a crash', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(specPath, JSON.stringify({ input: null }))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/must contain a `spec`/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
+
+  it('surfaces an unknown leaf name as a clean error instead of a crash', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'nope' }, input: null }))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/unknown leaf "nope"/))
+    process.exitCode = 0
+    errSpy.mockRestore()
   })
 })

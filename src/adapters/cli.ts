@@ -6,11 +6,15 @@
 
 import { Command } from 'commander'
 import { readFileSync, writeFileSync, mkdirSync, statSync, utimesSync } from 'node:fs'
-import { basename, dirname } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, type Format } from '../domain/transform.js'
+import { runOpSpec } from './op-run.js'
+import { LEAF_REGISTRY } from '../op/registry.js'
+import type { OpSpec } from '../op/spec.js'
+import { b64ToBytes, bytesToB64 } from './base64.js'
 
 const program = new Command()
 program.name('suxlib-fileops').description('Shared file-ops CLI: archive, sanitize, transform, pdf-shrink').version('0.0.0')
@@ -159,6 +163,107 @@ program
   .action((file: string | undefined, opts: { to: Format; from: string; delimiter: string }) => {
     const data = file ? readFileSync(file, 'utf8') : readFileSync(0, 'utf8')
     process.stdout.write(dispatchTransform(data, opts.from as Format | 'auto', opts.to, opts.delimiter))
+  })
+
+// ---------- pipeline ----------
+
+const pipelineCmd = program.command('pipeline').description('Run a JSON op-tree pipeline against the leaf registry')
+
+function isFileRef(v: unknown): v is { $file: string; type?: string } {
+  return typeof v === 'object' && v !== null && typeof (v as Record<string, unknown>).$file === 'string'
+}
+
+/**
+ * Walks a spec file's `input`, turning every `{ "$file": "<path>", "type"?:
+ * "<mime>" }` marker into a Handle ref (`{ $handle: true, base64, type }`) by
+ * reading the referenced file off disk — the CLI's equivalent of `POST
+ * /op/run`'s caller manually base64-encoding a Handle into the request body.
+ * `<path>` resolves relative to the spec file's own directory, not cwd, so a
+ * spec file is portable regardless of where it's invoked from.
+ */
+function resolveFileRefs(value: unknown, baseDir: string): unknown {
+  if (isFileRef(value)) {
+    const bytes = new Uint8Array(readFileSync(resolve(baseDir, value.$file)))
+    return { $handle: true, base64: bytesToB64(bytes), ...(value.type !== undefined ? { type: value.type } : {}) }
+  }
+  if (Array.isArray(value)) return value.map((v) => resolveFileRefs(v, baseDir))
+  if (value && typeof value === 'object') {
+    // Object.create(null), not {}: mirrors op-run.ts's hydrate() guard —
+    // a spec-file key literally named "__proto__" assigned onto a plain {}
+    // accumulator would hit the inherited Annex-B setter instead of becoming
+    // an ordinary own property.
+    const out: Record<string, unknown> = Object.create(null)
+    for (const [k, v] of Object.entries(value)) out[k] = resolveFileRefs(v, baseDir)
+    return out
+  }
+  return value
+}
+
+function isDehydratedHandle(v: unknown): v is { base64: string; type: string; size: number } {
+  if (typeof v !== 'object' || v === null) return false
+  const h = v as Record<string, unknown>
+  return typeof h.base64 === 'string' && typeof h.type === 'string' && typeof h.size === 'number'
+}
+
+const MIME_EXT: Record<string, string> = {
+  'application/zip': 'zip',
+  'application/x-tar': 'tar',
+  'application/gzip': 'gz',
+  'application/pdf': 'pdf',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'application/json': 'json',
+  'text/plain': 'txt',
+}
+
+function extFromMime(type: string): string {
+  return MIME_EXT[type] ?? (type.split('/').pop()?.replace(/[^a-z0-9]/gi, '') || 'bin')
+}
+
+/**
+ * Reverse of resolveFileRefs for the result side: replaces every
+ * dehydrated-Handle-shaped value (`{ base64, type, size }`, runOpSpec's
+ * output shape) with a `{ file, type, size }` pointer and collects the bytes
+ * to write, instead of inlining potentially large base64 in the printed JSON.
+ */
+function extractHandleFiles(value: unknown, files: Array<{ name: string; bytes: Uint8Array }>): unknown {
+  if (isDehydratedHandle(value)) {
+    const name = `handle-${files.length}.${extFromMime(value.type)}`
+    files.push({ name, bytes: b64ToBytes(value.base64) })
+    return { file: name, type: value.type, size: value.size }
+  }
+  if (Array.isArray(value)) return value.map((v) => extractHandleFiles(v, files))
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value)) out[k] = extractHandleFiles(v, files)
+    return out
+  }
+  return value
+}
+
+pipelineCmd
+  .command('run')
+  .description(
+    'Run a JSON op-tree pipeline spec over the leaf registry ' +
+      `(${Object.keys(LEAF_REGISTRY).join(', ')}), mirroring POST /op/run's request body.`,
+  )
+  .argument('<spec-file>', 'JSON file: { spec: OpSpec, input }. Input values shaped { "$file": "<path>", "type"?: "<mime>" } are read off disk and marshalled into Handle refs.')
+  .option('-o, --output <dir>', 'write Handle-shaped result value(s) to files in this directory instead of inlining base64 in the printed JSON')
+  .action(async (specFile: string, opts: { output?: string }) => {
+    const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown; input?: unknown }
+    if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
+    const input = resolveFileRefs(parsed.input, dirname(resolve(specFile)))
+    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input })
+    if (opts.output) {
+      const files: Array<{ name: string; bytes: Uint8Array }> = []
+      const shaped = extractHandleFiles(result, files)
+      mkdirSync(opts.output, { recursive: true })
+      for (const f of files) writeFileSync(join(opts.output, f.name), f.bytes)
+      console.log(JSON.stringify(shaped, null, 2))
+      if (files.length) console.log(`wrote ${files.length} handle result(s) to ${opts.output}`)
+    } else {
+      console.log(JSON.stringify(result))
+    }
   })
 
 /** Re-exported for tests: the actual dispatch logic is `dispatchTransform` in
