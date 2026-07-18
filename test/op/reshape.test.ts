@@ -21,6 +21,11 @@ test('wrapHandle then unwrapHandle round-trips a bare Handle unchanged', async (
   await expect(unwrapHandle(wrapped, caps)).resolves.toEqual(handle)
 })
 
+test('unwrapHandle throws on a non-{handle}-shaped input (e.g. a bare Handle straight from convert) instead of silently returning undefined', async () => {
+  const handle = await caps.store.put(new TextEncoder().encode('hello'), 'text/plain')
+  await expect(unwrapHandle(handle, caps)).rejects.toThrow(/no `handle` field/)
+})
+
 test('stampLeaf sets producedAt from caps.clock.now(), leaving the rest of the Handle unchanged', async () => {
   const handle = await caps.store.put(new TextEncoder().encode('hello'), 'text/plain')
   const clockCaps: Caps = { ...caps, clock: { now: () => 12345 } }

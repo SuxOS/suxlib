@@ -1,5 +1,6 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
-import { op, pipe, map, sink } from './combinators.js'
+import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
+import { op, pipe, map, sink, reconcile } from './combinators.js'
 import { resolveLeaf, mergeLeaves } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
@@ -9,6 +10,10 @@ export type OpSpec =
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
   | { tag: 'sink'; targets: string[] }
+  | { tag: 'reconcile'; opts: ReconcileOpts }
+
+const FIELD_POLICIES: FieldPolicy[] = ['last-write-wins', 'union', 'keep-first']
+const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge']
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -45,10 +50,11 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * target *names*, resolved against Caps.sinks at run time (runInline's `case
  * 'sink'`) the same way it already works for an in-process caller -- see
  * SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks (../adapters/op-run.ts) for
- * where those names come from. `reconcile` and `ask` still depend on
- * host-provided capabilities (a live Ask implementation; reconcile has no
- * OpSpec variant yet) that a stateless adapter call has no way to supply, so
- * composing those still requires building an Op tree in-process.
+ * where those names come from. `reconcile` only needs `caps.store` (already
+ * supplied by every adapter call, see runInline's `case 'reconcile'`), so it's
+ * expressible directly as an OpSpec variant. `ask` still depends on a live Ask
+ * capability a stateless adapter call has no way to supply, so composing that
+ * still requires building an Op tree in-process.
  *
  * `extraLeaves`, when supplied, merges host-registered leaves onto
  * LEAF_REGISTRY (mergeLeaves, ./registry.ts) once per top-level buildOp call
@@ -75,8 +81,16 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       const opts: LeafOpts = { kind: o.kind ?? 'effect', retries: o.retries ?? 0, heavy: o.heavy, memo: o.memo }
       const params = spec.params
-      const leafFn: LeafFn = params ? (input, caps, idempotencyKey) => fn(mergeParams(input, params), caps, idempotencyKey) : fn
-      return op(spec.name, leafFn, opts)
+      const leafOp = op(spec.name, fn, opts)
+      if (!params) return leafOp
+      // Merge params in a preceding pure step rather than inside fn's own closure,
+      // so a memoized leaf (opts.memo) computes its cache key -- runGoverned's
+      // memoKey(name, input), see src/control/governor.ts -- from the *merged*
+      // input. Folding params into fn's closure instead would let memoKey see only
+      // the pre-merge piped value, hashing two differently-parameterized calls
+      // (e.g. convert's `to: 'yaml'` vs `to: 'json'`) to the same key (#131).
+      const mergeOp = op(`${spec.name}:params`, async (input) => mergeParams(input, params), { kind: 'pure', retries: 0 })
+      return pipe(mergeOp, leafOp)
     }
     case 'pipe': {
       if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('pipe spec requires a non-empty `steps` array')
@@ -95,7 +109,28 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       return sink.fanout(...spec.targets)
     }
+    case 'reconcile': {
+      const o = spec.opts
+      if (!o || typeof o !== 'object' || !RECONCILE_MODES.includes(o.mode as string)) {
+        throw new Error(`reconcile spec's \`opts.mode\` must be one of: ${RECONCILE_MODES.join(', ')}`)
+      }
+      if (o.mode === 'field-merge') {
+        if (o.defaultPolicy !== undefined && !FIELD_POLICIES.includes(o.defaultPolicy)) {
+          throw new Error(`reconcile spec's \`opts.defaultPolicy\` must be one of: ${FIELD_POLICIES.join(', ')}`)
+        }
+        if (o.policy !== undefined) {
+          if (typeof o.policy !== 'object' || o.policy === null || Array.isArray(o.policy)) {
+            throw new Error('reconcile spec\'s `opts.policy` must be an object')
+          }
+          for (const [k, v] of Object.entries(o.policy)) {
+            if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
+            if (!FIELD_POLICIES.includes(v)) throw new Error(`reconcile spec's \`opts.policy["${k}"]\` must be one of: ${FIELD_POLICIES.join(', ')}`)
+          }
+        }
+      }
+      return reconcile(o)
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, sink)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, sink, reconcile)`)
   }
 }
