@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { runGoverned, CircuitOpenError } from '../../src/control/governor.js'
+import { runGoverned, createGovernor, CircuitOpenError } from '../../src/control/governor.js'
 import { tokenBucket } from '../../src/control/token-bucket.js'
 import { circuitBreaker } from '../../src/control/circuit-breaker.js'
 import { fixed, aimd } from '../../src/control/aimd.js'
@@ -279,4 +279,66 @@ test('releases the concurrency slot when the token bucket throws, without ever a
     runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { tokenBucket: throwingBucket as any, concurrency: spy }, noSleep),
   ).rejects.toThrow('rate limiter unavailable')
   expect(acquireCalls).toBe(0)
+})
+
+test('createGovernor tags breaker/aimd/tokenBucket events from one shared onEvent with the leaf name', async () => {
+  const events: any[] = []
+  const governor = createGovernor('leaf-a', {
+    circuitBreaker: { failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 },
+    tokenBucket: { capacity: 1, refillPerMs: 0, clock: { now: () => 0 } },
+    concurrency: { kind: 'aimd', start: 1, min: 1, max: 2 },
+  }, e => events.push(e))
+
+  governor.circuitBreaker!.onFailure(0) // -> open, emits breaker-open
+  governor.concurrency!.release(true) // successes >= limit(1) -> aimd-increase
+
+  expect(events).toEqual([
+    { kind: 'breaker-open', nowMs: 0, name: 'leaf-a' },
+    { kind: 'aimd-increase', limit: 2, name: 'leaf-a' },
+  ])
+})
+
+test('createGovernor with no onEvent leaves the primitives silently unwired', async () => {
+  const governor = createGovernor('leaf-a', {
+    circuitBreaker: { failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 },
+  })
+  expect(() => governor.circuitBreaker!.onFailure(0)).not.toThrow()
+  expect(governor.circuitBreaker!.state).toBe('open')
+})
+
+test('createGovernor builds a fixed concurrency limiter (no events, since its limit never changes)', async () => {
+  const events: any[] = []
+  const governor = createGovernor('leaf-a', { concurrency: { kind: 'fixed', n: 1 } }, e => events.push(e))
+  let inFlight = 0, maxInFlight = 0
+  const run = async () => { await governor.concurrency!.acquire(); inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); await Promise.resolve(); inFlight--; governor.concurrency!.release(true) }
+  await Promise.all([run(), run()])
+  expect(maxInFlight).toBe(1)
+  expect(events).toEqual([])
+})
+
+test('createGovernor wires a heavyConcurrency limiter distinct from concurrency', async () => {
+  const governor = createGovernor('leaf-a', {
+    concurrency: { kind: 'fixed', n: 4 },
+    heavyConcurrency: { kind: 'fixed', n: 1 },
+  })
+  expect(governor.concurrency).not.toBe(governor.heavyConcurrency)
+})
+
+test('createGovernor composed with runInline-style dispatch: retry-attempt and breaker events share one name-tagged stream', async () => {
+  const events: any[] = []
+  const governor = createGovernor('flaky-leaf', {
+    circuitBreaker: { failureThreshold: 5, cooldownMs: 100, halfOpenSuccesses: 1 },
+  }, e => events.push(e))
+
+  let calls = 0
+  const fn = async () => { calls++; if (calls < 2) throw new Error('flaky'); return 'ok' }
+  const result = await runGoverned('flaky-leaf', { kind: 'effect', retries: 2 }, fn, null, caps(), governor, {
+    ...noSleep,
+    onEvent: e => events.push(e),
+  })
+
+  expect(result).toBe('ok')
+  expect(events).toEqual([
+    { kind: 'retry-attempt', name: 'flaky-leaf', attempt: 0, delayMs: expect.any(Number) },
+  ])
 })

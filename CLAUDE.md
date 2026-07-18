@@ -162,7 +162,17 @@ There is no linter in this repo. Run both locally before pushing.
   `runGoverned` after the token-bucket take and before the effect call, same as
   breaker/token-bucket: only for `'effect'` leaves, and freshly per retry
   attempt (not held across a backoff sleep), so a slow/failing leaf doesn't pin
-  a slot idle while it waits to retry.
+  a slot idle while it waits to retry. Update: `runInline` (`src/runtime/inline.ts`)
+  now takes an optional 4th `gOpts?: RunGovernedOpts` param, threaded unchanged
+  through `'pipe'`/`'map'` recursion into every `runGoverned` call — this is the
+  only way a caller reaches `onEvent`/custom `backoff`/`sleep`/`rand`, since
+  `LeafOpts` carries no such per-run knobs. `createGovernor(name, spec, onEvent)`
+  (`src/control/governor.ts`) builds a leaf's breaker/tokenBucket/concurrency
+  together and tags each one's emitted `GovernorEvent` with `name` (now optional
+  on every variant but `retry-attempt`) — pass the same `onEvent` function to both
+  `createGovernor` (per leaf, at `caps.governors` construction time) and
+  `runInline`'s `gOpts.onEvent` (once, per run) to get one leaf-labeled stream
+  instead of wiring a matching callback into each primitive by hand.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than

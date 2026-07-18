@@ -1,6 +1,10 @@
 import type { LeafFn, LeafOpts, Caps, Governor } from '../op/types.js'
+import type { Clock } from '../effects/types.js'
 import type { GovernorEventHandler } from './events.js'
 import { backoffFullJitter, idempotencyKey } from './retry.js'
+import { circuitBreaker } from './circuit-breaker.js'
+import { tokenBucket } from './token-bucket.js'
+import { fixed, aimd } from './aimd.js'
 
 export class CircuitOpenError extends Error {
   constructor(readonly leafName: string) {
@@ -17,6 +21,35 @@ export interface RunGovernedOpts {
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+export type ConcurrencySpec = { kind: 'fixed'; n: number } | { kind: 'aimd'; start?: number; min?: number; max?: number }
+
+export interface GovernorSpec {
+  circuitBreaker?: { failureThreshold: number; cooldownMs: number; halfOpenSuccesses: number }
+  tokenBucket?: { capacity: number; refillPerMs: number; clock: Clock }
+  concurrency?: ConcurrencySpec
+  heavyConcurrency?: ConcurrencySpec
+}
+
+/**
+ * Builds a leaf's circuitBreaker/tokenBucket/concurrency together, wiring each
+ * primitive's `onEvent` to the same `onEvent` sink and tagging every event
+ * with `name` -- so passing one handler here (and as runInline's
+ * `gOpts.onEvent`, for `retry-attempt`) yields a single, leaf-labeled
+ * observability stream instead of remembering to wire a matching callback
+ * into each primitive individually.
+ */
+export function createGovernor(name: string, spec: GovernorSpec, onEvent?: GovernorEventHandler): Governor {
+  const tagged: GovernorEventHandler | undefined = onEvent && (e => onEvent({ ...e, name }))
+  const buildConcurrency = (c: ConcurrencySpec) =>
+    c.kind === 'fixed' ? fixed(c.n) : aimd({ start: c.start, min: c.min, max: c.max, onEvent: tagged })
+  const governor: Governor = {}
+  if (spec.circuitBreaker) governor.circuitBreaker = circuitBreaker({ ...spec.circuitBreaker, onEvent: tagged })
+  if (spec.tokenBucket) governor.tokenBucket = tokenBucket({ ...spec.tokenBucket, onEvent: tagged })
+  if (spec.concurrency) governor.concurrency = buildConcurrency(spec.concurrency)
+  if (spec.heavyConcurrency) governor.heavyConcurrency = buildConcurrency(spec.heavyConcurrency)
+  return governor
+}
 
 /**
  * Wraps a leaf's fn with the retry/rate-limit/circuit-breaker/concurrency gating
