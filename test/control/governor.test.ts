@@ -105,6 +105,19 @@ test('an effect leaf is rate-limited by the token bucket, draining it on each at
   expect(bucket.tokens).toBe(1)
 })
 
+test('a starved token bucket waits via the injected sleep, not a real setTimeout', async () => {
+  let simulatedNow = 0
+  const clock = { now: () => simulatedNow }
+  const bucket = tokenBucket({ capacity: 1, refillPerMs: 1, clock })
+  bucket.tryTake(1, 0) // drain it
+  const fn = async () => 'ok'
+  const sleepCalls: number[] = []
+  const sleep = async (ms: number) => { sleepCalls.push(ms); simulatedNow += ms }
+  const result = await runGoverned('leaf', { kind: 'effect' }, fn, null, { ...caps(), clock }, { tokenBucket: bucket }, { ...noSleep, sleep })
+  expect(result).toBe('ok')
+  expect(sleepCalls.length).toBeGreaterThan(0)
+})
+
 test('the token bucket is not consulted for pure leaves', async () => {
   const bucket = tokenBucket({ capacity: 1, refillPerMs: 0, clock: { now: () => 0 } })
   bucket.tryTake(1, 0) // drain it

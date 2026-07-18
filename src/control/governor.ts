@@ -69,7 +69,7 @@ export async function runGoverned(
     }
     let acquired = false
     try {
-      if (gated && governor?.tokenBucket) await governor.tokenBucket.take(1, caps.clock)
+      if (gated && governor?.tokenBucket) await governor.tokenBucket.take(1, caps.clock, sleep)
       if (concurrency) { await concurrency.acquire(); acquired = true }
       const result = await fn(input, caps, idemKey)
       if (acquired) concurrency!.release(true)
