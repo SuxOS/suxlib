@@ -19,5 +19,7 @@ export type GovernorEvent =
   | { kind: 'aimd-decrease'; limit: number; name?: string }
   | { kind: 'token-wait'; attempt: number; delayMs: number; name?: string }
   | { kind: 'retry-attempt'; name: string; attempt: number; delayMs: number }
+  | { kind: 'memo-hit'; name: string }
+  | { kind: 'memo-miss'; name: string }
 
 export type GovernorEventHandler = (e: GovernorEvent) => void

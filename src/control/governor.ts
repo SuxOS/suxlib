@@ -2,6 +2,7 @@ import type { LeafFn, LeafOpts, Caps, Governor } from '../op/types.js'
 import type { Clock } from '../effects/types.js'
 import type { GovernorEventHandler } from './events.js'
 import { backoffFullJitter, idempotencyKey } from './retry.js'
+import { memoKey } from './memo.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { tokenBucket } from './token-bucket.js'
 import { fixed, aimd } from './aimd.js'
@@ -66,6 +67,14 @@ export function createGovernor(name: string, spec: GovernorSpec, onEvent?: Gover
  * sux-side runDurable can wrap its own leaf dispatch with the same gating and
  * backoff policy, substituting a durable `sleep` (e.g. a Workflows step-sleep)
  * for retries in place of the real setTimeout used here.
+ *
+ * `opts.memo` (opt-in per leaf, independent of `kind`/`heavy`) short-circuits
+ * all of the above -- breaker/tokenBucket/concurrency/retries -- on a cache
+ * hit, since there's nothing left to gate once the output is already known.
+ * Requires `caps.cache`; with none supplied, memoization is silently a no-op
+ * (same graceful-degradation pattern as `caps.ask` being optional) rather
+ * than an error, so a leaf declaring `memo: true` still runs fine against a
+ * Caps that hasn't wired a Cache yet.
  */
 export async function runGoverned(
   name: string,
@@ -76,6 +85,15 @@ export async function runGoverned(
   governor: Governor | undefined,
   gOpts: RunGovernedOpts = {},
 ): Promise<any> {
+  if (opts.memo && caps.cache) {
+    const key = await memoKey(name, input)
+    const cached = await caps.cache.get(key)
+    if (cached !== undefined) { gOpts.onEvent?.({ kind: 'memo-hit', name }); return cached }
+    const result = await runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts)
+    await caps.cache.put(key, result)
+    gOpts.onEvent?.({ kind: 'memo-miss', name })
+    return result
+  }
   const maxRetries = opts.retries ?? 0
   const backoff = gOpts.backoff ?? { base: 200, cap: 10_000 }
   const sleep = gOpts.sleep ?? defaultSleep
