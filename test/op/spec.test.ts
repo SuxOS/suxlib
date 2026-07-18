@@ -4,7 +4,8 @@ import { PDFDocument } from 'pdf-lib'
 import { buildOp, type OpSpec } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
-import { putBytes, resolveText } from '../../src/handles/handle.js'
+import { putBytes, resolve, resolveText } from '../../src/handles/handle.js'
+import { archiveExtract } from '../../src/domain/archive.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -304,4 +305,64 @@ test('wrapHandle/unwrapHandle bridge unzip\'s bare-Handle output into shrink\'s 
   const result = await runInline(tree, zipHandle, { store, ...rest })
   expect(result).toHaveLength(1)
   expect(result[0]).toMatchObject({ type: 'application/pdf' })
+})
+
+test('mapField op spec makes unpack -> transform each entry -> pack expressible as a single pipeline (#168): entries -> files, each handle stamped in between', async () => {
+  const { store, ...rest } = caps()
+  const zip = zipSync({ 'a.txt': new TextEncoder().encode('hello'), 'b.txt': new TextEncoder().encode('world') })
+  const zipHandle = await putBytes(store, zip, 'application/zip')
+
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'wrapHandle' },
+      { tag: 'leaf', name: 'unpack', params: { format: 'zip' } },
+      { tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2, renameTo: 'files' },
+      { tag: 'leaf', name: 'pack', params: { format: 'zip' } },
+    ],
+  }
+  const tree = buildOp(spec)
+  const packedHandle = await runInline(tree, zipHandle, { store, ...rest })
+  const packedBytes = await resolve(store, packedHandle)
+  const { entries } = archiveExtract('zip', packedBytes)
+  expect(entries.map((e) => ({ name: e.name, text: e.text }))).toEqual(
+    expect.arrayContaining([{ name: 'a.txt', text: 'hello' }, { name: 'b.txt', text: 'world' }]),
+  )
+})
+
+test('mapField rejects a spec missing `arrayField`/`elementField`/`op`, and an out-of-range concurrency', () => {
+  expect(() => buildOp({ tag: 'mapField', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 } as unknown as OpSpec)).toThrow(/arrayField/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 } as unknown as OpSpec)).toThrow(/elementField/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: 'handle', concurrency: 2 } as unknown as OpSpec)).toThrow(/requires an `op`/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 0 })).toThrow(/concurrency/)
+})
+
+test('buildOp\'s shape check passes unpack -> mapField(renameTo: \'files\') -> pack, unlike unpack -> pack directly (#161)', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unpack', params: { format: 'zip' } },
+      { tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2, renameTo: 'files' },
+      { tag: 'leaf', name: 'pack', params: { format: 'zip' } },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp\'s shape check still rejects mapField feeding pack when the array field isn\'t renamed to `files`', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unpack', params: { format: 'zip' } },
+      { tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 },
+      { tag: 'leaf', name: 'pack', params: { format: 'zip' } },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 2 \("pack"\) expects \{format, files\} input, but step 1 \("mapField"\) produces \{entries\}/)
+})
+
+test('mapField rejects `__proto__` as `arrayField`/`elementField`/`renameTo`', () => {
+  expect(() => buildOp({ tag: 'mapField', arrayField: '__proto__', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/arrayField/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: '__proto__', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/elementField/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2, renameTo: '__proto__' })).toThrow(/renameTo/)
 })

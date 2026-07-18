@@ -305,7 +305,18 @@ There is no linter in this repo. Run both locally before pushing.
   output never has) is now a build-time error too. This only reaches one
   array level deep and doesn't help two leaves whose per-entry field is
   named differently (`entries` vs `files`) actually chain — that's #168's
-  still-open design question, not solved here.
+  still-open design question, not solved here. Update (#168): closed via a
+  new `mapField` op-tree tag (`src/op/{types,combinators}.ts`,
+  `runtime/inline.ts`'s `case 'mapField'`), not a generic rename-leaf —
+  `mapField(arrayField, elementField, innerOp, { concurrency, renameTo? })`
+  runs `innerOp` over one named field of each array element and, in the same
+  step, can rename the array field itself (`entries` -> `files`), since
+  `mergeParams` (used for every other leaf's static params) deliberately
+  skips array inputs and can't rename a field on one. `stepShape` derives
+  `mapField`'s own declared boundary from its inner op's shape one level
+  down, same trick `map` already uses one level up — see the `unpack ->
+  mapField(renameTo: 'files') -> pack` tests in `test/op/spec.test.ts` for
+  the shape this actually unblocks.
 - Prototype-pollution-guard gotcha for any future `Object.create(null)`-based
   registry (`LEAF_REGISTRY`, and now `SINK_REGISTRY` in `src/op/sinks.ts`,
   #147): merging one into a live config/Caps object via object-literal spread

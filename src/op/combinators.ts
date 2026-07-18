@@ -3,6 +3,13 @@ import type { ReconcileOpts } from './reconcile.js'
 export const op = (name: string, fn: LeafFn, opts: LeafOpts): Op => ({ tag: 'leaf', name, fn, opts })
 export const pipe = (...steps: Op[]): Op => ({ tag: 'pipe', steps })
 export const map = (inner: Op, o: { concurrency: Concurrency }): Op => ({ tag: 'map', op: inner, concurrency: o.concurrency })
+// Runs `inner` over one named field of each array element, passing the rest of the
+// element through untouched -- closes #168: bridges an array-of-Handle-object field
+// whose per-entry key name differs from a downstream leaf's own field name (e.g.
+// unpack's `entries` -> pack's `files`) without a separate rename step, since `map`
+// alone can only replace a whole element, not reshape+rename the array's own field.
+export const mapField = (arrayField: string, elementField: string, inner: Op, o: { concurrency: Concurrency; renameTo?: string }): Op =>
+  ({ tag: 'mapField', arrayField, elementField, op: inner, concurrency: o.concurrency, renameTo: o.renameTo })
 export const reconcile = (opts: ReconcileOpts): Op => ({ tag: 'reconcile', opts })
 export const sink = Object.assign(
   (name: string): Op => ({ tag: 'sink', targets: [name] }),

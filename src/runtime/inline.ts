@@ -22,6 +22,21 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       }))
       return out
     }
+    case 'mapField': {
+      const obj = input as Record<string, unknown>
+      const items = obj[node.arrayField] as any[]
+      const out = new Array(items.length)
+      await Promise.all(items.map(async (it, i) => {
+        await node.concurrency.acquire()
+        try {
+          const value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts)
+          out[i] = { ...(it as Record<string, unknown>), [node.elementField]: value }
+          node.concurrency.release(true)
+        } catch (e) { node.concurrency.release(false); throw e }
+      }))
+      const { [node.arrayField]: _dropped, ...rest } = obj
+      return { ...rest, [node.renameTo ?? node.arrayField]: out }
+    }
     case 'reconcile': return runReconcile(node.opts, input, caps.store)
     case 'sink': {
       await Promise.all(node.targets.map(t => {
