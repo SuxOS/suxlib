@@ -200,6 +200,30 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     logSpy.mockRestore()
   })
 
+  it('preserves a "__proto__"-keyed result value under --output instead of silently dropping it', async () => {
+    const work = tmpDir()
+    const outDir = join(work, 'out')
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    // wrapHandle doesn't validate its input is a real Handle -- it just
+    // echoes whatever it's given under a fixed "handle" key (src/op/reshape.ts)
+    // -- so this spec's result is `{ handle: <input> }`, putting the
+    // caller-supplied "__proto__" key two levels deep in the result value
+    // extractHandleFiles walks. Written as raw JSON text, not a JS object
+    // literal, so the "__proto__" key round-trips as a genuine own property
+    // (JSON.parse doesn't apply the object-literal grammar's exotic
+    // "__proto__: value" prototype-setter behavior).
+    writeFileSync(specPath, `{"spec":{"tag":"leaf","name":"wrapHandle"},"input":{"a":1,"__proto__":{"pwned":true}}}`)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '-o', outDir])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { handle: Record<string, unknown> }
+    expect(Object.prototype.hasOwnProperty.call(printed.handle, '__proto__')).toBe(true)
+    expect(printed.handle.__proto__).toEqual({ pwned: true })
+    expect(printed.handle.a).toBe(1)
+    logSpy.mockRestore()
+  })
+
   it('surfaces a missing `spec` field as a clean error instead of a crash', async () => {
     const work = tmpDir()
     const specPath = join(work, 'spec.json')
