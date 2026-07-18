@@ -233,4 +233,11 @@ There is no linter in this repo. Run both locally before pushing.
   op spec (leaf/pipe/map over `src/op/registry.ts`, added for #113) inherits
   this as-is rather than solving it — a caller chaining shape-incompatible
   leaves still needs a reshape step of its own; there's no generic adapter for
-  this yet.
+  this yet. Update: `shrink`/`redact`/`convert` all happen to use the same
+  field name (`handle`) for their `{handle, ...opts}` input, so
+  `src/op/reshape.ts`'s `wrapHandle`/`unwrapHandle` (registered as ordinary
+  leaves, #118) bridge a bare `Handle` to/from that shape generically —
+  `wrapHandle` only covers a target leaf whose other opts are all optional
+  (e.g. `shrink`'s `stripMetadata`), since it can't supply a required opt like
+  `convert`'s `to`; a leaf needing required opts merged in still needs its own
+  reshape step.

@@ -13,6 +13,8 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { LEAF_REGISTRY } from '../op/registry.js'
 import type { OpSpec } from '../op/spec.js'
+import type { Governor } from '../op/types.js'
+import type { Cache, Store } from '../effects/types.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
@@ -42,6 +44,21 @@ export type RegisterFileopsToolsOptions = {
    * of calling registerFileopsTools unconditionally.
    */
   allow?: string[]
+  /**
+   * Long-lived governors (createGovernor(name, spec) per LEAF_REGISTRY leaf)
+   * and/or Cache/Store the host wants `run_pipeline` calls to share, so
+   * op-engine pipelines triggered through this MCP server actually get
+   * persistent breaker/token-bucket/concurrency gating and memoization
+   * (#119) instead of a fresh governors-free Caps per call. Omitted entirely
+   * still works — retries still apply, the rest just no-ops per
+   * runGoverned's own degrade-gracefully pattern. Passing `opRunCache`
+   * without `opRunStore` is a footgun (see op-run.ts's OpRunOpts doc) — a
+   * memoized leaf's Handle-shaped result won't resolve against a fresh
+   * per-call MemoryStore on a later cache hit.
+   */
+  opRunGovernors?: Record<string, Governor>
+  opRunCache?: Cache
+  opRunStore?: Store
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -188,7 +205,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           input: z.unknown(),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input })),
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore })),
     )
   }
 }
