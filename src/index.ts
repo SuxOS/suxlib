@@ -1,7 +1,7 @@
 export const VERSION = '0.0.0'
 export * from './effects/types.js'; export * from './handles/handle.js'
 export * from './op/types.js'; export * from './op/combinators.js'; export * from './op/reconcile.js'
-export * from './control/aimd.js'; export * from './control/retry.js'
+export * from './control/aimd.js'; export * from './control/retry.js'; export * from './control/events.js'
 export * from './control/token-bucket.js'; export * from './control/circuit-breaker.js'; export * from './control/governor.js'
 export * from './domain/archive.js'; export * from './domain/text.js'; export * from './runtime/inline.js'
 export * from './domain/sanitize.js'; export * from './domain/transform.js'; export * from './domain/pdf.js'

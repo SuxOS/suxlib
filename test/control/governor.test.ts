@@ -21,6 +21,20 @@ test('retries an effect leaf up to LeafOpts.retries with full-jitter backoff, th
   expect(sleeps.length).toBe(2)
 })
 
+test('emits a retry-attempt event before each backoff sleep', async () => {
+  let calls = 0
+  const fn = async () => { calls++; if (calls < 3) throw new Error('flaky'); return 'ok' }
+  const events: any[] = []
+  const result = await runGoverned('leaf', { kind: 'effect', retries: 3 }, fn, null, caps(), undefined, {
+    ...noSleep, onEvent: (e) => events.push(e),
+  })
+  expect(result).toBe('ok')
+  expect(events).toEqual([
+    { kind: 'retry-attempt', name: 'leaf', attempt: 0, delayMs: expect.any(Number) },
+    { kind: 'retry-attempt', name: 'leaf', attempt: 1, delayMs: expect.any(Number) },
+  ])
+})
+
 test('rethrows the original error once retries are exhausted', async () => {
   const fn = async () => { throw new Error('always fails') }
   await expect(

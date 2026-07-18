@@ -1,4 +1,5 @@
 import type { Clock } from '../effects/types.js'
+import type { GovernorEventHandler } from './events.js'
 import { backoffFullJitter } from './retry.js'
 
 export interface TokenBucket {
@@ -7,7 +8,7 @@ export interface TokenBucket {
   readonly tokens: number
 }
 
-export function tokenBucket(opts: { capacity: number; refillPerMs: number; clock: Clock }): TokenBucket {
+export function tokenBucket(opts: { capacity: number; refillPerMs: number; clock: Clock; onEvent?: GovernorEventHandler }): TokenBucket {
   let tokens = opts.capacity
   let lastRefillMs = opts.clock.now()
 
@@ -31,7 +32,9 @@ export function tokenBucket(opts: { capacity: number; refillPerMs: number; clock
       }
       let attempt = 0
       while (!bucket.tryTake(cost, clock.now())) {
-        const delayMs = Math.max(1, backoffFullJitter(attempt++, { base: 5, cap: 200 }))
+        const delayMs = Math.max(1, backoffFullJitter(attempt, { base: 5, cap: 200 }))
+        opts.onEvent?.({ kind: 'token-wait', attempt, delayMs })
+        attempt++
         await new Promise((r) => setTimeout(r, delayMs))
       }
     },

@@ -1,4 +1,5 @@
 import type { LeafFn, LeafOpts, Caps, Governor } from '../op/types.js'
+import type { GovernorEventHandler } from './events.js'
 import { backoffFullJitter, idempotencyKey } from './retry.js'
 
 export class CircuitOpenError extends Error {
@@ -12,6 +13,7 @@ export interface RunGovernedOpts {
   backoff?: { base: number; cap: number }
   rand?: () => number
   sleep?: (ms: number) => Promise<void>
+  onEvent?: GovernorEventHandler
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
@@ -77,7 +79,9 @@ export async function runGoverned(
       if (acquired) concurrency!.release(false)
       breaker?.onFailure(caps.clock.now())
       if (attempt >= maxRetries) throw err
-      await sleep(backoffFullJitter(attempt, backoff, gOpts.rand))
+      const delayMs = backoffFullJitter(attempt, backoff, gOpts.rand)
+      gOpts.onEvent?.({ kind: 'retry-attempt', name, attempt, delayMs })
+      await sleep(delayMs)
     } finally {
       if (probeReserved) breaker!.releaseHalfOpenProbe()
     }
