@@ -5,7 +5,7 @@
 // of sux-fileops.
 
 import { Command } from 'commander'
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, statSync, utimesSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_FORMATS, type ArchiveFormat } from '../domain/archive.js'
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
@@ -25,10 +25,12 @@ archiveCmd
   .argument('<files...>', 'files to pack')
   .requiredOption('-o, --output <path>', 'output archive path')
   .option('-f, --format <format>', 'zip | tar | gzip (gzip supports exactly one input file)', 'zip')
-  .action((files: string[], opts: { output: string; format: string }) => {
+  .option('-m, --mtime <epoch-ms>', "override every packed file's mtime (default: each input file's own filesystem mtime)")
+  .action((files: string[], opts: { output: string; format: string; mtime?: string }) => {
     const format = opts.format as ArchiveFormat
     if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, or gzip (got '${format}')`)
-    const entries = files.map((f) => ({ name: basename(f), data: new Uint8Array(readFileSync(f)) }))
+    const mtimeOverride = opts.mtime !== undefined ? Number(opts.mtime) : undefined
+    const entries = files.map((f) => ({ name: basename(f), data: new Uint8Array(readFileSync(f)), mtime: mtimeOverride ?? statSync(f).mtimeMs }))
     const out = archiveCreate(format, entries)
     writeFileSync(opts.output, out)
     console.log(`wrote ${opts.output} (${out.length} bytes, ${ARCHIVE_MIME[format]}, ${entries.length} file(s))`)
@@ -79,6 +81,7 @@ export function extractArchiveTo(format: ArchiveFormat, bytes: Uint8Array, outpu
     }
     mkdirSync(dirname(dest), { recursive: true })
     writeFileSync(dest, e.data)
+    if (e.mtime !== undefined) utimesSync(dest, e.mtime / 1000, e.mtime / 1000)
     written++
   }
   return { written, skipped }

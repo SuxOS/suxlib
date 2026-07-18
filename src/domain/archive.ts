@@ -101,6 +101,23 @@ function gunzipCapped(bytes: Uint8Array): Uint8Array {
 // than whatever TZ happened to be active at import time.
 const zipEpoch = () => new Date(1980, 0, 1).getTime()
 
+/**
+ * DOS date/time's 7-bit year field can only represent 1980-2099 (see zipEpoch
+ * above); fflate's zipSync writes it via local, not UTC, Date getters, so the
+ * bound is checked the same way here. zipCreate previously only substituted
+ * zipEpoch() for a missing mtime (`f.mtime ?? zipEpoch()`) — an *explicit*
+ * out-of-range mtime (e.g. one decoded from a tar/gzip entry, whose formats
+ * have no such bound) fell straight through to fflate's own internal
+ * 'date not in range 1980-2099' throw. Reject with a clear domain-style error
+ * instead of letting that leak through uncaught.
+ */
+function assertZipMtimeInRange(name: string, mtime: number): void {
+  const year = new Date(mtime).getFullYear()
+  if (year < 1980 || year > 2099) {
+    throw new Error(`file '${name}' has an mtime (year ${year}) outside the range zip's DOS date format can represent (1980-2099).`)
+  }
+}
+
 export function zipCreate(files: ArchiveFile[]): Uint8Array {
   if (!files.length) throw new Error('pack needs at least one file.')
   if (files.length > MAX_ENTRIES) throw new Error(`archive has more than ${MAX_ENTRIES} entries (bomb guard).`)
@@ -130,6 +147,7 @@ export function zipCreate(files: ArchiveFile[]): Uint8Array {
     // fflate defaults a missing mtime to Date.now(), making zipCreate's output
     // wall-clock-dependent even for byte-identical input; default to
     // zipEpoch() unless the caller supplied one.
+    if (f.mtime !== undefined) assertZipMtimeInRange(f.name, f.mtime)
     record[f.name] = [f.data, { mtime: f.mtime ?? zipEpoch() }]
   }
   return zipSync(record, { level: 6 })

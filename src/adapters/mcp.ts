@@ -37,7 +37,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         description: 'Pack one or more files into a zip, tar, or gzip archive.',
         inputSchema: {
           format: z.enum(ARCHIVE_FORMATS).default('zip'),
-          files: z.array(z.object({ name: z.string(), base64: z.string() })).min(1).max(MAX_ENTRIES),
+          files: z.array(z.object({ name: z.string(), base64: z.string(), mtime: z.number().optional() })).min(1).max(MAX_ENTRIES),
         },
       },
       async ({ format, files }) => {
@@ -53,7 +53,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           const data = b64ToBytes(f.base64)
           totalBytes += data.length
           if (totalBytes > MAX_UNPACK_BYTES) throw new Error(`archive input totals more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
-          entries.push({ name: f.name, data })
+          entries.push({ name: f.name, data, mtime: f.mtime })
         }
         const out = archiveCreate(fmt, entries)
         return textResult({ format: fmt, mime: ARCHIVE_MIME[fmt], bytes: out.length, base64: bytesToB64(out) })
@@ -74,7 +74,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
       async ({ format, base64 }) => {
         const { entries, skipped } = archiveExtract(format as ArchiveFormat, b64ToBytes(base64))
         return textResult({
-          entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, base64: bytesToB64(e.data) })),
+          entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, mtime: e.mtime, base64: bytesToB64(e.data) })),
           ...(skipped ? { skipped } : {}),
         })
       },
