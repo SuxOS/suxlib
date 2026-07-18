@@ -244,15 +244,16 @@ test('buildOp allows a pipe step next to a host-registered extraLeaves leaf, tre
   // `shout` has no LEAF_SHAPES entry (only built-in registry leaves do), so
   // its output reads as 'unknown' and is permissively compatible with
   // unwrapHandle's {handle} input -- buildOp doesn't throw. The mismatch
-  // (shout's output has no `handle` field) only surfaces at run time, same
-  // as any leaf pairing this shape scheme can't represent.
+  // (shout's output has no `handle` field) only surfaces at run time -- as a
+  // real error, not silently, since unwrapHandle itself throws on a missing
+  // `handle` field (#159) -- same as any leaf pairing this shape scheme can't
+  // represent at build time.
   const { store, ...rest } = caps()
   const handle = await putBytes(store, new TextEncoder().encode('hi'), 'text/plain')
   const shout: (input: unknown) => Promise<unknown> = async (input) => ({ shouted: input })
   const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'shout' }, { tag: 'leaf', name: 'unwrapHandle' }] }
   const tree = buildOp(spec, { shout })
-  const result = await runInline(tree, handle, { store, ...rest })
-  expect(result).toBeUndefined()
+  await expect(runInline(tree, handle, { store, ...rest })).rejects.toThrow(/unwrapHandle: input has no `handle` field/)
 })
 
 test('wrapHandle/unwrapHandle bridge unzip\'s bare-Handle output into shrink\'s {handle, ...opts} shape and back', async () => {
