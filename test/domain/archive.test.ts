@@ -166,6 +166,31 @@ test('tarCreate honors an explicit per-file mtime instead of always defaulting t
   expect(parseInt(octal, 8)).toBe(12345)
 })
 
+test('zipCreate/zipExtract round-trips an explicit per-file mtime', () => {
+  const mtime = new Date(2022, 4, 17, 10, 30, 0).getTime() // May has DOS-representable 2-second resolution
+  const packed = zipCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])
+  const entry = zipExtract(packed).find((e) => e.name === 'a.txt')!
+  expect(entry.mtime).toBe(mtime)
+})
+
+test('gzipCreate/gzipExtract round-trips an explicit mtime, and omits it when not supplied', () => {
+  const mtime = 1_700_000_000_000
+  const packed = gzipCreate(strToU8('hi'), mtime)
+  expect(gzipExtract(packed).mtime).toBe(Math.floor(mtime / 1000) * 1000)
+
+  const noMtime = gzipCreate(strToU8('hi'))
+  expect(gzipExtract(noMtime).mtime).toBeUndefined()
+})
+
+test('tarCreate/tarExtract round-trips an explicit per-file mtime, including 0', () => {
+  const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime: 12345 }])
+  const { entries } = tarExtract(packed)
+  expect(entries[0].mtime).toBe(12345)
+
+  const zeroed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime: 0 }])
+  expect(tarExtract(zeroed).entries[0].mtime).toBe(0)
+})
+
 test('tarExtract throws on a truncated entry instead of silently returning a short file', () => {
   const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAAAAAAAAA') }])
   const truncated = packed.subarray(0, 512 + 5) // header intact, only 5 of the declared 10 data bytes present

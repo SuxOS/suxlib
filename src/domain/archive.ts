@@ -18,7 +18,7 @@ export const MAX_ENTRIES = 2_000
 export const MAX_TEXT = 100_000
 
 export type ArchiveFile = { name: string; data: Uint8Array; mtime?: number }
-export type UnpackedEntry = { name: string; bytes: number; text?: string; truncated?: boolean; data: Uint8Array }
+export type UnpackedEntry = { name: string; bytes: number; text?: string; truncated?: boolean; data: Uint8Array; mtime?: number }
 
 /**
  * Resolve an archive entry name against a destination directory, rejecting
@@ -53,8 +53,9 @@ function looksUtf8(bytes: Uint8Array): boolean {
   return true
 }
 
-function decodeEntry(name: string, data: Uint8Array): UnpackedEntry {
+function decodeEntry(name: string, data: Uint8Array, mtime?: number): UnpackedEntry {
   const e: UnpackedEntry = { name, bytes: data.length, data }
+  if (mtime !== undefined) e.mtime = mtime
   if (looksUtf8(data)) {
     const text = strFromU8(data)
     if (text.length > MAX_TEXT) {
@@ -193,9 +194,58 @@ function unzipGuarded(bytes: Uint8Array): Record<string, Uint8Array> {
   return files
 }
 
+function readU16(d: Uint8Array, o: number): number {
+  return d[o] | (d[o + 1] << 8)
+}
+
+function readU32(d: Uint8Array, o: number): number {
+  return (d[o] | (d[o + 1] << 8) | (d[o + 2] << 16) | (d[o + 3] << 24)) >>> 0
+}
+
+const EOCD_SIGNATURE = 0x06054b50
+
+/**
+ * Decode each entry's DOS date/time out of the zip central directory. Neither
+ * unzipSync nor the streaming Unzip class surface mtime through fflate's
+ * public API (UnzipFileInfo only carries name/size/compression), so this walks
+ * the central directory the same way fflate's internal zh() does — read-only,
+ * no decompression — to recover the field zipCreate writes (see ZIP_EPOCH
+ * above). Best-effort: an EOCD record that can't be found (corrupt/exotic
+ * input already rejected by unzipGuarded's unzipSync validation pass) just
+ * yields no mtimes rather than throwing a second time.
+ */
+function readZipMtimes(bytes: Uint8Array): Record<string, number> {
+  const mtimes: Record<string, number> = Object.create(null)
+  let e = bytes.length - 22
+  for (; e >= 0 && readU32(bytes, e) !== EOCD_SIGNATURE; e--) {
+    if (bytes.length - e > 65558) return mtimes
+  }
+  if (e < 0) return mtimes
+  const count = readU16(bytes, e + 8)
+  let o = readU32(bytes, e + 16)
+  for (let i = 0; i < count && o + 46 <= bytes.length; i++) {
+    const modTime = readU16(bytes, o + 12)
+    const modDate = readU16(bytes, o + 14)
+    const fnl = readU16(bytes, o + 28)
+    const efl = readU16(bytes, o + 30)
+    const cml = readU16(bytes, o + 32)
+    const name = strFromU8(bytes.subarray(o + 46, o + 46 + fnl))
+    const year = ((modDate >> 9) & 0x7f) + 1980
+    const month = (modDate >> 5) & 0xf
+    const day = modDate & 0x1f
+    const hours = (modTime >> 11) & 0x1f
+    const minutes = (modTime >> 5) & 0x3f
+    const seconds = (modTime & 0x1f) * 2
+    mtimes[name] = new Date(year, month - 1, day, hours, minutes, seconds).getTime()
+    o += 46 + fnl + efl + cml
+  }
+  return mtimes
+}
+
 export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {
   const files = unzipGuarded(bytes)
-  return Object.entries(files).map(([name, data]) => decodeEntry(name, data))
+  const mtimes = readZipMtimes(bytes)
+  return Object.entries(files).map(([name, data]) => decodeEntry(name, data, mtimes[name]))
 }
 
 // ---------- gzip ----------
@@ -210,7 +260,11 @@ export function gzipCreate(data: Uint8Array, mtime = 0): Uint8Array {
 
 export function gzipExtract(bytes: Uint8Array): UnpackedEntry {
   const data = gunzipCapped(bytes)
-  return decodeEntry('data', data)
+  // Gzip's header MTIME (RFC 1952 §2.3.1) is a 4-byte LE Unix-seconds field at
+  // offset 4; gzipCreate's mtime:0 default means "omitted" (see its comment),
+  // so a zero field surfaces as no mtime rather than the epoch.
+  const mtimeSecs = bytes.length >= 8 ? readU32(bytes, 4) : 0
+  return decodeEntry('data', data, mtimeSecs > 0 ? mtimeSecs * 1000 : undefined)
 }
 
 // ---------- tar (USTAR, uncompressed) ----------
@@ -328,6 +382,7 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
     const nameEnd = nameBytes.indexOf(0)
     const name = strFromU8(nameEnd === -1 ? nameBytes : nameBytes.subarray(0, nameEnd))
     const size = readOctal(header.subarray(124, 136))
+    const mtime = readOctal(header.subarray(136, 148))
     const typeflag = String.fromCharCode(header[156] || 0)
     off += BLOCK
 
@@ -344,7 +399,7 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
     // regular files; everything else (directories, symlinks, hardlinks, devices,
     // ...) is dropped and recorded in `skipped`.
     if (typeflag === '0' || typeflag === '\0') {
-      entries.push(decodeEntry(name, new Uint8Array(data)))
+      entries.push(decodeEntry(name, new Uint8Array(data), mtime))
     } else {
       skipped.push({ name, typeflag })
     }
