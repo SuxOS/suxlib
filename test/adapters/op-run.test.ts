@@ -95,6 +95,14 @@ test('runOpSpec: opts.cache is a long-lived instance a host reuses across calls,
   expect(puts).toBe(1)
 })
 
+test('runOpSpec: hydrate() bails on the aggregate byte guard across multiple $handle refs instead of decoding every one first', async () => {
+  const { MAX_HYDRATE_BYTES } = await import('../../src/adapters/op-run.js')
+  const big = bytesToB64(new TextEncoder().encode('x'.repeat(Math.ceil(MAX_HYDRATE_BYTES / 2) + 1)))
+  const spec: OpSpec = { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 }
+  const input = [{ $handle: true, base64: big }, { $handle: true, base64: big }]
+  await expect(runOpSpec({ spec, input })).rejects.toThrow(/bomb guard/)
+})
+
 test('runOpSpec: opts.governors persist breaker state across separate calls, not just within one', async () => {
   const governors = { convert: createGovernor('convert', { circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000, halfOpenSuccesses: 1 } }) }
   const spec: OpSpec = { tag: 'leaf', name: 'convert' }

@@ -1,11 +1,11 @@
-import type { Op, LeafOpts } from './types.js'
+import type { Op, LeafFn, LeafOpts } from './types.js'
 import { op, pipe, map } from './combinators.js'
 import { resolveLeaf } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
 export type OpSpec =
-  | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts }
+  | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
 
@@ -14,6 +14,28 @@ export type OpSpec =
 // into an unbounded retry storm or a huge fan-out.
 const MAX_LEAF_RETRIES = 5
 const MAX_MAP_CONCURRENCY = 32
+
+/**
+ * Shallow-merges a leaf spec's static `params` onto the piped value flowing
+ * into that leaf at run time -- e.g. supplying convert's required `to`/`from`
+ * onto whatever wrapHandle produced, closing the gap CLAUDE.md's "Leaf
+ * composability gotcha" flags: a JSON OpSpec has no other way to hand a leaf
+ * a required, non-optional opt. Only merges onto an object (not array)
+ * input; anything else passes through with params ignored, since there's no
+ * sensible shallow merge target. `__proto__`/`constructor`/`prototype` are
+ * skipped the same way op-run.ts's hydrate() and reconcile.ts's fieldMerge
+ * already guard untrusted JSON keys -- `params` comes from the same
+ * caller-supplied spec JSON they do.
+ */
+function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input
+  const out: Record<string, unknown> = { ...(input as Record<string, unknown>) }
+  for (const [k, v] of Object.entries(params)) {
+    if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
+    out[k] = v
+  }
+  return out
+}
 
 /**
  * Builds a real Op tree from a caller-supplied JSON description, resolving
@@ -33,8 +55,13 @@ export function buildOp(spec: OpSpec): Op {
       if (o.retries !== undefined && (!Number.isInteger(o.retries) || o.retries < 0 || o.retries > MAX_LEAF_RETRIES)) {
         throw new Error(`leaf "${spec.name}": \`retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}`)
       }
+      if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
+        throw new Error(`leaf "${spec.name}": \`params\` must be an object`)
+      }
       const opts: LeafOpts = { kind: o.kind ?? 'effect', retries: o.retries ?? 0, heavy: o.heavy, memo: o.memo }
-      return op(spec.name, fn, opts)
+      const params = spec.params
+      const leafFn: LeafFn = params ? (input, caps, idempotencyKey) => fn(mergeParams(input, params), caps, idempotencyKey) : fn
+      return op(spec.name, leafFn, opts)
     }
     case 'pipe': {
       if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('pipe spec requires a non-empty `steps` array')

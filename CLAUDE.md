@@ -240,4 +240,16 @@ There is no linter in this repo. Run both locally before pushing.
   `wrapHandle` only covers a target leaf whose other opts are all optional
   (e.g. `shrink`'s `stripMetadata`), since it can't supply a required opt like
   `convert`'s `to`; a leaf needing required opts merged in still needs its own
-  reshape step.
+  reshape step. Update: a leaf spec's optional `params?: Record<string,
+  unknown>` (`src/op/spec.ts`, #124) closes that last gap — `buildOp` shallow-
+  merges it onto the piped object value right before the leaf's `fn` runs
+  (guarding `__proto__`/`constructor`/`prototype`, same as `hydrate`/
+  `fieldMerge`), so `convert`'s `to`/`from` can now ride along in a JSON spec.
+  Gotcha for any future `OpSpec` field: `src/op/spec.ts`'s `buildOp` isn't the
+  only place that shape is declared — `mcp.ts`'s `opSpecSchema` (a parallel
+  zod schema, since MCP tool args need a JSON-schema-shaped input) silently
+  strips any key it doesn't know about before `buildOp` ever sees it, and
+  `http.ts`'s `POST /op/run` passes `body.spec` straight through untyped with
+  no such schema. A new `OpSpec` field needs both `buildOp` *and*
+  `opSpecSchema` updated together, or it works over HTTP and silently no-ops
+  over MCP.

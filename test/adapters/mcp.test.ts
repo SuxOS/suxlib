@@ -4,6 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { registerFileopsTools } from '../../src/adapters/mcp.js'
 import { MemoryStore } from '../../src/effects/types.js'
+import { bytesToB64 } from '../../src/adapters/base64.js'
 
 const b64 = (s: string) => btoa(s)
 
@@ -127,6 +128,37 @@ describe('mcp adapter', () => {
     expect(result.isError).toBeFalsy()
     const body = parseResult(result) as { base64: string }
     expect(atob(body.base64)).toBe('a: 1')
+  })
+
+  it('run_pipeline: a leaf spec\'s `params` reach the leaf through the MCP tool schema, not just buildOp directly (unzip -> map(wrapHandle, convert))', async () => {
+    const zipMod = await import('fflate')
+    const zip = zipMod.zipSync({ 'a.json': new TextEncoder().encode('{"a":1}') })
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: {
+          tag: 'pipe',
+          steps: [
+            { tag: 'leaf', name: 'unzip' },
+            {
+              tag: 'map',
+              op: {
+                tag: 'pipe',
+                steps: [
+                  { tag: 'leaf', name: 'wrapHandle' },
+                  { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } },
+                ],
+              },
+              concurrency: 2,
+            },
+          ],
+        },
+        input: { $handle: true, base64: bytesToB64(zip), type: 'application/zip' },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as Array<{ base64: string }>
+    expect(atob(body[0].base64)).toBe('a: 1')
   })
 
   it('run_pipeline: an unknown leaf name surfaces as a tool error, not an uncaught exception', async () => {

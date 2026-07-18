@@ -33,9 +33,26 @@ function isResolvedHandle(v: unknown): v is Handle {
   return typeof h.r2Key === 'string' && typeof h.sha256 === 'string' && typeof h.type === 'string' && typeof h.size === 'number'
 }
 
-async function hydrate(store: Store, value: unknown): Promise<unknown> {
-  if (isHandleRef(value)) return store.put(b64ToBytes(value.base64), value.type ?? 'application/octet-stream')
-  if (Array.isArray(value)) return Promise.all(value.map((v) => hydrate(store, v)))
+// Aggregate cap across every $handle ref a single hydrate() call decodes, not
+// just each one individually -- b64ToBytes already caps one base64 string,
+// but an input array/object can nest arbitrarily many refs, each passing
+// that per-string cap while summing to unbounded MemoryStore growth. Mirrors
+// archive_create's totalBytes pattern (mcp.ts) and is sized like
+// http.ts's MAX_REQUEST_BODY_BYTES so an MCP call (which has no whole-request
+// body cap the way POST /op/run does) can't exceed what an HTTP caller could
+// already send in one request.
+export const MAX_HYDRATE_BYTES = 50_000_000
+
+async function hydrate(store: Store, value: unknown, budget: { totalBytes: number }): Promise<unknown> {
+  if (isHandleRef(value)) {
+    const bytes = b64ToBytes(value.base64)
+    budget.totalBytes += bytes.length
+    if (budget.totalBytes > MAX_HYDRATE_BYTES) {
+      throw new Error(`op-run input totals more than ${MAX_HYDRATE_BYTES} bytes across all $handle refs (bomb guard).`)
+    }
+    return store.put(bytes, value.type ?? 'application/octet-stream')
+  }
+  if (Array.isArray(value)) return Promise.all(value.map((v) => hydrate(store, v, budget)))
   if (value && typeof value === 'object') {
     // Object.create(null), not {}: a caller-supplied key literally named
     // "__proto__" assigned via out[k] = ... onto a plain {} would hit the
@@ -45,7 +62,7 @@ async function hydrate(store: Store, value: unknown): Promise<unknown> {
     // *inherited* properties from that object. Same class of bug CLAUDE.md
     // documents for fflate's zip entry names, here reachable via any JSON key.
     const out: Record<string, unknown> = Object.create(null)
-    for (const [k, v] of Object.entries(value)) out[k] = await hydrate(store, v)
+    for (const [k, v] of Object.entries(value)) out[k] = await hydrate(store, v, budget)
     return out
   }
   return value
@@ -108,7 +125,7 @@ export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts =
   const store = opts.store ?? new MemoryStore()
   const caps: Caps = { store, llm: llmUnavailable, clock: { now: () => Date.now() }, sinks: {}, governors: opts.governors, cache: opts.cache }
   const tree = buildOp(spec)
-  const hydrated = await hydrate(store, input)
+  const hydrated = await hydrate(store, input, { totalBytes: 0 })
   const result = await runInline(tree, hydrated, caps)
   return dehydrate(store, result)
 }
