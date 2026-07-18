@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { op } from '../../src/op/combinators.js'
+import { op, pipe } from '../../src/op/combinators.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { circuitBreaker } from '../../src/control/circuit-breaker.js'
 import { CircuitOpenError } from '../../src/control/governor.js'
@@ -31,6 +31,36 @@ test('runInline leaves an ungoverned leaf (no caps.governors entry) to run exact
   const result = await runInline(leaf, 41, caps)
   expect(result).toBe(42)
   expect(calls).toBe(1)
+})
+
+test('runInline forwards gOpts to runGoverned: onEvent fires and custom sleep/rand are honored', async () => {
+  let calls = 0
+  const leaf = op('flaky', async () => { calls++; if (calls < 3) throw new Error('flaky'); return 'ok' }, { kind: 'effect', retries: 3 })
+  const caps: any = { store: {}, llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const events: any[] = []
+  const sleeps: number[] = []
+  const result = await runInline(leaf, null, caps, {
+    onEvent: (e) => events.push(e),
+    sleep: async (ms) => { sleeps.push(ms) },
+    rand: () => 0,
+  })
+  expect(result).toBe('ok')
+  expect(events).toEqual([
+    { kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number) },
+    { kind: 'retry-attempt', name: 'flaky', attempt: 1, delayMs: expect.any(Number) },
+  ])
+  expect(sleeps.length).toBe(2)
+})
+
+test('runInline forwards gOpts through pipe and map recursion', async () => {
+  let calls = 0
+  const leaf = op('flaky', async () => { calls++; if (calls < 2) throw new Error('flaky'); return 'ok' }, { kind: 'effect', retries: 2 })
+  const caps: any = { store: {}, llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const events: any[] = []
+  const tree = pipe(leaf)
+  const result = await runInline(tree, null, caps, { onEvent: (e) => events.push(e), sleep: async () => {} })
+  expect(result).toBe('ok')
+  expect(events).toEqual([{ kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number) }])
 })
 
 test('runInline gates an effect leaf through caps.governors[name].concurrency, never exceeding its limit', async () => {

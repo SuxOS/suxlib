@@ -1,6 +1,6 @@
 import type { Op, Caps } from '../op/types.js'
 import { runReconcile } from '../op/reconcile.js'
-import { runGoverned } from '../control/governor.js'
+import { runGoverned, type RunGovernedOpts } from '../control/governor.js'
 
 export class AskTimeoutError extends Error {
   constructor(readonly prompt: string) {
@@ -9,15 +9,15 @@ export class AskTimeoutError extends Error {
   }
 }
 
-export async function runInline(node: Op, input: any, caps: Caps): Promise<any> {
+export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGovernedOpts): Promise<any> {
   switch (node.tag) {
-    case 'leaf': return runGoverned(node.name, node.opts, node.fn, input, caps, caps.governors?.[node.name])
-    case 'pipe': { let v = input; for (const s of node.steps) v = await runInline(s, v, caps); return v }
+    case 'leaf': return runGoverned(node.name, node.opts, node.fn, input, caps, caps.governors?.[node.name], gOpts)
+    case 'pipe': { let v = input; for (const s of node.steps) v = await runInline(s, v, caps, gOpts); return v }
     case 'map': {
       const items: any[] = input; const out = new Array(items.length)
       await Promise.all(items.map(async (it, i) => {
         await node.concurrency.acquire()
-        try { out[i] = await runInline(node.op, it, caps); node.concurrency.release(true) }
+        try { out[i] = await runInline(node.op, it, caps, gOpts); node.concurrency.release(true) }
         catch (e) { node.concurrency.release(false); throw e }
       }))
       return out
