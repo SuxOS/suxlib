@@ -339,3 +339,11 @@ There is no linter in this repo. Run both locally before pushing.
   being reset — build fixtures via the domain function directly instead of a second
   CLI invocation, the way `test/adapters/cli.test.ts`'s `archive extract` listing
   test does.
+- `mcp.ts`'s `opSpecSchema: z.ZodType<OpSpec>` gotcha (hit adding `cond`'s
+  predicate, #196): a zod field typed `z.unknown()` inside `z.object({...})`
+  infers as *optional* in the schema's output type (`unknown` admits
+  `undefined`), even when the corresponding `OpSpec`/`CondPredicate` field is
+  required — `tsc` then fails `opSpecSchema`'s `ZodType<OpSpec>` assignability
+  check with a confusing "optional vs required" diff. Either make the type's
+  field optional to match (what `CondPredicate`'s `eq.value?` does) or don't
+  reach for `z.unknown()` on a field that must always be present.
