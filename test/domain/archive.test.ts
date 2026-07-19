@@ -525,6 +525,66 @@ test('tarExtract correctly parses a multi-record PAX header whose first record\'
   expect(entries[0].text).toBe('world')
 })
 
+/** Build an arbitrary sequence of metadata header/body blocks followed by a real entry, mirroring GNU tar's 'L' -> 'K' -> real-entry longlink sequence (#272). */
+function buildMultiMetaTar(metas: Array<{ typeflag: string; name: string; body: Uint8Array }>, realName: string, realTypeflag: string, data: Uint8Array): Uint8Array {
+  function block(name: string, size: number, tflag: string): Uint8Array {
+    const h = new Uint8Array(BLOCK)
+    h.set(strToU8(name.slice(0, 100)), 0)
+    h.set(octalField(size, 12), 124)
+    h[156] = tflag.charCodeAt(0)
+    h.set(strToU8('        '), 148)
+    let checksum = 0
+    for (let i = 0; i < BLOCK; i++) checksum += h[i]
+    h.set(octalField(checksum, 8), 148)
+    return h
+  }
+  const parts: Uint8Array[] = []
+  for (const meta of metas) {
+    parts.push(block(meta.name, meta.body.length, meta.typeflag))
+    const body = new Uint8Array(padTo(meta.body.length, BLOCK))
+    body.set(meta.body, 0)
+    parts.push(body)
+  }
+  parts.push(block(realName, data.length, realTypeflag))
+  const realBody = new Uint8Array(padTo(data.length, BLOCK))
+  realBody.set(data, 0)
+  parts.push(realBody)
+  parts.push(new Uint8Array(BLOCK * 2))
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    out.set(p, off)
+    off += p.length
+  }
+  return out
+}
+
+test('tarExtract skips a GNU longlink ("K" typeflag) entry without corrupting the following symlink\'s skipped listing', () => {
+  const longName = 'a/'.repeat(60) + 'deep/link.txt'
+  const longTarget = 'b/'.repeat(60) + 'deep/target.txt'
+  const packed = buildMultiMetaTar(
+    [
+      { typeflag: 'L', name: '././@LongLink', body: strToU8(longName + '\0') },
+      { typeflag: 'K', name: '././@LongLink', body: strToU8(longTarget + '\0') },
+    ],
+    longName.slice(0, 100),
+    '2', // symlink
+    new Uint8Array(0),
+  )
+  const { entries, skipped } = tarExtract(packed)
+  expect(entries).toEqual([])
+  expect(skipped).toEqual([{ name: longName, typeflag: '2' }])
+})
+
+test('tarExtract refuses (skips) a GNU-sparse PAX entry instead of returning truncated content', () => {
+  const paxBody = strToU8(paxRecord('GNU.sparse.name', 'sparsefile') + paxRecord('GNU.sparse.realsize', '1000000') + paxRecord('GNU.sparse.map', '0,10'))
+  const packed = buildLongNameTar('x', paxBody, 'sparsefile', strToU8('packed-bytes'))
+  const { entries, skipped } = tarExtract(packed)
+  expect(entries).toEqual([])
+  expect(skipped).toEqual([{ name: 'sparsefile', typeflag: 'S' }])
+})
+
 /** Build a single-entry tar whose `size` field is GNU base-256-encoded (high bit set on the field's first byte, remaining bytes a big-endian binary value) instead of octal ASCII, mirroring what GNU tar emits for a value too large for the field's octal width. */
 function buildBase256SizeTar(name: string, data: Uint8Array): Uint8Array {
   const header = new Uint8Array(BLOCK)

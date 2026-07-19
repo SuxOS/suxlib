@@ -125,14 +125,11 @@ export async function runGoverned(
       }
     }
     let acquired = false
+    let result: Awaited<ReturnType<typeof fn>>
     try {
       if (gated && governor?.tokenBucket) await governor.tokenBucket.take(1, caps.clock, sleep)
       if (concurrency) { await concurrency.acquire(); acquired = true }
-      const result = await fn(input, caps, idemKey)
-      if (acquired) concurrency!.release(true)
-      breaker?.onSuccess(caps.clock.now())
-      if (probeReserved) breaker!.releaseHalfOpenProbe()
-      return result
+      result = await fn(input, caps, idemKey)
     } catch (err) {
       if (acquired) concurrency!.release(false)
       breaker?.onFailure(caps.clock.now())
@@ -141,6 +138,17 @@ export async function runGoverned(
       const delayMs = backoffFullJitter(attempt, backoff, gOpts.rand)
       gOpts.onEvent?.({ kind: 'retry-attempt', name, attempt, delayMs })
       await sleep(delayMs)
+      continue
     }
+    // Post-success bookkeeping deliberately sits outside the try/catch above:
+    // a throw here (e.g. a host `onEvent` callback from breaker.onSuccess,
+    // called after it's already flipped state to 'closed') must not be
+    // misclassified as a leaf failure, which would double-release the
+    // concurrency slot and reopen a breaker that just legitimately closed
+    // (#275).
+    if (acquired) concurrency!.release(true)
+    breaker?.onSuccess(caps.clock.now())
+    if (probeReserved) breaker!.releaseHalfOpenProbe()
+    return result
   }
 }
