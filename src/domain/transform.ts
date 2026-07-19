@@ -222,6 +222,7 @@ export function parseYaml(text: string): unknown {
 // ---------- JSON <-> CSV (RFC4180-ish) ----------
 
 export function parseCsv(text: string, delim: string): string[][] {
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
   const rows: string[][] = []
   const nonBlank: boolean[] = []
   let row: string[] = []
@@ -360,7 +361,12 @@ function encodeEntitiesXml(s: string): string {
  */
 function xmlName(key: string): string {
   const safe = key.replace(/[^A-Za-z0-9_.-]/g, '_')
-  return /^[A-Za-z_]/.test(safe) ? safe : `_${safe}`
+  // Prefixing must apply whenever `safe` doesn't already start with a letter —
+  // including when it already starts with `_` — or two distinct keys (e.g.
+  // '123abc' and '_123abc') sanitize to the same escaped name. Unconditionally
+  // prepending `_` for every non-letter-start case keeps the mapping injective:
+  // it's a pure `s -> '_' + s` prefix, so distinct `safe` values can never collide.
+  return /^[A-Za-z]/.test(safe) ? safe : `_${safe}`
 }
 
 // attach()'s default promote-on-repeat heuristic (below) infers "already

@@ -190,17 +190,38 @@ function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
     }
     if (i + 3 >= bytes.length) throw new Error('malformed/truncated JPEG: segment length field runs past end of file')
     const len = (bytes[i + 2] << 8) | bytes[i + 3]
-    if (marker === 0xda) {
-      // Start of Scan: header + all remaining bytes (entropy data) verbatim.
-      for (let j = i; j < bytes.length; j++) out.push(bytes[j])
-      terminated = true
-      break
-    }
     // `len` includes the 2 length bytes themselves, so it can never legally be < 2;
     // and the segment it declares must fit inside the buffer — otherwise this is a
     // truncated/malformed file and must fail loudly rather than silently copy garbage.
     if (len < 2 || i + 2 + len > bytes.length) {
       throw new Error(`malformed/truncated JPEG: segment at offset ${i} declares length ${len}, runs past end of file`)
+    }
+    if (marker === 0xda) {
+      // Start of Scan header (fixed-structure, not the entropy data) copied verbatim.
+      for (let j = i; j < i + 2 + len; j++) out.push(bytes[j])
+      i += 2 + len
+      // Scan the entropy-coded data byte-by-byte until the next *real* marker,
+      // skipping byte-stuffed 0xFF00 and in-scan RST markers (0xD0-0xD7) — both
+      // are legitimate entropy-stream content, not segment boundaries — so a
+      // progressive JPEG's later scans/segments (or trailing EOI) are still
+      // inspected by the outer loop instead of being copied through as opaque
+      // trailer data.
+      while (i < bytes.length) {
+        const b = bytes[i]
+        if (b !== 0xff) {
+          out.push(b)
+          i++
+          continue
+        }
+        const next = bytes[i + 1]
+        if (next === 0x00 || (next !== undefined && next >= 0xd0 && next <= 0xd7)) {
+          out.push(b, next)
+          i += 2
+          continue
+        }
+        break
+      }
+      continue
     }
     const isIccApp2 = marker === 0xe2 && iccOffsets.has(i)
     const isMetadata = ((marker >= 0xe1 && marker <= 0xef) || marker === 0xfe) && !isIccApp2 // APP1-APP15, COM (ICC-bearing APP2 kept)

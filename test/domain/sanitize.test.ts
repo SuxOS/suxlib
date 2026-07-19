@@ -107,6 +107,33 @@ test('sanitizeImage keeps an ICC color profile (APP2) while dropping EXIF (APP1)
   expect(hasExif).toBe(false)
 })
 
+test('sanitizeImage strips a metadata segment placed after the first SOS scan of a progressive JPEG', () => {
+  const soi = new Uint8Array([0xff, 0xd8])
+  // First scan: SOS header (len=2, no extra header bytes) + entropy data containing
+  // a stuffed 0xFF00 byte and an in-scan RST0 marker, both of which must be treated
+  // as scan content rather than segment boundaries.
+  const sos1 = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0xaa, 0xff, 0x00, 0xff, 0xd0, 0xbb])
+  const app1Exif = jpegSegment(0xe1, new TextEncoder().encode('Exif\0\0second-scan-exif'))
+  // Second scan, terminated by EOI.
+  const sos2 = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0xcc, 0xdd, 0xff, 0xd9])
+  const parts = [soi, sos1, app1Exif, sos2]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const jpeg = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    jpeg.set(p, off)
+    off += p.length
+  }
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).not.toContain('second-scan-exif')
+  const bytes = Array.from(result.bytes)
+  // The first scan's stuffed 0xFF00 and RST0 marker survive untouched (real entropy content).
+  expect(bytes.slice(6, 12)).toEqual([0xaa, 0xff, 0x00, 0xff, 0xd0, 0xbb])
+  // Second scan's entropy data and EOI still present after the stripped APP1.
+  expect(bytes.slice(-4)).toEqual([0xcc, 0xdd, 0xff, 0xd9])
+})
+
 test('sanitizeImage preserves all segments of a multi-segment (>64KB) ICC profile', () => {
   const enc = new TextEncoder()
   const tag = enc.encode('ICC_PROFILE\0')
