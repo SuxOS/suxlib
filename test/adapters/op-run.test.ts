@@ -171,3 +171,17 @@ test('runOpSpec: an ask spec fails without opts.ask (onTimeout: fail), and opts.
   const result = await runOpSpec({ spec, input: null }, { ask: { request: async () => ({ answered: true, value: 'approved' }) } })
   expect(result).toBe('approved')
 })
+
+test('runOpSpec: a caller-supplied raw Handle object (not a $handle ref) is rejected instead of passed through to the leaf', async () => {
+  const store = new MemoryStore()
+  const secret = await store.put(new TextEncoder().encode('someone else\'s bytes'), 'application/octet-stream')
+  const spec: OpSpec = { tag: 'leaf', name: 'scrub' }
+  await expect(runOpSpec({ spec, input: secret }, { store })).rejects.toThrow(/raw Handle object/)
+})
+
+test('runOpSpec: a raw Handle object nested inside a larger input (e.g. a {handle, ...opts} leaf shape) is also rejected', async () => {
+  const store = new MemoryStore()
+  const secret = await store.put(new TextEncoder().encode('{"a":1}'), 'application/json')
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  await expect(runOpSpec({ spec, input: { handle: secret, from: 'json', to: 'yaml' } }, { store })).rejects.toThrow(/raw Handle object/)
+})

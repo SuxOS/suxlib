@@ -53,6 +53,14 @@ async function hydrate(store: Store, value: unknown, budget: { totalBytes: numbe
     }
     return store.put(bytes, value.type ?? 'application/octet-stream')
   }
+  // A caller-supplied object shaped like an already-resolved Handle
+  // (r2Key/sha256/type/size) must never reach a leaf unchanged -- that would
+  // let a caller name another run's Store entry directly, bypassing the
+  // $handle-ref minting this function exists to enforce (see the header
+  // comment: "the caller never sees or invents a Store key itself").
+  if (isResolvedHandle(value)) {
+    throw new Error('op-run input may not contain a raw Handle object -- seed bytes via { $handle: true, base64, type? } instead.')
+  }
   if (Array.isArray(value)) return Promise.all(value.map((v) => hydrate(store, v, budget)))
   if (value && typeof value === 'object') {
     // Object.create(null), not {}: a caller-supplied key literally named
