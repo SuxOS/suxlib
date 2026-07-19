@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { zipSync } from 'fflate'
 import { archiveCreate } from '../../src/domain/archive.js'
 import { extractArchiveTo, main, pipelineRunCmd, transform } from '../../src/adapters/cli.js'
+import { bytesToB64 } from '../../src/adapters/base64.js'
 
 // extractArchiveTo exercises the CLI's actual filesystem-writing extract path —
 // the real attack surface the zip-slip guard protects, as opposed to
@@ -181,10 +182,11 @@ describe('cli `archive create` (real CLI entry point)', () => {
 })
 
 describe('cli `archive extract` (real CLI entry point)', () => {
-  it('lists entry name/bytes/mtime as JSON to stdout instead of extracting when -o is omitted (#182)', async () => {
+  it('lists entry name/bytes/text/base64/mtime as JSON to stdout instead of extracting when -o is omitted (#182, #207)', async () => {
     const work = tmpDir()
     const outPath = join(work, 'out.zip')
-    writeFileSync(outPath, archiveCreate('zip', [{ name: 'in.txt', data: new TextEncoder().encode('hello'), mtime: 1700000000000 }]))
+    const data = new TextEncoder().encode('hello')
+    writeFileSync(outPath, archiveCreate('zip', [{ name: 'in.txt', data, mtime: 1700000000000 }]))
 
     // Read .mock.calls before mockRestore() below, not after: mockRestore()
     // resets the mock's call history as part of restoring the original
@@ -194,7 +196,7 @@ describe('cli `archive extract` (real CLI entry point)', () => {
     await main(['node', 'suxlib-fileops', 'archive', 'extract', outPath])
     expect(process.exitCode).toBeFalsy()
     const printed = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
-    expect(printed.entries).toEqual([{ name: 'in.txt', bytes: 5, mtime: 1700000000000, truncated: undefined }])
+    expect(printed.entries).toEqual([{ name: 'in.txt', bytes: 5, text: 'hello', truncated: undefined, mtime: 1700000000000, base64: bytesToB64(data) }])
     logSpy.mockRestore()
   })
 })
@@ -425,6 +427,54 @@ describe('cli `pipeline describe` (real CLI entry point)', () => {
     const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { leaves: Record<string, unknown>; sinks: string[] }
     expect(Object.keys(printed.leaves)).toContain('shout')
     expect(printed.sinks).toContain('log')
+    logSpy.mockRestore()
+  })
+})
+
+describe('cli `pipeline validate` (real CLI entry point)', () => {
+  it('reports a well-formed spec as valid with no errors, without running it (#208)', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } } }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'validate', specPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string)
+    expect(printed).toEqual({ valid: true, errors: [] })
+    logSpy.mockRestore()
+  })
+
+  it('collects every structural error in one pass and exits non-zero (#208)', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    writeFileSync(specPath, JSON.stringify({
+      spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'nope' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 0 }] },
+    }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'validate', specPath])
+    expect(process.exitCode).toBe(1)
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { valid: boolean; errors: Array<{ path: string; message: string }> }
+    expect(printed.valid).toBe(false)
+    expect(printed.errors.some((e) => /unknown leaf "nope"/.test(e.message))).toBe(true)
+    expect(printed.errors.some((e) => /concurrency/.test(e.message))).toBe(true)
+    process.exitCode = 0
+    logSpy.mockRestore()
+  })
+
+  it('--config merges host-registered leaves so a custom leaf validates as known', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'shout' } }))
+    writeFileSync(configPath, 'export default { leaves: { shout: async (input) => input } }\n')
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'validate', specPath, '--config', configPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string)
+    expect(printed).toEqual({ valid: true, errors: [] })
     logSpy.mockRestore()
   })
 })

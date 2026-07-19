@@ -1,7 +1,7 @@
 import { test, expect } from 'vitest'
 import { zipSync } from 'fflate'
 import { PDFDocument } from 'pdf-lib'
-import { buildOp, type OpSpec } from '../../src/op/spec.js'
+import { buildOp, validateOpSpec, type OpSpec } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
 import { putBytes, resolve, resolveText } from '../../src/handles/handle.js'
@@ -442,4 +442,53 @@ test('buildOp rejects an ask spec missing `prompt`/`timeout` or with a bad `onTi
   expect(() => buildOp({ tag: 'ask', timeout: '5m', onTimeout: 'proceed' } as unknown as OpSpec)).toThrow(/prompt/)
   expect(() => buildOp({ tag: 'ask', prompt: 'x', onTimeout: 'proceed' } as unknown as OpSpec)).toThrow(/timeout/)
   expect(() => buildOp({ tag: 'ask', prompt: 'x', timeout: '5m', onTimeout: 'nope' } as unknown as OpSpec)).toThrow(/onTimeout/)
+})
+
+test('validateOpSpec returns an empty array for a well-formed spec, mirroring buildOp not throwing (#208)', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'unzip' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 }] }
+  expect(validateOpSpec(spec)).toEqual([])
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('validateOpSpec collects every structural error in one pass instead of stopping at the first, unlike buildOp', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'nope', opts: { retries: 99 } },
+      { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 0 },
+      { tag: 'sink', targets: [] },
+    ],
+  }
+  const errors = validateOpSpec(spec)
+  expect(errors.length).toBeGreaterThanOrEqual(3)
+  expect(errors.some((e) => /unknown leaf "nope"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /retries/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /concurrency/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /targets/.test(e.message))).toBe(true)
+  // buildOp, by contrast, throws on just the first problem it hits.
+  expect(() => buildOp(spec)).toThrow(/unknown leaf "nope"/)
+})
+
+test('validateOpSpec descends into nested branches (pipe steps, map/mapField op, catch try/catch) even when a sibling node also errors', () => {
+  const spec: OpSpec = {
+    tag: 'catch',
+    try: { tag: 'leaf', name: 'nope-try' },
+    catch: { tag: 'leaf', name: 'nope-catch' },
+  }
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => e.path === '$.try' && /unknown leaf "nope-try"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => e.path === '$.catch' && /unknown leaf "nope-catch"/.test(e.message))).toBe(true)
+})
+
+test('validateOpSpec reports a pipe-adjacency shape mismatch the same way buildOp\'s throw does', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } }, { tag: 'leaf', name: 'unwrapHandle' }] }
+  const errors = validateOpSpec(spec)
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("convert"\) produces handle/)
+})
+
+test('validateOpSpec resolves extraLeaves the same way buildOp does', () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  expect(validateOpSpec(spec)).not.toEqual([])
+  expect(validateOpSpec(spec, { shout: async (i) => i })).toEqual([])
 })

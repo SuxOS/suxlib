@@ -14,7 +14,7 @@ import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../dom
 import { dispatchTransform, type Format } from '../domain/transform.js'
 import { runOpSpec, type OpRunOpts } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
-import type { OpSpec } from '../op/spec.js'
+import { validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
@@ -59,7 +59,7 @@ archiveCmd
   .command('extract')
   .description("Extract an archive's entries to a directory, or list them without writing to disk when -o is omitted")
   .argument('<archive>', 'archive file to extract')
-  .option('-o, --output <dir>', 'output directory; when omitted, prints entry name/bytes/mtime as JSON to stdout instead of extracting')
+  .option('-o, --output <dir>', 'output directory; when omitted, prints each entry (name/bytes/text/base64/mtime) as JSON to stdout instead of extracting')
   .option('-f, --format <format>', 'zip | tar | gzip | tar.gz (default: inferred from extension)')
   .action((archivePath: string, opts: { output?: string; format?: string }) => {
     const format = (opts.format as ArchiveFormat) ?? inferArchiveFormat(archivePath)
@@ -67,7 +67,7 @@ archiveCmd
     if (!opts.output) {
       const { entries, skipped } = archiveExtract(format, bytes)
       console.log(JSON.stringify({
-        entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, mtime: e.mtime, truncated: e.truncated })),
+        entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, mtime: e.mtime, base64: bytesToB64(e.data) })),
         ...(skipped?.length ? { skipped } : {}),
       }, null, 2))
       return
@@ -343,6 +343,25 @@ pipelineCmd
   .action(async (opts: { config?: string }) => {
     const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
     console.log(JSON.stringify(describePipelineSchema(runOpts.leaves, runOpts.sinks)))
+  })
+
+/** Checks a spec file's `spec` against the same structural rules `pipeline run`
+ * would enforce via buildOp, but collects every error into one report instead
+ * of throwing on the first (#208) -- mirrors `pipeline describe`'s `--config`
+ * handling so host-registered leaves validate correctly too. Exits non-zero
+ * when the spec is invalid, so this is scriptable as a pre-flight lint step. */
+pipelineCmd
+  .command('validate')
+  .description('Check a JSON op-tree spec for structural errors without running it; prints every error found, not just the first')
+  .argument('<spec-file>', 'JSON file: { spec: OpSpec }')
+  .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- same as `pipeline run --config`, for host-registered leaves')
+  .action(async (specFile: string, opts: { config?: string }) => {
+    const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown }
+    if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
+    const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
+    const errors = validateOpSpec(parsed.spec as OpSpec, runOpts.leaves)
+    console.log(JSON.stringify({ valid: errors.length === 0, errors }, null, 2))
+    if (errors.length) process.exitCode = 1
   })
 
 /** Re-exported for tests: the actual dispatch logic is `dispatchTransform` in

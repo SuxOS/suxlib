@@ -112,6 +112,15 @@ query: `GET /op/schema`, the `describe_pipeline` MCP tool, and `suxlib-fileops p
 describe`. Each merges in any host-registered `opRunLeaves`/`opRunSinks` alongside the
 built-in registry, the same way `POST /op/run`/`run_pipeline`/`pipeline run` do.
 
+To check a spec for structural problems (unknown leaf names, out-of-range
+retries/concurrency, malformed `ask`/`reconcile`/`mapField` fields, mismatched
+pipe-adjacency shapes, ...) without running it, all three adapters also expose a
+non-executing validate: `POST /op/validate`, the `validate_pipeline` MCP tool, and
+`suxlib-fileops pipeline validate <spec-file>`. Unlike `buildOp` (which throws on the
+first problem it finds), validate walks the whole spec and returns every error in one
+pass — `{ valid, errors: [{ path, message }] }` — so a caller composing a nontrivial
+spec doesn't need one round-trip per mistake.
+
 ## Development
 
 ```sh

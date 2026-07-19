@@ -170,6 +170,156 @@ export function buildOp(spec: OpSpec, extraLeaves?: Record<string, LeafFn>): Op 
   return buildOpNode(spec, mergeLeaves(extraLeaves))
 }
 
+export type OpSpecError = { path: string; message: string }
+
+const isBadFieldName = (f: unknown): boolean => typeof f !== 'string' || !f || f === '__proto__' || f === 'constructor' || f === 'prototype'
+
+/**
+ * Validates a caller-supplied OpSpec against the same rules buildOp enforces
+ * (leaf existence, retries/concurrency ranges, ask/reconcile/mapField field
+ * shapes, pipe-adjacency shape compatibility, ...) without throwing on the
+ * first problem it finds -- it walks the whole tree and collects every
+ * structural error into an array, so a caller composing a nontrivial spec
+ * (especially an LLM, per introspect.ts's own framing) can fix every mistake
+ * from one round-trip instead of resubmitting once per buildOp throw (#208).
+ * Never builds the actual Op tree or touches caps.store/llm/sinks -- purely
+ * structural, spec-shape checking, safe to call before any of those exist.
+ *
+ * Mirrors buildOpNode's per-tag checks one-for-one (same conditions, same
+ * MAX_LEAF_RETRIES/MAX_MAP_CONCURRENCY caps), but keeps descending into a
+ * node's children even after that node itself has an error, wherever the
+ * child spec is still reachable -- e.g. a bad `retries` on a leaf doesn't
+ * stop a `pipe` from also checking that leaf's shape-adjacency against its
+ * neighbor. There's no single source of truth these two functions share
+ * beyond the small predicates factored out below (isBadFieldName,
+ * shapeCompatible, stepShape, MAX_LEAF_RETRIES/MAX_MAP_CONCURRENCY) --
+ * a future change to buildOpNode's validation rules must be mirrored here
+ * too, same tradeoff CLAUDE.md's LEAF_SHAPES/LEAF_REGISTRY sync note already
+ * flags for a different table.
+ */
+export function validateOpSpec(spec: OpSpec, extraLeaves?: Record<string, LeafFn>): OpSpecError[] {
+  const errors: OpSpecError[] = []
+  collectSpecErrors(spec, mergeLeaves(extraLeaves), '$', errors)
+  return errors
+}
+
+function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>, path: string, errors: OpSpecError[]): void {
+  if (!spec || typeof spec !== 'object') {
+    errors.push({ path, message: 'op spec must be an object' })
+    return
+  }
+  switch (spec.tag) {
+    case 'leaf': {
+      if (typeof spec.name !== 'string' || !spec.name) {
+        errors.push({ path, message: 'leaf spec requires a `name`' })
+      } else {
+        try {
+          resolveLeaf(spec.name, leaves)
+        } catch (e) {
+          errors.push({ path, message: (e as Error).message })
+        }
+      }
+      const o = spec.opts ?? {}
+      if (o.retries !== undefined && (!Number.isInteger(o.retries) || o.retries < 0 || o.retries > MAX_LEAF_RETRIES)) {
+        errors.push({ path, message: `leaf "${spec.name}": \`retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}` })
+      }
+      if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
+        errors.push({ path, message: `leaf "${spec.name}": \`params\` must be an object` })
+      }
+      return
+    }
+    case 'pipe': {
+      if (!Array.isArray(spec.steps) || !spec.steps.length) {
+        errors.push({ path, message: 'pipe spec requires a non-empty `steps` array' })
+        return
+      }
+      spec.steps.forEach((s, i) => collectSpecErrors(s, leaves, `${path}.steps[${i}]`, errors))
+      for (let i = 0; i + 1 < spec.steps.length; i++) {
+        const prev = spec.steps[i]; const next = spec.steps[i + 1]
+        const output = stepShape(prev, 'output'); const input = stepShape(next, 'input')
+        if (!shapeCompatible(output, input)) {
+          errors.push({
+            path: `${path}.steps[${i + 1}]`,
+            message: `pipe step ${i + 1} ("${stepLabel(next)}") expects ${shapeLabel(input)} input, but step ${i} ` +
+              `("${stepLabel(prev)}") produces ${shapeLabel(output)}`,
+          })
+        }
+      }
+      return
+    }
+    case 'map': {
+      if (!spec.op) errors.push({ path, message: 'map spec requires an `op`' })
+      else collectSpecErrors(spec.op, leaves, `${path}.op`, errors)
+      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
+        errors.push({ path, message: `map spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}` })
+      }
+      return
+    }
+    case 'mapField': {
+      if (isBadFieldName(spec.arrayField)) {
+        errors.push({ path, message: 'mapField spec\'s `arrayField` must be a non-empty string (not `__proto__`/`constructor`/`prototype`)' })
+      }
+      if (isBadFieldName(spec.elementField)) {
+        errors.push({ path, message: 'mapField spec\'s `elementField` must be a non-empty string (not `__proto__`/`constructor`/`prototype`)' })
+      }
+      if (spec.renameTo !== undefined && isBadFieldName(spec.renameTo)) {
+        errors.push({ path, message: 'mapField spec\'s `renameTo`, if present, must be a non-empty string (not `__proto__`/`constructor`/`prototype`)' })
+      }
+      if (!spec.op) errors.push({ path, message: 'mapField spec requires an `op`' })
+      else collectSpecErrors(spec.op, leaves, `${path}.op`, errors)
+      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
+        errors.push({ path, message: `mapField spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}` })
+      }
+      return
+    }
+    case 'sink': {
+      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
+        errors.push({ path, message: 'sink spec requires a non-empty `targets` array of non-empty strings' })
+      }
+      return
+    }
+    case 'reconcile': {
+      const o = spec.opts
+      if (!o || typeof o !== 'object' || !RECONCILE_MODES.includes(o.mode)) {
+        errors.push({ path, message: `reconcile spec's \`opts.mode\` must be one of: ${RECONCILE_MODES.join(', ')}` })
+      }
+      if (o && typeof o === 'object' && o.mode === 'field-merge') {
+        if (o.defaultPolicy !== undefined && !FIELD_POLICIES.includes(o.defaultPolicy)) {
+          errors.push({ path, message: `reconcile spec's \`opts.defaultPolicy\` must be one of: ${FIELD_POLICIES.join(', ')}` })
+        }
+        if (o.policy !== undefined) {
+          if (typeof o.policy !== 'object' || o.policy === null || Array.isArray(o.policy)) {
+            errors.push({ path, message: 'reconcile spec\'s `opts.policy` must be an object' })
+          } else {
+            for (const [k, v] of Object.entries(o.policy)) {
+              if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
+              if (!FIELD_POLICIES.includes(v as FieldPolicy)) {
+                errors.push({ path, message: `reconcile spec's \`opts.policy["${k}"]\` must be one of: ${FIELD_POLICIES.join(', ')}` })
+              }
+            }
+          }
+        }
+      }
+      return
+    }
+    case 'catch': {
+      if (!spec.try) errors.push({ path, message: 'catch spec requires a `try`' })
+      else collectSpecErrors(spec.try, leaves, `${path}.try`, errors)
+      if (!spec.catch) errors.push({ path, message: 'catch spec requires a `catch`' })
+      else collectSpecErrors(spec.catch, leaves, `${path}.catch`, errors)
+      return
+    }
+    case 'ask': {
+      if (typeof spec.prompt !== 'string' || !spec.prompt) errors.push({ path, message: 'ask spec requires a non-empty `prompt`' })
+      if (typeof spec.timeout !== 'string' || !spec.timeout) errors.push({ path, message: 'ask spec requires a non-empty `timeout`' })
+      if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') errors.push({ path, message: 'ask spec\'s `onTimeout` must be "proceed" or "fail"' })
+      return
+    }
+    default:
+      errors.push({ path, message: `unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)` })
+  }
+}
+
 function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op {
   if (!spec || typeof spec !== 'object') throw new Error('op spec must be an object')
   switch (spec.tag) {

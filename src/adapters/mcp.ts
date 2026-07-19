@@ -13,7 +13,7 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import { FIELD_POLICIES, type OpSpec } from '../op/spec.js'
+import { FIELD_POLICIES, validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm } from '../effects/types.js'
@@ -292,6 +292,23 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         inputSchema: {},
       },
       async () => textResult(describePipelineSchema(opts.opRunLeaves, opts.opRunSinks)),
+    )
+  }
+
+  if (enabled('validate_pipeline')) {
+    server.registerTool(
+      'validate_pipeline',
+      {
+        description:
+          'Check a `run_pipeline` OpSpec for structural errors (unknown leaf names, out-of-range retries/concurrency, ' +
+          'malformed ask/reconcile/mapField fields, mismatched pipe-adjacency shapes, ...) without running it. ' +
+          'Returns every error found in one pass, not just the first.',
+        inputSchema: { spec: opSpecSchema },
+      },
+      async ({ spec }) => {
+        const errors = validateOpSpec(spec, opts.opRunLeaves)
+        return textResult({ valid: errors.length === 0, errors })
+      },
     )
   }
 }
