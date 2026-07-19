@@ -15,6 +15,21 @@ export class CircuitOpenError extends Error {
   }
 }
 
+// Cooperative cancellation signal for a whole runInline call (#279): a
+// distinct error type (not a plain Error/DOMException) so callers -- and
+// runInline's own 'catch' case -- can tell "the caller asked us to stop"
+// apart from an ordinary leaf/sink failure. Thrown at each of runGoverned's
+// retry-loop checkpoints and at every node runInline's traced() wrapper
+// dispatches; deliberately never caught by an op-tree `catch` node's
+// fallback, since an abort is a control signal from outside the tree, not an
+// application error the tree itself is expected to recover from.
+export class OpAbortError extends Error {
+  constructor() {
+    super('op run aborted')
+    this.name = 'OpAbortError'
+  }
+}
+
 export interface RunGovernedOpts {
   backoff?: { base: number; cap: number }
   rand?: () => number
@@ -25,9 +40,31 @@ export interface RunGovernedOpts {
   // for why this is a separate stream from onEvent above. runGoverned itself
   // never reads this field; runInline's `traced()` wrapper is what emits it.
   onTrace?: TraceEventHandler
+  // Cooperative-cancellation signal (#279): checked at runGoverned's retry
+  // loop and at runInline's per-node traced() wrapper. A leaf/sink write's
+  // in-flight effect call itself is never preempted -- this only stops the
+  // op tree from *starting* further work (another retry attempt, the next
+  // pipe step, the next map item) once the caller has asked to stop.
+  signal?: AbortSignal
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+// Races a backoff sleep against the abort signal so a caller that cancels
+// mid-backoff doesn't have to wait out the full delay (up to `backoff.cap`,
+// 10s by default) before the abort takes effect.
+function sleepOrAbort(sleep: (ms: number) => Promise<void>, ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return sleep(ms)
+  if (signal.aborted) return Promise.reject(new OpAbortError())
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new OpAbortError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    sleep(ms).then(
+      () => { signal.removeEventListener('abort', onAbort); resolve() },
+      err => { signal.removeEventListener('abort', onAbort); reject(err) },
+    )
+  })
+}
 
 export type ConcurrencySpec = { kind: 'fixed'; n: number } | { kind: 'aimd'; start?: number; min?: number; max?: number }
 
@@ -119,6 +156,7 @@ export async function runGoverned(
   const idemKey = gated && maxRetries > 0 ? await idempotencyKey(name, input) : undefined
 
   for (let attempt = 0; ; attempt++) {
+    if (gOpts.signal?.aborted) throw new OpAbortError()
     let probeReserved = false
     if (breaker) {
       if (!breaker.allow(caps.clock.now())) throw new CircuitOpenError(name)
@@ -140,7 +178,7 @@ export async function runGoverned(
       if (attempt >= maxRetries) throw err
       const delayMs = backoffFullJitter(attempt, backoff, gOpts.rand)
       gOpts.onEvent?.({ kind: 'retry-attempt', name, attempt, delayMs })
-      await sleep(delayMs)
+      await sleepOrAbort(sleep, delayMs, gOpts.signal)
       continue
     }
     // Post-success bookkeeping deliberately sits outside the try/catch above:

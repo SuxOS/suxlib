@@ -130,7 +130,7 @@ async function readCappedBody(request: Request): Promise<Uint8Array> {
   return out
 }
 
-type Route = { method: string; path: string; handle: (body: unknown, env: Env) => Promise<Response> }
+type Route = { method: string; path: string; handle: (body: unknown, env: Env, signal?: AbortSignal) => Promise<Response> }
 
 const routes: Route[] = [
   {
@@ -233,11 +233,14 @@ const routes: Route[] = [
   {
     method: 'POST',
     path: '/op/run',
-    handle: async (rawBody, env) => {
+    handle: async (rawBody, env, signal) => {
       const body = rawBody as { spec?: unknown; input?: unknown; trace?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
       const trace = body.trace === true
-      const outcome = await runOpSpec({ spec: body.spec as OpSpec, input: body.input, trace }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts: env.opRunGOpts, ask: env.opRunAsk })
+      // The request's own AbortSignal wires into cooperative cancellation
+      // (#279) unless a host-supplied opRunGOpts already declares one.
+      const gOpts = signal ? { ...env.opRunGOpts, signal: env.opRunGOpts?.signal ?? signal } : env.opRunGOpts
+      const outcome = await runOpSpec({ spec: body.spec as OpSpec, input: body.input, trace }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts, ask: env.opRunAsk })
       return json(trace ? (outcome as object) : { result: outcome })
     },
   },
@@ -290,7 +293,7 @@ export default {
       return errorResponse(e, 400)
     }
     try {
-      return await route.handle(body, env)
+      return await route.handle(body, env, request.signal)
     } catch (e) {
       return errorResponse(e, 400)
     }

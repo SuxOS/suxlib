@@ -443,6 +443,35 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await leavesServer.close()
   })
 
+  it('run_pipeline: a mid-flight MCP cancellation stops the next pipe step from running on the server (#279)', async () => {
+    const abortServer = new McpServer({ name: 'test-abort', version: '0.0.0' })
+    let secondRan = false
+    registerFileopsTools(abortServer, {
+      opRunLeaves: {
+        pauseThenContinue: async (input) => { await new Promise(resolve => setTimeout(resolve, 20)); return input },
+        neverRuns: async (input) => { secondRan = true; return input },
+      },
+    })
+    const abortClient = new Client({ name: 'test-abort-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([abortServer.connect(serverTransport), abortClient.connect(clientTransport)])
+
+    const controller = new AbortController()
+    const callPromise = abortClient.callTool(
+      { name: 'run_pipeline', arguments: { spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'pauseThenContinue' }, { tag: 'leaf', name: 'neverRuns' }] }, input: { a: 1 } } },
+      undefined,
+      { signal: controller.signal },
+    )
+    await new Promise(resolve => setTimeout(resolve, 5)) // let the request reach the server and enter the first leaf
+    controller.abort() // client-side: rejects callPromise and sends a cancellation notification to the server
+    await callPromise.catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 30)) // give the server's in-flight run time to observe extra.signal and stop
+    expect(secondRan).toBe(false)
+
+    await abortClient.close()
+    await abortServer.close()
+  })
+
   it('run_pipeline\'s tool description lists opts.opRunLeaves-registered leaves alongside the built-in registry (#158)', async () => {
     const leavesServer = new McpServer({ name: 'test-leaves-desc', version: '0.0.0' })
     registerFileopsTools(leavesServer, { opRunLeaves: { shout: async (input) => input } })

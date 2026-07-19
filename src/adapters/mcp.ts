@@ -311,7 +311,14 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           trace: z.boolean().default(false).describe('Include a TraceEvent[] execution trace alongside the result.'),
         },
       },
-      async ({ spec, input, trace }) => textResult(await runOpSpec({ spec, input, trace }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, gOpts: opts.opRunGOpts, ask: opts.opRunAsk })),
+      async ({ spec, input, trace }, extra) => {
+        // The MCP request's own AbortSignal (fired on client disconnect) wires
+        // into cooperative cancellation (#279) unless a host-supplied
+        // opRunGOpts already declares one.
+        const signal = extra?.signal
+        const gOpts = signal ? { ...opts.opRunGOpts, signal: opts.opRunGOpts?.signal ?? signal } : opts.opRunGOpts
+        return textResult(await runOpSpec({ spec, input, trace }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, gOpts, ask: opts.opRunAsk }))
+      },
     )
   }
 

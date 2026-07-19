@@ -1,6 +1,6 @@
 import type { Op, Caps } from '../op/types.js'
 import { runReconcile } from '../op/reconcile.js'
-import { runGoverned, type RunGovernedOpts } from '../control/governor.js'
+import { runGoverned, OpAbortError, type RunGovernedOpts } from '../control/governor.js'
 
 export class AskTimeoutError extends Error {
   constructor(readonly prompt: string) {
@@ -16,6 +16,11 @@ const childPath = (path: string, seg: string | number): string => (path === '' ?
 // otherwise -- no timing call, no event object, no try/catch -- so tracing
 // costs nothing when a caller doesn't ask for it.
 async function traced<T>(tag: string, name: string | undefined, path: string, caps: Caps, gOpts: RunGovernedOpts | undefined, fn: () => Promise<T>): Promise<T> {
+  // Cooperative-cancellation checkpoint (#279): every node runInline
+  // dispatches -- leaf, pipe step, map/mapField item, reconcile, sink
+  // fanout/target, ask, catch's try -- passes through here before it starts,
+  // so one check here is equivalent to a check at every one of those sites.
+  if (gOpts?.signal?.aborted) throw new OpAbortError()
   const onTrace = gOpts?.onTrace
   if (!onTrace) return fn()
   const t0 = caps.clock.now()
@@ -137,7 +142,13 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       // only needs the error to decide whether to run the fallback.
       return traced('catch', undefined, path, caps, gOpts, async () => {
         try { return await runInline(node.try, input, caps, gOpts, childPath(path, 'try')) }
-        catch { return runInline(node.catch, input, caps, gOpts, childPath(path, 'catch')) }
+        catch (err) {
+          // An abort is a control signal from outside the tree, not an
+          // application error -- it must propagate past catch's fallback,
+          // not be swallowed as "the try branch failed, run the fallback."
+          if (err instanceof OpAbortError) throw err
+          return runInline(node.catch, input, caps, gOpts, childPath(path, 'catch'))
+        }
       })
   }
 }

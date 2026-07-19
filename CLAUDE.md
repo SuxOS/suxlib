@@ -275,6 +275,35 @@ There is no linter in this repo. Run both locally before pushing.
   rather than bare microtasks, `Promise.all`'s early-settle behavior stops
   being safe to race against side effects the losing branches are still
   producing.
+- Cancellation convention (#279): `RunGovernedOpts.signal?: AbortSignal`
+  (`src/control/governor.ts`) is cooperative, not preemptive — it never kills
+  an in-flight leaf/sink effect call itself, only stops the tree from
+  *starting* further work once aborted. Two checkpoints cover it: `runInline`'s
+  `traced()` wrapper (`src/runtime/inline.ts`) checks `gOpts.signal?.aborted`
+  once, at the top, before dispatching *any* node (leaf, pipe step, map/
+  mapField item, reconcile, sink fanout/target, ask, catch's try) — since every
+  one of those passes through `traced()` regardless of tag, one check there
+  covers every checkpoint the #279 issue asked for. `runGoverned`'s retry loop
+  checks the same signal again at the top of every attempt (a leaf's own
+  retries are invisible to `traced()`, which spans the whole retry loop as one
+  node), and races its backoff sleep against the signal (`sleepOrAbort`) so an
+  abort doesn't have to wait out the full backoff delay. Thrown as a dedicated
+  `OpAbortError`, deliberately not a plain `Error`/`DOMException` — `runInline`'s
+  `catch` case re-throws it past the fallback instead of treating it as "the
+  try branch failed, run the fallback," since an abort is a control signal from
+  outside the tree, not an application error the tree is expected to recover
+  from. `http.ts`'s fetch handler and `mcp.ts`'s `run_pipeline` tool both wire
+  the adapter's own signal (`Request.signal` / MCP's `RequestHandlerExtra.signal`)
+  into `gOpts.signal` unless a host-supplied `opRunGOpts.signal` already set
+  one — note MCP's client-side cancellation always rejects the *client's*
+  `callTool()` promise immediately on abort regardless of server behavior, so
+  testing the server-side stop-the-next-step effect needs a real mid-flight
+  delay + a server-side side-effect flag, not just asserting on the client
+  promise's settlement (see `test/adapters/mcp.test.ts`'s mid-flight
+  cancellation test). Primitives below the checkpoint level (`tokenBucket`,
+  `concurrency`/aimd, a leaf's own in-flight effect) are not signal-aware —
+  matching the issue's own scoping, this stays a checkpoint-based scheme, not
+  a preemptive-kill one.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
