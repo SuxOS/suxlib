@@ -319,17 +319,24 @@ export function toCsv(arr: unknown[], delim: string): string {
 
 // ---------- JSON <-> XML ----------
 
-/** Canonical HTML/XML entity decoder — named entities plus general numeric forms. */
+const NAMED_ENTITIES: Record<string, string> = { '&nbsp;': ' ', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&amp;': '&' }
+const ENTITY_RE = /&nbsp;|&lt;|&gt;|&quot;|&apos;|&amp;|&#x([0-9a-f]+);|&#(\d+);/gi
+
+/**
+ * Canonical HTML/XML entity decoder — named entities plus general numeric
+ * forms, all decoded in a single combined-regex pass (not chained separate
+ * `.replace()` calls) so a freshly-decoded fragment (e.g. `&#38;` decoding to
+ * a literal `&`) can never be re-scanned and collapsed by a later step —
+ * entity decoding is one scan over the source markup, not a re-scan of
+ * already-decoded output.
+ */
 export function decodeEntities(s: string): string {
-  return s
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&apos;/gi, "'")
-    .replace(/&#x([0-9a-f]+);/gi, (m, h) => fromCodePointSafe(parseInt(h, 16), m))
-    .replace(/&#(\d+);/g, (m, d) => fromCodePointSafe(parseInt(d, 10), m))
-    .replace(/&amp;/gi, '&')
+  return s.replace(ENTITY_RE, (m, hex, dec) => {
+    const named = NAMED_ENTITIES[m.toLowerCase()]
+    if (named !== undefined) return named
+    if (hex !== undefined) return fromCodePointSafe(parseInt(hex, 16), m)
+    return fromCodePointSafe(parseInt(dec, 10), m)
+  })
 }
 
 // String.fromCodePoint throws RangeError for values > U+10FFFF (or negative), which
