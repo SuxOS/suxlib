@@ -491,20 +491,32 @@ test('tarExtract applies a GNU longname ("L" typeflag) entry\'s data as the foll
   expect(entries[0].text).toBe('hello')
 })
 
-/** PAX records are self-length-prefixed (`"<len> key=value\n"`, len includes itself), so the length must be solved for rather than computed directly. */
+/** PAX records are self-length-prefixed (`"<len> key=value\n"`, len is the record's UTF-8 *byte* length including itself), so the length must be solved for against the encoded byte length, not the JS string's char length. */
 function paxRecord(key: string, value: string): string {
   const suffix = ` ${key}=${value}\n`
-  let len = suffix.length
+  let len = strToU8(suffix).length
   for (;;) {
     const candidate = `${len}${suffix}`
-    if (candidate.length === len) return candidate
-    len = candidate.length
+    const candidateLen = strToU8(candidate).length
+    if (candidateLen === len) return candidate
+    len = candidateLen
   }
 }
 
 test('tarExtract applies a PAX extended header ("x" typeflag) entry\'s "path" key as the following entry\'s name', () => {
   const longName = 'b/'.repeat(60) + 'deep/pax.txt'
   const paxBody = strToU8(paxRecord('path', longName))
+  const packed = buildLongNameTar('x', paxBody, longName.slice(0, 100), strToU8('world'))
+  const { entries, skipped } = tarExtract(packed)
+  expect(skipped).toEqual([])
+  expect(entries.length).toBe(1)
+  expect(entries[0].name).toBe(longName)
+  expect(entries[0].text).toBe('world')
+})
+
+test('tarExtract correctly parses a multi-record PAX header whose first record\'s value is non-ASCII', () => {
+  const longName = 'café/'.repeat(20) + 'deep/pax.txt'
+  const paxBody = strToU8(paxRecord('comment', 'résumé café ümläut') + paxRecord('path', longName))
   const packed = buildLongNameTar('x', paxBody, longName.slice(0, 100), strToU8('world'))
   const { entries, skipped } = tarExtract(packed)
   expect(skipped).toEqual([])

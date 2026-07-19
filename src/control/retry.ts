@@ -11,6 +11,6 @@ export function canonicalize(v: unknown): unknown {
 }
 export async function idempotencyKey(name: string, args: unknown): Promise<string> {
   const stable = JSON.stringify(canonicalize(args))
-  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(name + stable))
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${name}:${stable}`))
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('')
 }
