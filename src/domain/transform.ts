@@ -628,6 +628,15 @@ function stripTags(s: string): string {
   return s.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
 }
 
+// Longest run of consecutive backticks in `s` -- used to size an inline-code
+// delimiter or fence long enough that the content itself can't prematurely
+// close it (CommonMark's own rule for choosing a backtick-run/fence length).
+function longestBacktickRun(s: string): number {
+  let longest = 0
+  for (const run of s.match(/`+/g) ?? []) longest = Math.max(longest, run.length)
+  return longest
+}
+
 function inlineText(s: string): string {
   return decodeEntities(stripTags(s))
 }
@@ -638,7 +647,12 @@ function inlineToMd(s: string): string {
       .replace(/<a\b[^>]*\bhref=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, txt) => `[${stripTags(txt)}](${href})`)
       .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `**${stripTags(txt)}**`)
       .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `*${stripTags(txt)}*`)
-      .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, txt) => `\`${stripTags(txt)}\``)
+      .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, txt) => {
+        const content = stripTags(txt)
+        const delim = '`'.repeat(longestBacktickRun(content) + 1)
+        const pad = content.startsWith('`') || content.endsWith('`') || content === '' ? ' ' : ''
+        return `${delim}${pad}${content}${pad}${delim}`
+      })
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<[^>]+>/g, ''),
   )
@@ -663,7 +677,8 @@ export function htmlToMarkdown(html: string): string {
   s = s.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, lvl, txt) => `\x00${'#'.repeat(Number(lvl))} ${inlineToMd(txt)}\x00`)
   s = s.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_m, txt) => {
     const inner = inlineText(txt.replace(/<code\b[^>]*>|<\/code>/gi, ''))
-    return `\x00\`\`\`\n${inner}\n\`\`\`\x00`
+    const fence = '`'.repeat(Math.max(3, longestBacktickRun(inner) + 1))
+    return `\x00${fence}\n${inner}\n${fence}\x00`
   })
   s = s.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, txt) =>
     `\x00${inlineToMd(txt).split('\n').map((l: string) => `> ${l}`.trimEnd()).join('\n')}\x00`,
