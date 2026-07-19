@@ -95,7 +95,7 @@ test('runInline traces a catch node: the try branch\'s node-exit surfaces why th
 })
 
 test('runInline traces a sink fanout: each target gets its own node-enter/exit, so a single failing target is identifiable', async () => {
-  const tree = sink.fanout('good', 'bad')
+  const tree = sink.fanout(['good', 'bad'])
   const caps = clockCaps({
     good: { name: 'good', write: async (v: any) => v },
     bad: { name: 'bad', write: async () => { throw new Error('write failed') } },

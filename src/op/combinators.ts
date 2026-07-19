@@ -1,4 +1,4 @@
-import type { Op, LeafFn, LeafOpts, Concurrency } from './types.js'
+import type { Op, LeafFn, LeafOpts, SinkOpts, Concurrency } from './types.js'
 import type { ReconcileOpts } from './reconcile.js'
 export const op = (name: string, fn: LeafFn, opts: LeafOpts): Op => ({ tag: 'leaf', name, fn, opts })
 export const pipe = (...steps: Op[]): Op => ({ tag: 'pipe', steps })
@@ -12,8 +12,8 @@ export const mapField = (arrayField: string, elementField: string, inner: Op, o:
   ({ tag: 'mapField', arrayField, elementField, op: inner, concurrency: o.concurrency, renameTo: o.renameTo })
 export const reconcile = (opts: ReconcileOpts): Op => ({ tag: 'reconcile', opts })
 export const sink = Object.assign(
-  (name: string): Op => ({ tag: 'sink', targets: [name] }),
-  { fanout: (...names: string[]): Op => ({ tag: 'sink', targets: names }) },
+  (name: string, opts?: SinkOpts): Op => ({ tag: 'sink', targets: [name], ...(opts ? { opts } : {}) }),
+  { fanout: (names: string[], opts?: SinkOpts): Op => ({ tag: 'sink', targets: names, ...(opts ? { opts } : {}) }) },
 )
 export const ask = (prompt: string, o: { timeout: string; onTimeout: 'proceed' | 'fail' }): Op =>
   ({ tag: 'ask', prompt, timeout: o.timeout, onTimeout: o.onTimeout })

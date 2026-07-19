@@ -1,7 +1,7 @@
 import { test, expect } from 'vitest'
 import { zipSync } from 'fflate'
 import { PDFDocument } from 'pdf-lib'
-import { buildOp, validateOpSpec, type OpSpec } from '../../src/op/spec.js'
+import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, type OpSpec } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
 import { putBytes, resolve, resolveText } from '../../src/handles/handle.js'
@@ -164,6 +164,23 @@ test('buildOp rejects a sink spec with an empty `targets` array', () => {
 
 test('buildOp rejects a sink spec with a non-string target', () => {
   expect(() => buildOp({ tag: 'sink', targets: [1 as unknown as string] })).toThrow(/targets/)
+})
+
+test('buildOp rejects an out-of-range sink `opts.retries` (#247)', () => {
+  expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { retries: -1 } })).toThrow(/opts\.retries/)
+  expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { retries: MAX_LEAF_RETRIES + 1 } })).toThrow(/opts\.retries/)
+})
+
+test('buildOp threads a sink spec\'s opts.retries into a retried write via caps.governors["sink:<name>"] (#247)', async () => {
+  let calls = 0
+  const spec: OpSpec = { tag: 'sink', targets: ['out'], opts: { retries: 2 } }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, 'value', {
+    store: caps().store, llm: {} as any, clock: { now: () => 0 },
+    sinks: { out: { name: 'out', write: async (v: any) => { calls++; if (calls < 2) throw new Error('flaky'); return v } } },
+  }, { sleep: async () => {}, rand: () => 0 })
+  expect(result).toBe('value')
+  expect(calls).toBe(2)
 })
 
 test('buildOp rejects an empty pipe', () => {
@@ -501,4 +518,12 @@ test('validateOpSpec reports an invalid leaf `opts.kind` the same way buildOp\'s
   const spec: OpSpec = { tag: 'leaf', name: 'scrub', opts: { kind: 'nope' as any } }
   const errors = validateOpSpec(spec)
   expect(errors.some((e) => /opts\.kind/.test(e.message))).toBe(true)
+})
+
+test('validateOpSpec reports an out-of-range sink `opts.retries` the same way buildOp\'s throw does (#247)', () => {
+  const spec: OpSpec = { tag: 'sink', targets: ['out'], opts: { retries: MAX_LEAF_RETRIES + 1 } }
+  const errors = validateOpSpec(spec)
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(/opts\.retries/)
+  expect(() => buildOp(spec)).toThrow(/opts\.retries/)
 })
