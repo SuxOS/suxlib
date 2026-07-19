@@ -1,4 +1,4 @@
-import type { Op, LeafFn, LeafOpts, SinkOpts, Concurrency } from './types.js'
+import type { Op, LeafFn, LeafOpts, SinkOpts, SinkFanoutTarget, Concurrency } from './types.js'
 import type { ReconcileOpts } from './reconcile.js'
 export const op = (name: string, fn: LeafFn, opts: LeafOpts): Op => ({ tag: 'leaf', name, fn, opts })
 export const pipe = (...steps: Op[]): Op => ({ tag: 'pipe', steps })
@@ -13,7 +13,9 @@ export const mapField = (arrayField: string, elementField: string, inner: Op, o:
 export const reconcile = (opts: ReconcileOpts): Op => ({ tag: 'reconcile', opts })
 export const sink = Object.assign(
   (name: string, opts?: SinkOpts): Op => ({ tag: 'sink', targets: [name], ...(opts ? { opts } : {}) }),
-  { fanout: (names: string[], opts?: SinkOpts): Op => ({ tag: 'sink', targets: names, ...(opts ? { opts } : {}) }) },
+  // `targets` accepts a mix of bare names and `{ name, opts }` pairs (#251) --
+  // a bare name still falls back to this call's own `opts` (the pre-#251 shape).
+  { fanout: (targets: SinkFanoutTarget[], opts?: SinkOpts): Op => ({ tag: 'sink', targets, ...(opts ? { opts } : {}) }) },
 )
 export const ask = (prompt: string, o: { timeout: string; onTimeout: 'proceed' | 'fail' }): Op =>
   ({ tag: 'ask', prompt, timeout: o.timeout, onTimeout: o.onTimeout })

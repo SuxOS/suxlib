@@ -9,3 +9,8 @@ test('sink and sink.fanout carry an opts field only when supplied', () => {
   expect(sink('r2', { retries: 3 })).toEqual({ tag: 'sink', targets: ['r2'], opts: { retries: 3 } })
   expect(sink.fanout(['r2', 'vault'], { heavy: true })).toEqual({ tag: 'sink', targets: ['r2', 'vault'], opts: { heavy: true } })
 })
+
+test('sink.fanout accepts per-target { name, opts } pairs alongside bare names (#251)', () => {
+  const op = sink.fanout(['r2', { name: 'vault', opts: { retries: 0 } }], { retries: 3 })
+  expect(op).toEqual({ tag: 'sink', targets: ['r2', { name: 'vault', opts: { retries: 0 } }], opts: { retries: 3 } })
+})

@@ -11,6 +11,12 @@ export interface LeafOpts { kind: 'pure' | 'effect'; retries?: number; heavy?: b
 // there's no `kind` to declare -- runGoverned gates it the same way it gates
 // an 'effect' leaf.
 export interface SinkOpts { retries?: number; heavy?: boolean; memo?: boolean }
+// A fanout target is either a bare name (falls back entirely to the sink
+// node's own `opts`, #247's original shape) or a `{ name, opts }` pair whose
+// `opts` fields individually override the node-level default -- #251: lets
+// one `sink.fanout` call give target 'log' retries: 3 while target 'vault'
+// gets retries: 0, without composing two separate sink() nodes via pipe.
+export type SinkFanoutTarget = string | { name: string; opts?: SinkOpts }
 export type LeafFn = (input: any, caps: Caps, idempotencyKey?: string) => Promise<any>
 export type Op =
   | { tag: 'leaf'; name: string; fn: LeafFn; opts: LeafOpts }
@@ -18,6 +24,6 @@ export type Op =
   | { tag: 'map'; op: Op; concurrency: Concurrency }
   | { tag: 'mapField'; arrayField: string; elementField: string; op: Op; concurrency: Concurrency; renameTo?: string }
   | { tag: 'reconcile'; opts: ReconcileOpts }
-  | { tag: 'sink'; targets: string[]; opts?: SinkOpts }
+  | { tag: 'sink'; targets: SinkFanoutTarget[]; opts?: SinkOpts }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
   | { tag: 'catch'; try: Op; catch: Op }
