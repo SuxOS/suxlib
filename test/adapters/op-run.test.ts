@@ -70,6 +70,41 @@ test('runOpSpec: a "__proto__"-keyed input cannot inject an inherited `to` into 
   await expect(runOpSpec({ spec, input: maliciousInput })).rejects.toThrow(/Unsupported target format/)
 })
 
+test('runOpSpec: trace defaults to omitted, returning the bare result unchanged', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const result = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+  }) as { base64: string }
+  expect(result.base64).toBeTypeOf('string')
+})
+
+test('runOpSpec: trace: true returns { result, trace } with a node-enter/node-exit pair for the leaf', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const outcome = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+    trace: true,
+  }) as { result: { base64: string }; trace: Array<{ kind: string; tag: string; name?: string }> }
+  expect(Buffer.from(outcome.result.base64, 'base64').toString('utf8')).toBe('a: 1')
+  expect(outcome.trace).toEqual([
+    expect.objectContaining({ kind: 'node-enter', tag: 'leaf', name: 'convert' }),
+    expect.objectContaining({ kind: 'node-exit', tag: 'leaf', name: 'convert', ok: true }),
+  ])
+})
+
+test('runOpSpec: trace: true still invokes a caller-supplied gOpts.onTrace alongside the collected array', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const seen: string[] = []
+  const outcome = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+    trace: true,
+  }, { gOpts: { onTrace: (e) => seen.push(e.kind) } }) as { trace: unknown[] }
+  expect(seen).toEqual(['node-enter', 'node-exit'])
+  expect(outcome.trace).toHaveLength(2)
+})
+
 test('runOpSpec: opts.cache is a long-lived instance a host reuses across calls, so a memo leaf runs only once for repeated input', async () => {
   let gets = 0
   let puts = 0

@@ -348,7 +348,13 @@ There is no linter in this repo. Run both locally before pushing.
   same subcommand within one process must not rely on a prior failed call's flags
   being reset — build fixtures via the domain function directly instead of a second
   CLI invocation, the way `test/adapters/cli.test.ts`'s `archive extract` listing
-  test does.
+  test does. This isn't limited to a call that *threw* — any successfully-parsed
+  flag (`-o`, `--config`, a bare boolean like `--trace`, #228) sticks around the
+  same way, on every other flag the subcommand declares, not just the one that
+  happened to trigger an error first. Where a second `pipeline run`/etc. call in
+  the same test file is unavoidable, explicitly re-pass every flag a prior test in
+  that file has ever set on that subcommand (not just the one under test) rather
+  than assuming an omitted flag reads as unset.
 - Update to the OpSpec-validation footgun above (#208): `validateOpSpec`
   (`src/op/spec.ts`) collects every structural error `buildOp` would otherwise
   throw on one-at-a-time, but over the MCP surface specifically, `opSpecSchema`
