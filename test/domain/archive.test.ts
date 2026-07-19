@@ -133,6 +133,18 @@ test('gzipCreate/gzipExtract round-trips a single file', () => {
   expect(out.text).toBe('gzip me '.repeat(50))
 })
 
+test('gzipExtract surfaces the FNAME embedded by a real gzip-compatible tool instead of the literal "data"', () => {
+  const packed = gzipSync(strToU8('hello'), { filename: 'notes.txt' })
+  const out = gzipExtract(packed)
+  expect(out.name).toBe('notes.txt')
+  expect(out.text).toBe('hello')
+})
+
+test('gzipExtract falls back to "data" when the gzip header has no FNAME (e.g. gzipCreate output)', () => {
+  const packed = gzipCreate(strToU8('hi'))
+  expect(gzipExtract(packed).name).toBe('data')
+})
+
 test('gzipCreate is deterministic — two calls with identical input produce byte-identical output, including gzipCreate(tarCreate(...))', async () => {
   const data = strToU8('gzip me '.repeat(50))
   const first = gzipCreate(data)
