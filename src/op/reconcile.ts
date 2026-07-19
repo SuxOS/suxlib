@@ -38,9 +38,10 @@ export async function fieldMerge(
       if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
       const policy = opts.policy?.[k] ?? defaultPolicy
       if (policy === 'keep-first') { if (!Object.prototype.hasOwnProperty.call(merged, k)) merged[k] = v; continue }
-      if (policy === 'union' && Array.isArray(v)) {
+      if (policy === 'union') {
         const prior = Array.isArray(merged[k]) ? merged[k] as unknown[] : []
-        merged[k] = [...new Set([...prior, ...v])]
+        const incoming = Array.isArray(v) ? v : [v]
+        merged[k] = [...new Set([...prior, ...incoming])]
         continue
       }
       merged[k] = v   // 'last-write-wins' (default): later handle's value overwrites

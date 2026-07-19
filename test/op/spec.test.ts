@@ -361,6 +361,68 @@ test('buildOp\'s shape check still rejects mapField feeding pack when the array 
   expect(() => buildOp(spec)).toThrow(/pipe step 2 \("pack"\) expects \{format, files\} input, but step 1 \("mapField"\) produces \{entries\}/)
 })
 
+test('buildOp builds a catch node that falls back to a secondary sink when the primary sink fails (#183)', async () => {
+  const { store } = caps()
+  const written: string[] = []
+  const spec: OpSpec = {
+    tag: 'catch',
+    try: { tag: 'sink', targets: ['primary'] },
+    catch: { tag: 'sink', targets: ['secondary'] },
+  }
+  const tree = buildOp(spec)
+  const sinks = {
+    primary: { name: 'primary', write: async () => { throw new Error('primary is down') } },
+    secondary: { name: 'secondary', write: async (v: any) => { written.push(v); return v } },
+  }
+  const result = await runInline(tree, 'payload', { store, llm: {} as any, clock: { now: () => 0 }, sinks })
+  expect(written).toEqual(['payload'])
+  expect(result).toBe('payload')
+})
+
+test('buildOp\'s catch node lets a successful try branch skip the catch branch entirely', async () => {
+  const { store } = caps()
+  const written: string[] = []
+  const spec: OpSpec = {
+    tag: 'catch',
+    try: { tag: 'sink', targets: ['primary'] },
+    catch: { tag: 'sink', targets: ['secondary'] },
+  }
+  const tree = buildOp(spec)
+  const sinks = {
+    primary: { name: 'primary', write: async (v: any) => { written.push(`primary:${v}`); return v } },
+    secondary: { name: 'secondary', write: async (v: any) => { written.push(`secondary:${v}`); return v } },
+  }
+  await runInline(tree, 'payload', { store, llm: {} as any, clock: { now: () => 0 }, sinks })
+  expect(written).toEqual(['primary:payload'])
+})
+
+test('buildOp rejects a catch spec missing `try`/`catch`', () => {
+  expect(() => buildOp({ tag: 'catch', catch: { tag: 'leaf', name: 'scrub' } } as unknown as OpSpec)).toThrow(/requires a `try`/)
+  expect(() => buildOp({ tag: 'catch', try: { tag: 'leaf', name: 'scrub' } } as unknown as OpSpec)).toThrow(/requires a `catch`/)
+})
+
+test('buildOp\'s shape check treats a catch node\'s boundary as \'unknown\' when its try/catch branches disagree, so it never blocks a downstream pipe step', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'catch', try: { tag: 'leaf', name: 'unzip' }, catch: { tag: 'leaf', name: 'scrub' } },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp\'s shape check catches a downstream mismatch when a catch node\'s try/catch branches agree on a bare-`handle` output', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'catch', try: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } }, catch: { tag: 'leaf', name: 'extract' } },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("catch"\) produces handle/)
+})
+
 test('mapField rejects `__proto__` as `arrayField`/`elementField`/`renameTo`', () => {
   expect(() => buildOp({ tag: 'mapField', arrayField: '__proto__', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/arrayField/)
   expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: '__proto__', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/elementField/)

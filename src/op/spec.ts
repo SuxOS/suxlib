@@ -1,6 +1,6 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, mapField, sink, reconcile } from './combinators.js'
+import { op, pipe, map, mapField, sink, reconcile, catchOp } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
@@ -12,6 +12,7 @@ export type OpSpec =
   | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: number; renameTo?: string }
   | { tag: 'sink'; targets: string[] }
   | { tag: 'reconcile'; opts: ReconcileOpts }
+  | { tag: 'catch'; try: OpSpec; catch: OpSpec }
 
 const FIELD_POLICIES: FieldPolicy[] = ['last-write-wins', 'union', 'keep-first']
 const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge']
@@ -48,6 +49,10 @@ function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
   return Object.entries(input.object).every(([k, v]) => fieldCompatible(output.object[k], v))
 }
 
+function shapesEqual(a: LeafShape, b: LeafShape): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
 /**
  * A pipe step's declared shape. `leaf` reads straight from LEAF_SHAPES. `map`
  * derives its own boundary from its inner op's shape, one array level up
@@ -66,7 +71,11 @@ function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
  * changes). A nested `pipe`/`sink` step composing multiple leaves has no
  * single input/output shape without walking further than a single
  * adjacent-step comparison needs to, so those still read as 'unknown' on
- * both sides.
+ * both sides. A `catch` step's own boundary is only representable when its
+ * `try`/`catch` branches agree on a shape (shapesEqual) -- since either
+ * branch could run at runtime, a mismatched pair collapses to 'unknown'
+ * rather than guessing which branch a downstream step should be checked
+ * against, same permissive fallback as an unrepresentable map/mapField case.
  */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (!s || typeof s !== 'object') return 'unknown'
@@ -76,6 +85,10 @@ function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
     const field: LeafFieldShape = stepShape(s.op, side) === 'handle' ? 'handle' : 'unknown'
     const arrayField = side === 'output' ? (s.renameTo ?? s.arrayField) : s.arrayField
     return { object: { [arrayField]: { arrayObject: { [s.elementField]: field } } } }
+  }
+  if (s.tag === 'catch') {
+    const tryShape = stepShape(s.try, side); const catchShape = stepShape(s.catch, side)
+    return shapesEqual(tryShape, catchShape) ? tryShape : 'unknown'
   }
   return 'unknown'
 }
@@ -124,7 +137,11 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * `case 'reconcile'`), so it's expressible directly as an OpSpec variant.
  * `ask` still depends on a live Ask capability a stateless adapter call has
  * no way to supply, so composing that still requires building an Op tree
- * in-process.
+ * in-process. `catch` (#183) runs its `try` branch and, on any thrown error
+ * (retries exhausted, `CircuitOpenError`, `AskTimeoutError`, or a plain leaf
+ * throw), re-runs its `catch` branch against the *original* input instead of
+ * aborting the whole pipe -- e.g. "try the primary `sink`, fall back to a
+ * secondary one".
  *
  * `extraLeaves`, when supplied, merges host-registered leaves onto
  * LEAF_REGISTRY (mergeLeaves, ./registry.ts) once per top-level buildOp call
@@ -237,7 +254,12 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       return reconcile(o)
     }
+    case 'catch': {
+      if (!spec.try) throw new Error('catch spec requires a `try`')
+      if (!spec.catch) throw new Error('catch spec requires a `catch`')
+      return catchOp(buildOpNode(spec.try, leaves), buildOpNode(spec.catch, leaves))
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch)`)
   }
 }

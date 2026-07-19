@@ -19,6 +19,14 @@ test('fieldMerge: union policy de-duplicates and concatenates array fields', asy
   expect(merged.tags.sort()).toEqual(['x', 'y', 'z'])
 })
 
+test('fieldMerge: union policy unions in a non-array value instead of discarding accumulated data', async () => {
+  const s = new MemoryStore()
+  const a = await putText(s, JSON.stringify({ tags: ['x', 'y'] }), 'application/json')
+  const b = await putText(s, JSON.stringify({ tags: 'z' }), 'application/json')
+  const merged = JSON.parse(await resolveText(s, await fieldMerge([a, b], s, { policy: { tags: 'union' } })))
+  expect(merged.tags.sort()).toEqual(['x', 'y', 'z'])
+})
+
 test('fieldMerge: keep-first policy preserves the earliest value despite later overwrites', async () => {
   const s = new MemoryStore()
   const a = await putText(s, JSON.stringify({ id: 'original' }), 'application/json')

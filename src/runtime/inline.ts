@@ -59,5 +59,9 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       if (node.onTimeout === 'fail') throw new AskTimeoutError(node.prompt)
       return input
     }
+    case 'catch': {
+      try { return await runInline(node.try, input, caps, gOpts) }
+      catch { return runInline(node.catch, input, caps, gOpts) }
+    }
   }
 }

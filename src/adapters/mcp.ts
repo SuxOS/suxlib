@@ -62,6 +62,7 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   }),
   z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1) }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
+  z.object({ tag: z.literal('catch'), try: opSpecSchema, catch: opSpecSchema }),
 ]))
 
 export type RegisterFileopsToolsOptions = {
@@ -263,7 +264,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
       'run_pipeline',
       {
         description:
-          `Run a JSON-described op-tree pipeline (leaf/pipe/map/mapField/sink) over the op engine's registered leaves ` +
+          `Run a JSON-described op-tree pipeline (leaf/pipe/map/mapField/sink/catch) over the op engine's registered leaves ` +
           `(${leafNames.join(', ')}) and sink targets (${sinkNames.join(', ')}), ` +
           `instead of calling one tool per step. ` +
           `Handle-shaped values in \`input\`/the result are marshalled as { $handle: true, base64, type } / { base64, type, size }.`,
