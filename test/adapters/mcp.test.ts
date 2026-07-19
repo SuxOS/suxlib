@@ -130,6 +130,21 @@ describe('mcp adapter', () => {
     expect(atob(body.base64)).toBe('a: 1')
   })
 
+  it('run_pipeline: trace: true returns a TraceEvent[] trace alongside result', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: { tag: 'leaf', name: 'convert' },
+        input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+        trace: true,
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { result: { base64: string }; trace: Array<{ kind: string }> }
+    expect(atob(body.result.base64)).toBe('a: 1')
+    expect(body.trace.map((e) => e.kind)).toEqual(['node-enter', 'node-exit'])
+  })
+
   it('run_pipeline: a leaf spec\'s `params` reach the leaf through the MCP tool schema, not just buildOp directly (unzip -> map(wrapHandle, convert))', async () => {
     const zipMod = await import('fflate')
     const zip = zipMod.zipSync({ 'a.json': new TextEncoder().encode('{"a":1}') })

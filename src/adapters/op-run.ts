@@ -20,6 +20,7 @@ import { buildOp, type OpSpec } from '../op/spec.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import { runInline } from '../runtime/inline.js'
 import type { RunGovernedOpts } from '../control/governor.js'
+import type { TraceEvent } from '../control/trace.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 export type HandleRef = { $handle: true; base64: string; type?: string }
@@ -97,7 +98,19 @@ const llmUnavailable: Llm = {
   summarize: async () => { throw new Error('llm capability is not available via run_pipeline/op-run') },
 }
 
-export type OpRunRequest = { spec: OpSpec; input: unknown }
+/**
+ * `trace`: opt-in per-call, for a stateless caller (HTTP/MCP/CLI) that wants
+ * #215's per-node execution trace back without supplying a live
+ * `gOpts.onTrace` callback of its own -- runOpSpec collects every emitted
+ * `TraceEvent` into an array and returns `{ result, trace }` instead of the
+ * bare result. Omitted (or `false`), runOpSpec's return value is unchanged
+ * from before #228 (the bare dehydrated result), so every existing caller
+ * asserting that shape keeps working untouched. A caller-supplied
+ * `opts.gOpts.onTrace` still fires alongside the collector when both are
+ * present -- `trace: true` doesn't replace a live callback, it adds a
+ * buffered one.
+ */
+export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean }
 
 /**
  * Governors/cache/store a host wants shared across calls (createGovernor per
@@ -169,12 +182,21 @@ export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; s
  * memoized results, handle data) actually persist across requests instead of
  * resetting on every stateless HTTP route / MCP tool call.
  */
-export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
+export async function runOpSpec({ spec, input, trace }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
   const store = opts.store ?? new MemoryStore()
   const sinks = Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks) as Record<string, SinkTarget>
   const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache, ask: opts.ask }
   const tree = buildOp(spec, opts.leaves)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
-  const result = await runInline(tree, hydrated, caps, opts.gOpts)
-  return dehydrate(store, result)
+  let gOpts = opts.gOpts
+  let events: TraceEvent[] | undefined
+  if (trace) {
+    events = []
+    const collected = events
+    const userOnTrace = opts.gOpts?.onTrace
+    gOpts = { ...opts.gOpts, onTrace: (e) => { collected.push(e); userOnTrace?.(e) } }
+  }
+  const result = await runInline(tree, hydrated, caps, gOpts)
+  const dehydrated = await dehydrate(store, result)
+  return trace ? { result: dehydrated, trace: events } : dehydrated
 }

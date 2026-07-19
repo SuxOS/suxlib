@@ -399,6 +399,38 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     process.exitCode = 0
     errSpy.mockRestore()
   })
+
+  // Last `pipeline run` test in this describe block deliberately: pipelineRunCmd
+  // is a module-level Commander singleton (CLAUDE.md's "cli.ts's main() gotcha"),
+  // so any flag left implicit here would inherit whatever a *prior* test in this
+  // block last set it to, not its true default -- explicitly pass every flag a
+  // previous test has ever set (-o, --config) alongside --trace, rather than
+  // relying on any of them being freshly undefined.
+  it('--trace includes a TraceEvent[] trace alongside the result', async () => {
+    const work = tmpDir()
+    const outDir = join(work, 'out')
+    const dataPath = join(work, 'data.json')
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(dataPath, '{"a":1}')
+    writeFileSync(configPath, 'export default {}\n')
+    writeFileSync(
+      specPath,
+      JSON.stringify({
+        spec: { tag: 'leaf', name: 'convert' },
+        input: { handle: { $file: 'data.json', type: 'application/json' }, from: 'json', to: 'yaml' },
+      }),
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '-o', outDir, '--trace', '--config', configPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { result: { file: string }; trace: Array<{ kind: string }> }
+    expect(existsSync(join(outDir, printed.result.file))).toBe(true)
+    expect(readFileSync(join(outDir, printed.result.file), 'utf8')).toBe('a: 1')
+    expect(printed.trace.map((e) => e.kind)).toEqual(['node-enter', 'node-exit'])
+    logSpy.mockRestore()
+  })
 })
 
 describe('cli `pipeline describe` (real CLI entry point)', () => {
