@@ -109,8 +109,17 @@ const llmUnavailable: Llm = {
  * `opts.gOpts.onTrace` still fires alongside the collector when both are
  * present -- `trace: true` doesn't replace a live callback, it adds a
  * buffered one.
+ *
+ * `trace: 'full'` (#234) additionally turns on `gOpts.traceSnapshots`, so
+ * every collected `TraceEvent` may carry an `inputRef`/`outputRef` Handle
+ * snapshotting the value that actually flowed through that node -- and,
+ * since those Handles resolve against this call's own `store`, the
+ * collected `trace` array is run through `dehydrate()` (the same pass the
+ * bare `result` already gets) before being returned, so a JSON caller sees
+ * plain `{ base64, type, size }` refs instead of a Handle it has no Store to
+ * resolve against.
  */
-export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean }
+export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean | 'full' }
 
 /**
  * Governors/cache/store a host wants shared across calls (createGovernor per
@@ -194,9 +203,10 @@ export async function runOpSpec({ spec, input, trace }: OpRunRequest, opts: OpRu
     events = []
     const collected = events
     const userOnTrace = opts.gOpts?.onTrace
-    gOpts = { ...opts.gOpts, onTrace: (e) => { collected.push(e); userOnTrace?.(e) } }
+    gOpts = { ...opts.gOpts, onTrace: (e) => { collected.push(e); userOnTrace?.(e) }, traceSnapshots: trace === 'full' || opts.gOpts?.traceSnapshots }
   }
   const result = await runInline(tree, hydrated, caps, gOpts)
   const dehydrated = await dehydrate(store, result)
-  return trace ? { result: dehydrated, trace: events } : dehydrated
+  if (!trace) return dehydrated
+  return { result: dehydrated, trace: await dehydrate(store, events) }
 }

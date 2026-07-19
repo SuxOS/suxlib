@@ -186,6 +186,19 @@ describe('http adapter', () => {
     expect(body.trace.map((e) => e.kind)).toEqual(['node-enter', 'node-exit'])
   })
 
+  it('POST /op/run: trace: "full" additionally attaches inputRef/outputRef Handle snapshots to the trace', async () => {
+    const res = await post('op/run', {
+      spec: { tag: 'leaf', name: 'convert' },
+      input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+      trace: 'full',
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: { base64: string }; trace: Array<{ kind: string; inputRef?: { base64: string }; outputRef?: { base64: string } }> }
+    expect(atob(body.result.base64)).toBe('a: 1')
+    expect(body.trace.find((e) => e.kind === 'node-enter')?.inputRef?.base64).toBeTypeOf('string')
+    expect(body.trace.find((e) => e.kind === 'node-exit')?.outputRef?.base64).toBeTypeOf('string')
+  })
+
   it('POST /op/run: an unknown leaf name in the spec surfaces a 400, not a 500', async () => {
     const res = await post('op/run', { spec: { tag: 'leaf', name: 'nope' }, input: null })
     expect(res.status).toBe(400)

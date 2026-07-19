@@ -3,10 +3,11 @@ import { op, pipe, map, mapField, sink, catchOp } from '../../src/op/combinators
 import { fixed } from '../../src/control/aimd.js'
 import { runInline } from '../../src/runtime/inline.js'
 import type { TraceEvent } from '../../src/control/trace.js'
+import { MemoryStore } from '../../src/effects/types.js'
 
-function clockCaps(sinks: Record<string, any> = {}) {
+function clockCaps(sinks: Record<string, any> = {}, store: any = {}) {
   let now = 0
-  return { store: {}, llm: {}, clock: { now: () => now++ }, sinks } as any
+  return { store, llm: {}, clock: { now: () => now++ }, sinks } as any
 }
 
 test('runInline emits no trace events when gOpts.onTrace is not supplied', async () => {
@@ -108,6 +109,37 @@ test('runInline traces a sink fanout: each target gets its own node-enter/exit, 
   expect(goodExit).toMatchObject({ tag: 'sink-target', ok: true })
   expect(badExit).toMatchObject({ tag: 'sink-target', ok: false, error: 'write failed' })
   expect(exits.find((e) => e.tag === 'sink')).toMatchObject({ ok: false })
+})
+
+test('runInline + traceSnapshots: node-enter/node-exit carry inputRef/outputRef Handles snapshotting the actual value (#234)', async () => {
+  const leaf = op('id', async (n: number) => n + 1, { kind: 'pure' })
+  const store = new MemoryStore()
+  const trace: TraceEvent[] = []
+  const result = await runInline(leaf, 1, clockCaps({}, store), { onTrace: (e) => trace.push(e), traceSnapshots: true })
+  expect(result).toBe(2)
+  const [enter, exit] = trace as any[]
+  expect(enter.inputRef).toBeDefined()
+  expect(exit.outputRef).toBeDefined()
+  expect(JSON.parse(new TextDecoder().decode(await store.get(enter.inputRef!)))).toBe(1)
+  expect(JSON.parse(new TextDecoder().decode(await store.get(exit.outputRef!)))).toBe(2)
+})
+
+test('runInline + traceSnapshots: a failing leaf\'s node-exit has no outputRef, but node-enter still carries inputRef', async () => {
+  const leaf = op('boom', async () => { throw new Error('kaboom') }, { kind: 'pure' })
+  const store = new MemoryStore()
+  const trace: TraceEvent[] = []
+  await expect(runInline(leaf, 5, clockCaps({}, store), { onTrace: (e) => trace.push(e), traceSnapshots: true })).rejects.toThrow('kaboom')
+  const [enter, exit] = trace as any[]
+  expect(enter.inputRef).toBeDefined()
+  expect(exit.outputRef).toBeUndefined()
+})
+
+test('runInline: traceSnapshots without onTrace never touches caps.store (tracing itself must be enabled first)', async () => {
+  const leaf = op('id', async (n: number) => n + 1, { kind: 'pure' })
+  // clockCaps()'s default store ({}) has no put() at all -- if traceSnapshots
+  // were read independently of onTrace this would throw.
+  const result = await runInline(leaf, 1, clockCaps(), { traceSnapshots: true })
+  expect(result).toBe(2)
 })
 
 test('runInline\'s onTrace and gOpts.onEvent are independent streams: supplying one does not add events to the other', async () => {

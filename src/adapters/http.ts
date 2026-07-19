@@ -236,7 +236,7 @@ const routes: Route[] = [
     handle: async (rawBody, env) => {
       const body = rawBody as { spec?: unknown; input?: unknown; trace?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const trace = body.trace === true
+      const trace = body.trace === 'full' ? 'full' as const : body.trace === true
       const outcome = await runOpSpec({ spec: body.spec as OpSpec, input: body.input, trace }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts: env.opRunGOpts, ask: env.opRunAsk })
       return json(trace ? (outcome as object) : { result: outcome })
     },

@@ -313,24 +313,28 @@ export const pipelineRunCmd = pipelineCmd
   .argument('<spec-file>', 'JSON file: { spec: OpSpec, input }. Input values shaped { "$file": "<path>", "type"?: "<mime>" } are read off disk and marshalled into Handle refs.')
   .option('-o, --output <dir>', 'write Handle-shaped result value(s) to files in this directory instead of inlining base64 in the printed JSON')
   .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- llm/store/cache/governors/sinks for this run, the shell CLI\'s equivalent of a programmatic caller\'s main(argv, opRunOpts)')
-  .option('--trace', 'include a TraceEvent[] execution trace alongside the result')
-  .action(async (specFile: string, opts: { output?: string; config?: string; trace?: boolean }) => {
+  .option('--trace [mode]', 'include a TraceEvent[] execution trace alongside the result; pass "full" to also snapshot each node\'s input/output as Handle refs (inputRef/outputRef)')
+  .action(async (specFile: string, opts: { output?: string; config?: string; trace?: boolean | string }) => {
+    if (opts.trace !== undefined && opts.trace !== true && opts.trace !== 'full') {
+      throw new Error(`--trace mode must be "full" (bare --trace also works); got "${opts.trace}"`)
+    }
+    const trace = opts.trace === 'full' ? 'full' as const : !!opts.trace
     const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown; input?: unknown }
     if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
     const input = resolveFileRefs(parsed.input, dirname(resolve(specFile)))
     const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
-    const outcome = await runOpSpec({ spec: parsed.spec as OpSpec, input, trace: !!opts.trace }, runOpts)
-    const result = opts.trace ? (outcome as { result: unknown }).result : outcome
+    const outcome = await runOpSpec({ spec: parsed.spec as OpSpec, input, trace }, runOpts)
+    const result = trace ? (outcome as { result: unknown }).result : outcome
     if (opts.output) {
       const files: Array<{ name: string; bytes: Uint8Array }> = []
       const shaped = extractHandleFiles(result, files)
       mkdirSync(opts.output, { recursive: true })
       for (const f of files) writeFileSync(join(opts.output, f.name), f.bytes)
-      const printed = opts.trace ? { result: shaped, trace: (outcome as { trace: unknown }).trace } : shaped
+      const printed = trace ? { result: shaped, trace: (outcome as { trace: unknown }).trace } : shaped
       console.log(JSON.stringify(printed, null, 2))
       if (files.length) console.log(`wrote ${files.length} handle result(s) to ${opts.output}`)
     } else {
-      console.log(JSON.stringify(opts.trace ? { result, trace: (outcome as { trace: unknown }).trace } : result))
+      console.log(JSON.stringify(trace ? { result, trace: (outcome as { trace: unknown }).trace } : result))
     }
   })
 

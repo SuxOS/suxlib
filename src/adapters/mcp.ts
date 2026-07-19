@@ -294,7 +294,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         inputSchema: {
           spec: opSpecSchema,
           input: z.unknown(),
-          trace: z.boolean().default(false).describe('Include a TraceEvent[] execution trace alongside the result.'),
+          trace: z.union([z.boolean(), z.literal('full')]).default(false).describe('Include a TraceEvent[] execution trace alongside the result. "full" also snapshots each node\'s input/output as Handle refs (inputRef/outputRef) on the trace events.'),
         },
       },
       async ({ spec, input, trace }) => textResult(await runOpSpec({ spec, input, trace }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, gOpts: opts.opRunGOpts, ask: opts.opRunAsk })),

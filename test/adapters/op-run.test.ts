@@ -93,6 +93,36 @@ test('runOpSpec: trace: true returns { result, trace } with a node-enter/node-ex
   ])
 })
 
+test('runOpSpec: trace: true (not "full") does not attach inputRef/outputRef snapshots', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const outcome = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+    trace: true,
+  }) as { trace: Array<{ inputRef?: unknown; outputRef?: unknown }> }
+  expect(outcome.trace.every((e) => e.inputRef === undefined && e.outputRef === undefined)).toBe(true)
+})
+
+test('runOpSpec: trace: "full" additionally attaches inputRef/outputRef Handle snapshots, dehydrated to base64 refs like the result (#234)', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const outcome = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+    trace: 'full',
+  }) as {
+    result: { base64: string }
+    trace: Array<{ kind: string; inputRef?: { base64: string; type: string; size: number }; outputRef?: { base64: string; type: string; size: number } }>
+  }
+  expect(Buffer.from(outcome.result.base64, 'base64').toString('utf8')).toBe('a: 1')
+  const enter = outcome.trace.find((e) => e.kind === 'node-enter')!
+  const exit = outcome.trace.find((e) => e.kind === 'node-exit')!
+  expect(enter.inputRef?.type).toBe('application/json')
+  const snapshotIn = JSON.parse(Buffer.from(enter.inputRef!.base64, 'base64').toString('utf8'))
+  expect(snapshotIn.from).toBe('json')
+  expect(snapshotIn.to).toBe('yaml')
+  expect(exit.outputRef?.type).toBe('application/json')
+})
+
 test('runOpSpec: trace: true still invokes a caller-supplied gOpts.onTrace alongside the collected array', async () => {
   const spec: OpSpec = { tag: 'leaf', name: 'convert' }
   const seen: string[] = []

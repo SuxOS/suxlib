@@ -214,7 +214,25 @@ There is no linter in this repo. Run both locally before pushing.
   node the tree visits, which would silently flood/break every one of them.
   `onTrace` rides the same already-threaded `gOpts` bag, so it's reachable
   from `POST /op/run`/`run_pipeline`/`pipeline run` via `opRunGOpts.onTrace`
-  with zero adapter changes.
+  with zero adapter changes. Update (#234): opt-in per-node input/output
+  snapshotting layers on top via `RunGovernedOpts.traceSnapshots` — set
+  alongside `onTrace`, `traced()` (`src/runtime/inline.ts`) additionally
+  JSON-snapshots each node's actual input/output through `caps.store`
+  (`snapshotValue` in `src/control/trace.ts`) and attaches the resulting
+  Handle as `inputRef`/`outputRef` on the `TraceEvent`; `outputRef` is only
+  ever attached on a successful `node-exit` (a failing node's `inputRef` is
+  what answers "what was flowing in when it broke"). `OpRunRequest.trace:
+  'full'` (distinct from the existing boolean `true`) is the adapter-level
+  opt-in wired through all three surfaces; `runOpSpec` dehydrates the
+  collected trace array the same pass as the bare result, so a JSON caller
+  sees base64 refs, never a raw Handle it has no Store to resolve against.
+  Gotcha: `snapshotValue` has no byte- or count-budget guard the way
+  `hydrate()`'s `MAX_HYDRATE_BYTES` caps input — a `trace: 'full'` run over a
+  large `map`/`mapField` fan-out writes two JSON blobs per node into the
+  Store with no cap on node count, unlike the bounded-bytes input path;
+  reachable from the unauthenticated-by-default `POST /op/run`, so a host
+  exposing it publicly at scale should add one before relying on this in
+  production.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
