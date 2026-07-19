@@ -508,6 +508,40 @@ test('tarExtract applies a PAX extended header ("x" typeflag) entry\'s "path" ke
   expect(entries[0].text).toBe('world')
 })
 
+/** Build a single-entry tar whose `size` field is GNU base-256-encoded (high bit set on the field's first byte, remaining bytes a big-endian binary value) instead of octal ASCII, mirroring what GNU tar emits for a value too large for the field's octal width. */
+function buildBase256SizeTar(name: string, data: Uint8Array): Uint8Array {
+  const header = new Uint8Array(BLOCK)
+  header.set(strToU8(name.slice(0, 100)), 0)
+  const sizeField = new Uint8Array(12)
+  sizeField[0] = 0x80 // GNU base-256 marker
+  sizeField[11] = data.length // big-endian value, fits in the last byte for this small fixture
+  header.set(sizeField, 124)
+  header[156] = '0'.charCodeAt(0) // typeflag: regular file
+  header.set(strToU8('        '), 148) // checksum placeholder
+  let checksum = 0
+  for (let i = 0; i < BLOCK; i++) checksum += header[i]
+  header.set(octalField(checksum, 8), 148)
+
+  const paddedSize = Math.ceil(data.length / BLOCK) * BLOCK
+  const body = new Uint8Array(paddedSize)
+  body.set(data, 0)
+  const footer = new Uint8Array(BLOCK * 2)
+  const out = new Uint8Array(header.length + body.length + footer.length)
+  out.set(header, 0)
+  out.set(body, header.length)
+  out.set(footer, header.length + body.length)
+  return out
+}
+
+test('tarExtract decodes a GNU base-256-encoded size field instead of misreading it as 0', () => {
+  const data = strToU8('hello from a base-256 size field')
+  const packed = buildBase256SizeTar('big.txt', data)
+  const { entries } = tarExtract(packed)
+  expect(entries.length).toBe(1)
+  expect(entries[0].name).toBe('big.txt')
+  expect(entries[0].text).toBe('hello from a base-256 size field')
+})
+
 test('archiveCreate rejects gzip with more than one file', () => {
   expect(() => archiveCreate('gzip', [{ name: 'a', data: strToU8('1') }, { name: 'b', data: strToU8('2') }])).toThrow(/exactly one file/)
 })
