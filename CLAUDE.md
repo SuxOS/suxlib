@@ -98,6 +98,17 @@ There is no linter in this repo. Run both locally before pushing.
   `shapeCompatible`/`stepShape` implementation that actually landed from a
   different sibling branch) — verify a follow-up issue's cited names/lines
   against current code rather than trusting them verbatim.
+- **A follow-up issue can be filed against a prerequisite that hasn't merged
+  yet.** #242 (trace snapshot budget guard, follow-up to #234) and #250/#251
+  (follow-ups to #247's sink governance) were all still queued as buildable
+  while #234 and #247 themselves sat unmerged in their own open PRs (#241,
+  #249) — so the feature/field the follow-up describes (`trace: 'full'`,
+  `SinkOpts`, `sink.fanout(names, opts?)`) doesn't exist on `main` at all yet.
+  Before building a follow-up issue, grep current `main` for the symbol it
+  names; if absent, check whether the prerequisite issue is still open with
+  an unmerged PR and drop the follow-up as blocked (not superseded) rather
+  than reimplementing the prerequisite yourself and risking duplicate/
+  conflicting work when that PR lands.
 
 ## Consumers
 
