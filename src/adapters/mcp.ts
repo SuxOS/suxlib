@@ -13,7 +13,7 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import { FIELD_POLICIES, type OpSpec } from '../op/spec.js'
+import { FIELD_POLICIES, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm } from '../effects/types.js'
@@ -26,7 +26,7 @@ function textResult(obj: unknown) {
 // building the schema for `steps`/`op` until it's actually validated, which is
 // what makes a self-referential shape like this expressible in zod at all.
 const opSpecLeafOptsSchema = z.object({
-  retries: z.number().int().min(0).max(5).optional(),
+  retries: z.number().int().min(0).max(MAX_LEAF_RETRIES).optional(),
   heavy: z.boolean().optional(),
   memo: z.boolean().optional(),
   kind: z.enum(['pure', 'effect']).optional(),
@@ -55,13 +55,13 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   // stop this key from being silently stripped before it reaches buildOp.
   z.object({ tag: z.literal('leaf'), name: z.string(), opts: opSpecLeafOptsSchema, params: z.record(z.string(), z.unknown()).optional() }),
   z.object({ tag: z.literal('pipe'), steps: z.array(opSpecSchema).min(1) }),
-  z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(32) }),
+  z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(MAX_MAP_CONCURRENCY) }),
   z.object({
     tag: z.literal('mapField'),
     arrayField: z.string(),
     elementField: z.string(),
     op: opSpecSchema,
-    concurrency: z.number().int().min(1).max(32),
+    concurrency: z.number().int().min(1).max(MAX_MAP_CONCURRENCY),
     renameTo: z.string().optional(),
   }),
   z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1) }),
