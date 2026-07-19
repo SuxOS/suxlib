@@ -238,6 +238,14 @@ describe('http adapter', () => {
     expect(body.result.abstract).toBe('summary of the full text')
   })
 
+  it('POST /op/run: env.opRunAsk wires a real Ask capability through to an `ask` step', async () => {
+    const env: Env = { opRunAsk: { request: async (prompt) => ({ answered: true, value: `answer to ${prompt}` }) } }
+    const res = await post('op/run', { spec: { tag: 'ask', prompt: 'proceed?', timeout: '5m', onTimeout: 'fail' }, input: {} }, {}, env)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: unknown }
+    expect(body.result).toBe('answer to proceed?')
+  })
+
   it('POST /op/run: env.opRunLeaves lets a host register a custom leaf a spec can name', async () => {
     const env: Env = { opRunLeaves: { shout: async (input) => ({ shouted: input }) } }
     const res = await post('op/run', { spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 } }, {}, env)

@@ -16,7 +16,7 @@ import { SINK_REGISTRY } from '../op/sinks.js'
 import { FIELD_POLICIES, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
-import type { Cache, Store, Llm } from '../effects/types.js'
+import type { Cache, Store, Llm, Ask } from '../effects/types.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
@@ -120,6 +120,16 @@ export type RegisterFileopsToolsOptions = {
    * leaf as before.
    */
   opRunLeaves?: Record<string, LeafFn>
+  /**
+   * A host-supplied Ask implementation, threaded to `caps.ask` the same way
+   * `opRunLlm`/`opRunCache`/`opRunStore` are, so a `run_pipeline` spec's
+   * `ask` step can actually reach a human-in-the-loop answer instead of
+   * only ever hitting runInline's no-capability fallback (`onTimeout:
+   * 'fail'` throws AskTimeoutError, `'proceed'` passes the piped value
+   * through). Omitted entirely, that fallback behavior is unchanged (see
+   * op-run.ts's OpRunOpts doc).
+   */
+  opRunAsk?: Ask
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -278,7 +288,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           input: z.unknown(),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves })),
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, ask: opts.opRunAsk })),
     )
   }
 

@@ -351,6 +351,24 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await llmServer.close()
   })
 
+  it('run_pipeline: opts.opRunAsk wires a real Ask capability through to an `ask` step', async () => {
+    const askServer = new McpServer({ name: 'test-ask', version: '0.0.0' })
+    registerFileopsTools(askServer, { opRunAsk: { request: async (prompt) => ({ answered: true, value: `answer to ${prompt}` }) } })
+    const askClient = new Client({ name: 'test-ask-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([askServer.connect(serverTransport), askClient.connect(clientTransport)])
+
+    const result = await askClient.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'ask', prompt: 'proceed?', timeout: '5m', onTimeout: 'fail' }, input: {} },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toBe('answer to proceed?')
+
+    await askClient.close()
+    await askServer.close()
+  })
+
   it('run_pipeline: opts.opRunLeaves lets a host register a custom leaf a spec can name', async () => {
     const leavesServer = new McpServer({ name: 'test-leaves', version: '0.0.0' })
     registerFileopsTools(leavesServer, { opRunLeaves: { shout: async (input) => ({ shouted: input }) } })
