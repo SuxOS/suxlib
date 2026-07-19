@@ -31,6 +31,12 @@ test('redactText honors the types subset', () => {
   expect(out.redacted).toContain('10.0.0.1')
 })
 
+test('redactText treats an explicit empty types array as "redact none", not "redact all"', () => {
+  const out = redactText('a@b.com', [])
+  expect(out.redacted).toBe('a@b.com')
+  expect(out.counts).toEqual({})
+})
+
 test('redactText only redacts a bare 9-digit SSN when nearby context labels it', () => {
   const labeled = redactText('SSN: 123456789')
   expect(labeled.redacted).toContain('[REDACTED:ssn]')

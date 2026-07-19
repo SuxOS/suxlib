@@ -174,6 +174,30 @@ test('releases the half-open probe slot after a failed attempt, so a subsequent 
   expect(breaker.state).toBe('closed')
 })
 
+test('releases the half-open probe slot before the retry backoff sleep, not after it', async () => {
+  const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
+  breaker.onFailure(0) // -> open
+  breaker.allow(100)   // cooldown elapsed -> half-open
+
+  let releaseSleep!: () => void
+  const blockingSleep = () => new Promise<void>(resolve => { releaseSleep = resolve })
+  const failing = async () => { throw new Error('still down') }
+
+  const run = runGoverned('leaf', { kind: 'effect', retries: 1 }, failing, null, caps(100), { circuitBreaker: breaker }, { sleep: blockingSleep })
+  await new Promise(resolve => setTimeout(resolve, 0)) // let the probe fail and reach the backoff sleep
+
+  // The probe already failed and released its slot -- a concurrent call should be able to
+  // reserve a new probe immediately, without waiting for the sleeping attempt to finish.
+  expect(breaker.reserveHalfOpenProbe()).toBe(true)
+  breaker.releaseHalfOpenProbe()
+
+  releaseSleep()
+  // The retry attempt after the sleep re-checks the breaker at the same clock time as the
+  // failed probe, so it's immediately circuit-open again -- not the point under test, which
+  // is that the probe slot was already free *during* the sleep, above.
+  await expect(run).rejects.toThrow(CircuitOpenError)
+})
+
 test('releases the half-open probe slot when the token bucket throws, so a subsequent call can probe again', async () => {
   const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
   breaker.onFailure(0) // -> open

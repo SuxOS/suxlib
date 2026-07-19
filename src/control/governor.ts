@@ -131,16 +131,16 @@ export async function runGoverned(
       const result = await fn(input, caps, idemKey)
       if (acquired) concurrency!.release(true)
       breaker?.onSuccess(caps.clock.now())
+      if (probeReserved) breaker!.releaseHalfOpenProbe()
       return result
     } catch (err) {
       if (acquired) concurrency!.release(false)
       breaker?.onFailure(caps.clock.now())
+      if (probeReserved) breaker!.releaseHalfOpenProbe()
       if (attempt >= maxRetries) throw err
       const delayMs = backoffFullJitter(attempt, backoff, gOpts.rand)
       gOpts.onEvent?.({ kind: 'retry-attempt', name, attempt, delayMs })
       await sleep(delayMs)
-    } finally {
-      if (probeReserved) breaker!.releaseHalfOpenProbe()
     }
   }
 }

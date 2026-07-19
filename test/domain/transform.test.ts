@@ -209,3 +209,13 @@ test('htmlToMarkdown does not double-decode doubly-encoded entities inside inlin
   expect(dispatchTransform('<strong>&amp;#65;</strong>', 'html', 'markdown')).toBe('**&#65;**')
   expect(dispatchTransform('<p>plain &amp;amp; text</p>', 'html', 'markdown')).toBe('plain &amp; text')
 })
+
+test('htmlToMarkdown widens the inline-code delimiter so a backtick in the content cannot close it early', () => {
+  const md = htmlToMarkdown('<p>Run <code>1 ` 2</code> now</p>')
+  expect(md).toContain('``1 ` 2``')
+})
+
+test('htmlToMarkdown widens a <pre> fence so a backtick run in the content cannot close it early', () => {
+  const md = htmlToMarkdown('<pre>```\nfenced\n```</pre>')
+  expect(md).toContain('````\n``` fenced ```\n````')
+})

@@ -69,7 +69,7 @@ export function redactText(text: string, types?: RedactType[]): RedactResult {
   if (text.length > MAX_TEXT_INPUT_BYTES) {
     throw new Error(`text input is larger than ${MAX_TEXT_INPUT_BYTES} bytes (bomb guard).`)
   }
-  const want = types && types.length ? new Set(types) : null
+  const want = types ? new Set(types) : null
   const counts: Record<string, number> = {}
   for (const { type, re, bare } of PATTERNS) {
     if (want && !want.has(type)) continue
