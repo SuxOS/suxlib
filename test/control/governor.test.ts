@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { runGoverned, createGovernor, CircuitOpenError } from '../../src/control/governor.js'
+import { runGoverned, createGovernor, CircuitOpenError, OpAbortError } from '../../src/control/governor.js'
 import { tokenBucket } from '../../src/control/token-bucket.js'
 import { circuitBreaker } from '../../src/control/circuit-breaker.js'
 import { fixed, aimd } from '../../src/control/aimd.js'
@@ -470,6 +470,38 @@ test('a throw from post-success bookkeeping (e.g. breaker onSuccess -> onEvent) 
   // failure release, and the breaker must stay closed, not reopen.
   expect(releases).toEqual([true])
   expect(breaker.state).toBe('closed')
+})
+
+test('an already-aborted signal rejects with OpAbortError before fn is ever called (#279)', async () => {
+  let calls = 0
+  const fn = async () => { calls++; return 'ok' }
+  const controller = new AbortController()
+  controller.abort()
+  await expect(
+    runGoverned('leaf', { kind: 'effect', retries: 3 }, fn, null, caps(), undefined, { ...noSleep, signal: controller.signal }),
+  ).rejects.toThrow(OpAbortError)
+  expect(calls).toBe(0)
+})
+
+test('aborting mid-retry stops a subsequent attempt from starting', async () => {
+  let calls = 0
+  const fn = async () => { calls++; throw new Error('flaky') }
+  const controller = new AbortController()
+  const sleep = async () => { controller.abort() } // fires between the first failed attempt and its retry
+  await expect(
+    runGoverned('leaf', { kind: 'effect', retries: 5 }, fn, null, caps(), undefined, { rand: () => 0, sleep, signal: controller.signal }),
+  ).rejects.toThrow(OpAbortError)
+  expect(calls).toBe(1)
+})
+
+test('aborting during the backoff sleep rejects immediately, without waiting out the full delay', async () => {
+  const fn = async () => { throw new Error('flaky') }
+  const controller = new AbortController()
+  const blockingSleep = () => new Promise<void>(() => {}) // never resolves on its own
+  const run = runGoverned('leaf', { kind: 'effect', retries: 5 }, fn, null, caps(), undefined, { rand: () => 0, sleep: blockingSleep, signal: controller.signal })
+  await new Promise(resolve => setTimeout(resolve, 0)) // let the first attempt fail and reach the backoff sleep
+  controller.abort()
+  await expect(run).rejects.toThrow(OpAbortError)
 })
 
 test('a throw from post-success bookkeeping does not permanently strand the half-open probe reservation (#290)', async () => {

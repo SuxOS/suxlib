@@ -266,6 +266,23 @@ describe('http adapter', () => {
     expect(body.result.shouted).toEqual({ a: 1 })
   })
 
+  it('POST /op/run: the request\'s own AbortSignal cancels the run cooperatively, stopping the next pipe step (#279)', async () => {
+    const controller = new AbortController()
+    const env: Env = { opRunLeaves: { abortNow: async (input) => { controller.abort(); return input } } }
+    let secondRan = false
+    env.opRunLeaves!.neverRuns = async (input) => { secondRan = true; return input }
+    const res = await handler.fetch(new Request('https://fileops.example/op/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'abortNow' }, { tag: 'leaf', name: 'neverRuns' }] }, input: { a: 1 } }),
+      signal: controller.signal,
+    }), env)
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/aborted/)
+    expect(secondRan).toBe(false)
+  })
+
   it('GET /op/schema: reports the built-in leaf registry, sink targets, reconcile modes, and field policies', async () => {
     const res = await handler.fetch(new Request('https://fileops.example/op/schema'))
     expect(res.status).toBe(200)

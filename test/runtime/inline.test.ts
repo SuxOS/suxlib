@@ -4,7 +4,7 @@ import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/
 import { fixed } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
-import { createGovernor } from '../../src/control/governor.js'
+import { createGovernor, OpAbortError } from '../../src/control/governor.js'
 test('runInline threads a pipe: split → map → reconcile → sink', async () => {
   const store = new MemoryStore(); const written: any[] = []
   const caps: any = { store, llm: {}, clock: { now: () => 0 },
@@ -101,4 +101,37 @@ test('runInline propagates the catch branch\'s own error when the fallback also 
     op('boom2', async () => { throw new Error('fallback failed too') }, { kind: 'pure' }),
   )
   await expect(runInline(tree, 5, caps)).rejects.toThrow('fallback failed too')
+})
+
+test('runInline rejects with OpAbortError before running any node when gOpts.signal is already aborted (#279)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let ran = false
+  const controller = new AbortController(); controller.abort()
+  const tree = op('never', async (n: number) => { ran = true; return n }, { kind: 'pure' })
+  await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(ran).toBe(false)
+})
+
+test('runInline stops a pipe from starting its next step once aborted mid-run', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  let secondRan = false
+  const tree = pipe(
+    op('first', async (n: number) => { controller.abort(); return n }, { kind: 'pure' }),
+    op('second', async (n: number) => { secondRan = true; return n }, { kind: 'pure' }),
+  )
+  await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(secondRan).toBe(false)
+})
+
+test('runInline\'s catch does not run the fallback when the try branch fails due to abort (#279)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController(); controller.abort()
+  let fallbackRan = false
+  const tree = catchOp(
+    op('boom', async (n: number) => n, { kind: 'pure' }),
+    op('fallback', async () => { fallbackRan = true; return -1 }, { kind: 'pure' }),
+  )
+  await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(fallbackRan).toBe(false)
 })
