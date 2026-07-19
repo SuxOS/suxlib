@@ -5,12 +5,13 @@ import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldSh
 import { fixed } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
+export type OpSpecSinkOpts = { retries?: number; heavy?: boolean; memo?: boolean }
 export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
   | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: number; renameTo?: string }
-  | { tag: 'sink'; targets: string[] }
+  | { tag: 'sink'; targets: string[]; opts?: OpSpecSinkOpts }
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
@@ -134,10 +135,14 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * Builds a real Op tree from a caller-supplied JSON description, resolving
  * every leaf name against the registry -- a spec can never carry a live `fn`,
  * only a name. Supports `leaf`/`pipe`/`map`/`mapField`/`sink`: a `sink` spec
- * only carries target *names*, resolved against Caps.sinks at run time
+ * carries target *names*, resolved against Caps.sinks at run time
  * (runInline's `case 'sink'`) the same way it already works for an in-process
  * caller -- see SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks
- * (../adapters/op-run.ts) for where those names come from. `mapField` (#168)
+ * (../adapters/op-run.ts) for where those names come from. A `sink` spec's
+ * optional `opts` (retries/heavy/memo, #247) threads each target's write
+ * through runGoverned exactly like an 'effect' leaf's `fn`, gated by
+ * `caps.governors["sink:<target>"]` -- a `sink:` prefix keeps a sink
+ * target's governor entry from colliding with a same-named leaf's own. `mapField` (#168)
  * runs its inner op over one named field of each element of a named array
  * field, reattaching the untouched rest of each element and optionally
  * renaming the array field itself -- e.g. bridging unpack's `entries` into
@@ -285,6 +290,10 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
         errors.push({ path, message: 'sink spec requires a non-empty `targets` array of non-empty strings' })
       }
+      const so = spec.opts?.retries
+      if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
+        errors.push({ path, message: `sink: \`opts.retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}` })
+      }
       return
     }
     case 'reconcile': {
@@ -400,7 +409,11 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
         throw new Error('sink spec requires a non-empty `targets` array of non-empty strings')
       }
-      return sink.fanout(...spec.targets)
+      const so = spec.opts?.retries
+      if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
+        throw new Error(`sink: \`opts.retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}`)
+      }
+      return sink.fanout(spec.targets, spec.opts)
     }
     case 'reconcile': {
       const o = spec.opts

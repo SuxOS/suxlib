@@ -7,6 +7,10 @@ export interface Governor { tokenBucket?: TokenBucket; circuitBreaker?: CircuitB
 export interface Caps { store: Store; llm: Llm; clock: Clock; sinks: Record<string, SinkTarget>; governors?: Record<string, Governor>; ask?: Ask; cache?: Cache }
 export interface Concurrency { acquire(): Promise<void>; release(ok: boolean): void }
 export interface LeafOpts { kind: 'pure' | 'effect'; retries?: number; heavy?: boolean; memo?: boolean }
+// A sink write is always I/O (there's no 'pure' sink), so unlike LeafOpts
+// there's no `kind` to declare -- runGoverned gates it the same way it gates
+// an 'effect' leaf.
+export interface SinkOpts { retries?: number; heavy?: boolean; memo?: boolean }
 export type LeafFn = (input: any, caps: Caps, idempotencyKey?: string) => Promise<any>
 export type Op =
   | { tag: 'leaf'; name: string; fn: LeafFn; opts: LeafOpts }
@@ -14,6 +18,6 @@ export type Op =
   | { tag: 'map'; op: Op; concurrency: Concurrency }
   | { tag: 'mapField'; arrayField: string; elementField: string; op: Op; concurrency: Concurrency; renameTo?: string }
   | { tag: 'reconcile'; opts: ReconcileOpts }
-  | { tag: 'sink'; targets: string[] }
+  | { tag: 'sink'; targets: string[]; opts?: SinkOpts }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
   | { tag: 'catch'; try: Op; catch: Op }
