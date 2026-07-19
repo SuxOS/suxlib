@@ -25,8 +25,8 @@ export const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merg
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
 // into an unbounded retry storm or a huge fan-out.
-const MAX_LEAF_RETRIES = 5
-const MAX_MAP_CONCURRENCY = 32
+export const MAX_LEAF_RETRIES = 5
+export const MAX_MAP_CONCURRENCY = 32
 
 function shapeLabel(s: LeafShape): string {
   if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
