@@ -145,3 +145,11 @@ export const shrink: LeafFn = async (input, caps) => {
   const result = await pdfShrink(bytes, opts)
   return { handle: await putBytes(caps.store, result.bytes, 'application/pdf'), inputBytes: result.inputBytes, outputBytes: result.outputBytes, savedPct: result.savedPct }
 }
+
+// pageCount: Handle-based wrapper around pdfPageCount, following unzip/scrub's
+// bare-Handle-in pattern — resolves the input Handle and returns a bare
+// number, no Handle to put back.
+export const pageCount: LeafFn = async (input, caps) => {
+  const bytes = await resolve(caps.store, input as Handle)
+  return pdfPageCount(bytes)
+}

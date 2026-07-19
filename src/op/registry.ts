@@ -1,6 +1,6 @@
 import type { LeafFn } from './types.js'
 import { pack, unpack, unzip } from '../domain/archive.js'
-import { shrink } from '../domain/pdf.js'
+import { shrink, pageCount } from '../domain/pdf.js'
 import { redact, scrub } from '../domain/sanitize.js'
 import { convert } from '../domain/transform.js'
 import { extract, summarize } from '../domain/text.js'
@@ -23,7 +23,7 @@ import { wrapHandle, unwrapHandle, stampLeaf } from './reshape.js'
 // JSON op spec (src/op/spec.ts's buildOp), same class of bug CLAUDE.md
 // documents for fieldMerge/parseXml/canonicalize/op-run.ts's hydrate.
 export const LEAF_REGISTRY: Readonly<Record<string, LeafFn>> = Object.freeze(
-  Object.assign(Object.create(null), { pack, unpack, unzip, shrink, redact, scrub, convert, extract, summarize, wrapHandle, unwrapHandle, stamp: stampLeaf }),
+  Object.assign(Object.create(null), { pack, unpack, unzip, shrink, pageCount, redact, scrub, convert, extract, summarize, wrapHandle, unwrapHandle, stamp: stampLeaf }),
 )
 
 /**
@@ -58,6 +58,7 @@ export const LEAF_SHAPES: Readonly<Record<string, { input: LeafShape; output: Le
   unpack: { input: { object: { format: 'unknown', handle: 'handle' } }, output: { object: { entries: { arrayObject: { name: 'unknown', handle: 'handle', mtime: 'unknown' } }, skipped: 'unknown' } } },
   unzip: { input: 'handle', output: 'handle[]' },
   shrink: { input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } },
+  pageCount: { input: 'handle', output: 'unknown' },
   redact: { input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } },
   scrub: { input: 'handle', output: { object: { handle: 'handle' } } },
   convert: { input: { object: { handle: 'handle' } }, output: 'handle' },

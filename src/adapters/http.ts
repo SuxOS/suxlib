@@ -122,7 +122,7 @@ const routes: Route[] = [
     handle: async (rawBody) => {
       const body = rawBody as { format?: string; files?: Array<{ name: string; base64: string; mtime?: number }> }
       const format = (body.format ?? 'zip') as ArchiveFormat
-      if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, or gzip'))
+      if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, gzip, or tar.gz'))
       if (!Array.isArray(body.files) || !body.files.length) return errorResponse(new Error('`files` array required'))
       const entries = body.files.map((f) => ({ name: f.name, data: b64ToBytes(f.base64), mtime: f.mtime }))
       const out = archiveCreate(format, entries)
@@ -136,7 +136,7 @@ const routes: Route[] = [
       const body = rawBody as { format?: string; base64?: string }
       if (typeof body.base64 !== 'string' || !body.base64) return errorResponse(new Error('`base64` required'))
       const format = (body.format ?? 'zip') as ArchiveFormat
-      if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, or gzip'))
+      if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, gzip, or tar.gz'))
       const { entries, skipped } = archiveExtract(format, b64ToBytes(body.base64))
       return json({
         entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, mtime: e.mtime, base64: bytesToB64(e.data) })),

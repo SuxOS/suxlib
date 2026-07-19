@@ -72,6 +72,15 @@ describe('http adapter', () => {
     expect(extracted.entries[0].mtime).toBe(mtime)
   })
 
+  it('POST /archive/create + /archive/extract: happy-path round trip for tar.gz', async () => {
+    const createRes = await post('archive/create', { format: 'tar.gz', files: [{ name: 'a.txt', base64: b64('hello') }] })
+    expect(createRes.status).toBe(200)
+    const created = (await createRes.json()) as { base64: string }
+    const extractRes = await post('archive/extract', { format: 'tar.gz', base64: created.base64 })
+    const extracted = (await extractRes.json()) as { entries: Array<{ name: string; text?: string }> }
+    expect(extracted.entries[0]).toMatchObject({ name: 'a.txt', text: 'hello' })
+  })
+
   it('POST /archive/create: duplicate entry names surface a clean 400, not a 500', async () => {
     const res = await post('archive/create', { format: 'zip', files: [{ name: 'dup.txt', base64: b64('1') }, { name: 'dup.txt', base64: b64('2') }] })
     expect(res.status).toBe(400)

@@ -31,18 +31,18 @@ program.name('suxlib-fileops').description('Shared file-ops CLI: archive, saniti
 
 // ---------- archive ----------
 
-const archiveCmd = program.command('archive').description('Create or extract zip/tar/gzip archives')
+const archiveCmd = program.command('archive').description('Create or extract zip/tar/gzip/tar.gz archives')
 
 archiveCmd
   .command('create')
   .description('Pack one or more files into an archive')
   .argument('<files...>', 'files to pack')
   .requiredOption('-o, --output <path>', 'output archive path')
-  .option('-f, --format <format>', 'zip | tar | gzip (gzip supports exactly one input file)', 'zip')
+  .option('-f, --format <format>', 'zip | tar | gzip | tar.gz (gzip supports exactly one input file)', 'zip')
   .option('-m, --mtime <epoch-ms>', "override every packed file's mtime (default: each input file's own filesystem mtime)")
   .action((files: string[], opts: { output: string; format: string; mtime?: string }) => {
     const format = opts.format as ArchiveFormat
-    if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, or gzip (got '${format}')`)
+    if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, gzip, or tar.gz (got '${format}')`)
     let mtimeOverride: number | undefined
     if (opts.mtime !== undefined) {
       mtimeOverride = Number(opts.mtime)
@@ -59,7 +59,7 @@ archiveCmd
   .description("Extract an archive's entries to a directory")
   .argument('<archive>', 'archive file to extract')
   .requiredOption('-o, --output <dir>', 'output directory')
-  .option('-f, --format <format>', 'zip | tar | gzip (default: inferred from extension)')
+  .option('-f, --format <format>', 'zip | tar | gzip | tar.gz (default: inferred from extension)')
   .action((archivePath: string, opts: { output: string; format?: string }) => {
     const format = (opts.format as ArchiveFormat) ?? inferArchiveFormat(archivePath)
     const bytes = new Uint8Array(readFileSync(archivePath))
@@ -72,6 +72,7 @@ archiveCmd
 
 function inferArchiveFormat(path: string): ArchiveFormat {
   if (path.endsWith('.zip')) return 'zip'
+  if (path.endsWith('.tar.gz') || path.endsWith('.tgz')) return 'tar.gz'
   if (path.endsWith('.tar')) return 'tar'
   if (path.endsWith('.gz') || path.endsWith('.gzip')) return 'gzip'
   throw new Error(`Cannot infer archive format from '${path}'. Pass --format explicitly.`)

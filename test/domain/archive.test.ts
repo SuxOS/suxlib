@@ -305,13 +305,35 @@ test('pack honors an explicit per-file mtime for the gzip format (threaded throu
 })
 
 test('archiveCreate/archiveExtract dispatch by format, and ARCHIVE_MIME covers every format', () => {
-  for (const format of ['zip', 'tar'] as const) {
+  for (const format of ['zip', 'tar', 'tar.gz'] as const) {
     const packed = archiveCreate(format, [{ name: 'x', data: strToU8('X') }])
     expect(archiveExtract(format, packed).entries[0].text).toBe('X')
     expect(ARCHIVE_MIME[format]).toBeTruthy()
   }
   const gz = archiveCreate('gzip', [{ name: 'x', data: strToU8('X') }])
   expect(archiveExtract('gzip', gz).entries[0].text).toBe('X')
+})
+
+test('tar.gz round-trips multiple files through gzipCreate(tarCreate(files))', () => {
+  const files = [
+    { name: 'a.txt', data: strToU8('AAA'), mtime: 12345000 },
+    { name: 'b.txt', data: strToU8('BBB'), mtime: 67890000 },
+  ]
+  const packed = archiveCreate('tar.gz', files)
+  expect(packed).toEqual(gzipCreate(tarCreate(files)))
+  const { entries } = archiveExtract('tar.gz', packed)
+  expect(entries.map((e) => [e.name, e.text, e.mtime])).toEqual([
+    ['a.txt', 'AAA', 12345000],
+    ['b.txt', 'BBB', 67890000],
+  ])
+})
+
+test('archiveExtract surfaces tarExtract\'s skipped info for tar.gz too, not just plain tar', () => {
+  const tarWithSymlink = buildRawTarEntry('evil-link', '2')
+  const gz = gzipCreate(tarWithSymlink)
+  const result = archiveExtract('tar.gz', gz)
+  expect(result.entries).toEqual([])
+  expect(result.skipped).toEqual([{ name: 'evil-link', typeflag: '2' }])
 })
 
 const BLOCK = 512
