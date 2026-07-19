@@ -211,6 +211,21 @@ describe('mcp adapter', () => {
     expect(new TextDecoder().decode(unzipped['a.txt'])).toBe('hello')
   })
 
+  it('run_pipeline: a parallel spec reaches buildOp through the MCP tool schema (not silently stripped), fanning one input into N branches (#289)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: { tag: 'parallel', ops: [{ tag: 'leaf', name: 'stamp' }, { tag: 'leaf', name: 'stamp' }] },
+        input: { $handle: true, base64: bytesToB64(new TextEncoder().encode('hello')), type: 'text/plain' },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as Array<{ base64: string }>
+    expect(body).toHaveLength(2)
+    expect(atob(body[0].base64)).toBe('hello')
+    expect(atob(body[1].base64)).toBe('hello')
+  })
+
   it('run_pipeline: a reconcile spec reaches buildOp through the MCP tool schema (not silently stripped)', async () => {
     const input = [
       { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"x":1}')), type: 'application/json' },

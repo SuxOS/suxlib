@@ -1,7 +1,7 @@
 # @suxos/lib
 
 SuxOS's shared, dependency-light **pure core + adapters** library — the home of the
-**op engine** (`op`/`map`/`mapField`/`reconcile`/`pipe`/`sink`/`ask`/`catch`, the
+**op engine** (`op`/`map`/`mapField`/`parallel`/`reconcile`/`pipe`/`sink`/`ask`/`catch`, the
 `runInline` graduated runtime) and of `sux-fileops`'s absorbed domain logic
 (archive/pdf/sanitize/transform), exposed identically over CLI, HTTP, and MCP.
 
@@ -76,7 +76,7 @@ on) and only differs in how it reads input and shapes output:
 ### Composable pipelines: `POST /op/run` and the `run_pipeline` MCP tool
 
 Beyond one-shot single-leaf calls, all three adapters also expose the op engine
-itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask', ... }`
+itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'parallel' | 'sink' | 'reconcile' | 'catch' | 'ask', ... }`
 spec (`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`'s
 `LEAF_REGISTRY` (`pack`/`unpack`/`unzip`/`shrink`/`pageCount`/`redact`/`scrub`/
 `convert`/`extract`/`summarize`/`wrapHandle`/`unwrapHandle`/`stamp`), which gets built into a
@@ -87,7 +87,13 @@ reattaching the rest of each element untouched and optionally renaming the array
 itself — e.g. `unpack -> mapField(arrayField: 'entries', elementField: 'handle',
 renameTo: 'files') -> pack` transforms every archive entry's Handle in between while
 bridging `unpack`'s `entries` output into `pack`'s `files` input, something `map` alone
-can't do since it only replaces a whole array element. A `sink` step names its
+can't do since it only replaces a whole array element. A `parallel` step fans one
+input into N arbitrary op subtrees concurrently, collecting their results into an
+array in declared order — e.g. `pipe(parallel(transformA, transformB, transformC),
+reconcile({ mode: 'faithful-union' }))` transforms one document three different ways
+and merges the results, something neither `map` (one-to-one over an array's elements)
+nor `sink.fanout` (one input to N *sink targets*, not arbitrary op subtrees) can
+express. A `sink` step names its
 target(s) by string, resolved against `Caps.sinks`/`OpRunOpts.sinks` at run time, and a
 `reconcile` step needs only `caps.store`, which every adapter call already supplies —
 neither needs a live capability inside the spec itself, so both are spec-expressible.

@@ -73,6 +73,7 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
     concurrency: z.number().int().min(1).max(MAX_MAP_CONCURRENCY),
     renameTo: z.string().optional(),
   }),
+  z.object({ tag: z.literal('parallel'), ops: z.array(opSpecSchema).min(1) }),
   z.object({
     tag: z.literal('sink'),
     // A bare name falls back to the sink spec's own `opts`; a `{ name, opts }`

@@ -76,6 +76,20 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         const { [node.arrayField]: _dropped, ...rest } = obj
         return { ...rest, [node.renameTo ?? node.arrayField]: out }
       })
+    case 'parallel':
+      return traced('parallel', undefined, path, caps, gOpts, async () => {
+        const out = new Array(node.ops.length)
+        // Promise.allSettled, same reasoning as 'map'/'sink' above: each
+        // branch is a full Op subtree over the *same* input, so a faster
+        // sibling branch's own node-exit trace must not race ahead of a
+        // slower one settling.
+        const results = await Promise.allSettled(node.ops.map(async (branch, i) => {
+          out[i] = await runInline(branch, input, caps, gOpts, childPath(path, i))
+        }))
+        const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+        if (failed) throw failed.reason
+        return out
+      })
     case 'reconcile':
       return traced('reconcile', undefined, path, caps, gOpts, () => runReconcile(node.opts, input, caps.store))
     case 'sink':

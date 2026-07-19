@@ -309,6 +309,42 @@ test('buildOp\'s map-boundary shape check allows unzip\'s `handle[]` feeding map
   expect(() => buildOp(spec)).not.toThrow()
 })
 
+test('buildOp builds a working parallel node feeding straight into reconcile (#289)', async () => {
+  const { store, ...rest } = caps()
+  const handle = await putBytes(store, new TextEncoder().encode('hello'), 'text/plain')
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'parallel', ops: [{ tag: 'leaf', name: 'stamp' }, { tag: 'leaf', name: 'stamp' }] },
+      { tag: 'reconcile', opts: { mode: 'last-write-wins' } },
+    ],
+  }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, handle, { store, ...rest })
+  expect(result).toMatchObject({ sha256: handle.sha256 })
+})
+
+test('buildOp catches a shape mismatch at a parallel node\'s own boundary (#289): every branch producing a bare `handle` makes the node `handle[]`, which mismatches a downstream leaf wanting a bare `handle`', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'parallel', ops: [{ tag: 'leaf', name: 'stamp' }, { tag: 'leaf', name: 'stamp' }] },
+      { tag: 'leaf', name: 'scrub' },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("scrub"\) expects handle input, but step 0 \("parallel"\) produces handle\[\]/)
+})
+
+test('validateOpSpec requires a non-empty `ops` array for a parallel spec and still descends into whatever ops it does have', () => {
+  expect(validateOpSpec({ tag: 'parallel', ops: [] } as unknown as OpSpec).some((e) => /non-empty `ops`/.test(e.message))).toBe(true)
+  const errors = validateOpSpec({ tag: 'parallel', ops: [{ tag: 'leaf', name: 'nope-not-a-leaf' }] } as OpSpec)
+  expect(errors.some((e) => /unknown leaf "nope-not-a-leaf"/.test(e.message))).toBe(true)
+})
+
+test('buildOp rejects a parallel spec with an empty `ops` array', () => {
+  expect(() => buildOp({ tag: 'parallel', ops: [] } as unknown as OpSpec)).toThrow(/non-empty `ops`/)
+})
+
 test('buildOp allows a pipe step next to a host-registered extraLeaves leaf, treating its undeclared shape as compatible with anything', async () => {
   // `shout` has no LEAF_SHAPES entry (only built-in registry leaves do), so
   // its output reads as 'unknown' and is permissively compatible with

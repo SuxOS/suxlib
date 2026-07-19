@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
-import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
+import { op, pipe, map, mapField, parallel, reconcile, sink, catchOp } from '../../src/op/combinators.js'
 import { fixed } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
@@ -101,4 +101,42 @@ test('runInline propagates the catch branch\'s own error when the fallback also 
     op('boom2', async () => { throw new Error('fallback failed too') }, { kind: 'pure' }),
   )
   await expect(runInline(tree, 5, caps)).rejects.toThrow('fallback failed too')
+})
+
+test('runInline runs a parallel node\'s branches over the same input, collecting results in declared order (#289)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = parallel(
+    op('double', async (n: number) => n * 2, { kind: 'pure' }),
+    op('square', async (n: number) => n * n, { kind: 'pure' }),
+    op('negate', async (n: number) => -n, { kind: 'pure' }),
+  )
+  const result = await runInline(tree, 5, caps)
+  expect(result).toEqual([10, 25, -5])
+})
+
+test('runInline feeds a parallel node\'s results straight into reconcile (#289)', async () => {
+  const store = new MemoryStore()
+  const caps: any = { store, llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = pipe(
+    parallel(
+      op('a', async (w: string) => putText(store, `${w}-a`), { kind: 'effect' }),
+      op('b', async (w: string) => putText(store, `${w}-b`), { kind: 'effect' }),
+    ),
+    reconcile({ mode: 'faithful-union' }),
+  )
+  const result = await runInline(tree, 'word', caps)
+  const text = await resolveText(store, result)
+  expect(text).toContain('word-a')
+  expect(text).toContain('word-b')
+})
+
+test('runInline lets every parallel branch settle before rejecting on the first failure', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let slowRan = false
+  const tree = parallel(
+    op('fast-fail', async () => { throw new Error('boom') }, { kind: 'pure' }),
+    op('slow-ok', async (n: number) => { await new Promise((r) => setTimeout(r, 5)); slowRan = true; return n }, { kind: 'pure' }),
+  )
+  await expect(runInline(tree, 1, caps)).rejects.toThrow('boom')
+  expect(slowRan).toBe(true)
 })
