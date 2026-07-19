@@ -88,6 +88,25 @@ describe('extractArchiveTo (CLI filesystem extract path)', () => {
   })
 })
 
+describe('cli allowCommands subset (real CLI entry point)', () => {
+  it('blocks a command outside the allowed subset and leaves an allowed one working', async () => {
+    const work = tmpDir()
+    const inPath = join(work, 'in.txt')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(inPath, 'contact me at a@b.com')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'archive', 'create', '-o', join(work, 'out.zip'), inPath], {}, ['sanitize'])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/unknown command 'archive'/))
+    process.exitCode = 0
+
+    await main(['node', 'suxlib-fileops', 'sanitize', 'text', inPath], {}, ['sanitize'])
+    expect(process.exitCode).toBe(0)
+    errSpy.mockRestore()
+  })
+})
+
 describe('cli `sanitize text` (real CLI entry point)', () => {
   it('rejects an invalid --types value instead of silently redacting nothing', async () => {
     const work = tmpDir()

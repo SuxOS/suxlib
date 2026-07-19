@@ -52,7 +52,12 @@ function errorResponse(e: unknown, status = 400): Response {
 // opRunLeaves: host-registered LeafFns merged onto LEAF_REGISTRY (see
 // op-run.ts's OpRunOpts doc), so a spec's `leaf.name` can resolve against
 // logic this library never shipped.
-export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn> }
+//
+// allowRoutes: restrict routing to these paths (e.g. "/transform",
+// "/sanitize/text") — every route is reachable when omitted. Mirrors
+// mcp.ts's `RegisterFileopsToolsOptions.allow`, so a host embedding this
+// Worker can expose a chosen subset without forking the route table.
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn>; allowRoutes?: string[] }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -228,10 +233,12 @@ const routes: Route[] = [
 export default {
   async fetch(request: Request, env: Env = {}): Promise<Response> {
     const url = new URL(request.url)
+    const allowRoutes = env.allowRoutes ? new Set(env.allowRoutes) : null
+    const activeRoutes = allowRoutes ? routes.filter((r) => allowRoutes.has(r.path)) : routes
     if (request.method === 'GET' && url.pathname === '/') {
-      return json({ ok: true, routes: routes.map((r) => `${r.method} ${r.path}`) })
+      return json({ ok: true, routes: activeRoutes.map((r) => `${r.method} ${r.path}`) })
     }
-    const route = routes.find((r) => r.method === request.method && r.path === url.pathname)
+    const route = activeRoutes.find((r) => r.method === request.method && r.path === url.pathname)
     if (!route) return json({ error: 'not found' }, 404)
     if (!isAuthorized(request, env)) return unauthorizedResponse()
     // Fast path: a declared Content-Length over the cap is rejected without

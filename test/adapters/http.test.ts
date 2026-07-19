@@ -29,6 +29,19 @@ describe('http adapter', () => {
     expect(res.status).toBe(404)
   })
 
+  it('env.allowRoutes restricts both GET / listing and routing to the given subset', async () => {
+    const env: Env = { allowRoutes: ['/transform'] }
+    const list = await handler.fetch(new Request('https://fileops.example/'), env)
+    const body = (await list.json()) as { routes: string[] }
+    expect(body.routes).toEqual(['POST /transform'])
+
+    const allowed = await post('transform', { data: '{"a":1}', to: 'yaml' }, {}, env)
+    expect(allowed.status).toBe(200)
+
+    const blocked = await post('sanitize/text', { text: 'a@b.com' }, {}, env)
+    expect(blocked.status).toBe(404)
+  })
+
   it('POST /transform: happy path json -> yaml', async () => {
     const res = await post('transform', { data: '{"a":1}', to: 'yaml' })
     expect(res.status).toBe(200)
