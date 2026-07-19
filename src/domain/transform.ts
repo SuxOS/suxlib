@@ -414,26 +414,36 @@ function collapse(node: Record<string, unknown>): unknown {
   return node
 }
 
+// All four marker attribute names below carry a literal `:` -- a character
+// xmlName() (see above) always escapes to `_3a_` rather than passing through,
+// since `:` fails xmlName's `[A-Za-z0-9.-]` safe-charset test. That makes
+// `sux:...` unproducible as the *output* of xmlName(anyUserKey), so a real
+// JSON attribute key (however it's spelled) can never sanitize to the same
+// string as one of these markers and be silently mistaken for the internal
+// control channel by parseXml. See issue #291 -- plain-word marker names
+// (e.g. bare 'single-array') collided with a same-named real user attribute
+// key, corrupting the round-trip.
+
 // Self-closing marker attribute `toXml` emits for a JSON key whose value is an
 // empty array — without it, `obj.map(...).join('')` over an empty array
 // produces '', and the key vanishes from the output entirely instead of
 // round-tripping (see toYaml's `[]` handling, which has no such gap since
 // yamlScalar emits an explicit '[]' for empty arrays). `parseXml` looks for
 // this same attribute to decode a self-closed tag back into [] rather than ''.
-const EMPTY_ARRAY_ATTR = 'empty-array'
+const EMPTY_ARRAY_ATTR = 'sux:empty-array'
 
 // Marker attribute `toXml` emits on the sole element of a length-1 JSON array —
 // without it, a 1-element array renders as exactly one sibling element, which is
 // byte-identical to a plain scalar field of the same tag name, so parseXml (which
 // only promotes a key to an array once it sees the tag repeated) silently turns
 // the round-tripped value back into a scalar. See issue #68.
-const SINGLE_ARRAY_ATTR = 'single-array'
+const SINGLE_ARRAY_ATTR = 'sux:single-array'
 
 // Marker attribute `toXml` emits for a JSON key whose value is null/undefined —
 // without it, a null field and an empty-string scalar field both render as the
 // same self-closing `<tag/>`, so parseXml can't tell them apart and always
 // decodes the tag back to ''. See issue #79.
-const NULL_VALUE_ATTR = 'null-value'
+const NULL_VALUE_ATTR = 'sux:null-value'
 
 // Marker attribute `toXml` emits on an array element that is itself an array
 // (array-of-arrays) — without it, `{a: [[1,2],[3,4]]}` recurses into the inner
@@ -442,7 +452,7 @@ const NULL_VALUE_ATTR = 'null-value'
 // element's children all use ARRAY_ITEM_TAG rather than the outer array's own
 // tag, so parseXml can rebuild the inner array without it being mistaken for
 // more siblings of the outer array. See issue #105.
-const NESTED_ARRAY_ATTR = 'nested-array'
+const NESTED_ARRAY_ATTR = 'sux:nested-array'
 
 // Fixed child tag `wrapNestedArray` renders a nested array's own elements
 // under, keeping them distinct from the outer array's repeated tag name.

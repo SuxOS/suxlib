@@ -471,3 +471,32 @@ test('a throw from post-success bookkeeping (e.g. breaker onSuccess -> onEvent) 
   expect(releases).toEqual([true])
   expect(breaker.state).toBe('closed')
 })
+
+test('a throw from post-success bookkeeping does not permanently strand the half-open probe reservation (#290)', async () => {
+  const concurrency = { async acquire() {}, release() {} }
+  const breaker = circuitBreaker({
+    failureThreshold: 1,
+    cooldownMs: 100,
+    halfOpenSuccesses: 1,
+    onEvent: (e) => { if (e.kind === 'breaker-close') throw new Error('host onEvent boom') },
+  })
+  breaker.onFailure(0) // -> open
+  breaker.allow(100)   // cooldown elapsed -> half-open
+  const fn = async () => 'ok'
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(100), { circuitBreaker: breaker, concurrency }, noSleep),
+  ).rejects.toThrow('host onEvent boom')
+  expect(breaker.state).toBe('closed')
+  // Drive the breaker open and back into half-open again -- if the earlier
+  // throw had skipped releaseHalfOpenProbe(), reserveHalfOpenProbe() would
+  // return false forever and every future call would throw CircuitOpenError
+  // immediately, even once cooldown has legitimately elapsed.
+  breaker.onFailure(200) // -> open
+  breaker.allow(300)     // cooldown elapsed -> half-open
+  // If the probe reservation were stranded, this would throw CircuitOpenError
+  // (from reserveHalfOpenProbe() returning false) before fn ever runs, instead
+  // of the host onEvent's own throw from the *second* legitimate close.
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(300), { circuitBreaker: breaker, concurrency }, noSleep),
+  ).rejects.toThrow('host onEvent boom')
+})
