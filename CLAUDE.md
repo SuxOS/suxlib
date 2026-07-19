@@ -98,6 +98,14 @@ There is no linter in this repo. Run both locally before pushing.
   `shapeCompatible`/`stepShape` implementation that actually landed from a
   different sibling branch) — verify a follow-up issue's cited names/lines
   against current code rather than trusting them verbatim.
+- A narrower-scoped issue can also be blocked on a *sibling* issue whose fix
+  is sitting in an **open, unmerged** PR — not just on an issue that's still
+  entirely unbuilt. #174 ("extend #172's guard to cover extraLeaves") assumed
+  #172's own guard already existed on `main`; it didn't yet (only in open PR
+  #173's narrower fix). Check `gh pr list --state open` for a PR closing the
+  issue your target depends on, not just `gh issue view`/`main`, before
+  concluding a dependency is unbuilt — a stale *closed* branch (the bullet
+  above) isn't the only prior-attempt shape to check for.
 
 ## Consumers
 
