@@ -597,8 +597,8 @@ test('tarExtract decodes a GNU base-256 two\'s-complement negative mtime field i
   expect(entries[0].mtime).toBe(-86400 * 1000)
 })
 
-/** Build a PAX 'g' global extended header followed by two regular-file entries, mirroring how a GNU tar/bsdtar producer emits archive-wide defaults once rather than repeating them per-entry. */
-function buildGlobalPaxTar(paxBody: Uint8Array, files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
+/** Build one or more PAX 'g' global extended headers followed by regular-file entries, mirroring how a GNU tar/bsdtar producer emits archive-wide defaults once (or updates them) rather than repeating them per-entry. */
+function buildGlobalPaxTar(paxBodies: Uint8Array | Uint8Array[], files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
   function block(name: string, size: number, tflag: string): Uint8Array {
     const h = new Uint8Array(BLOCK)
     h.set(strToU8(name.slice(0, 100)), 0)
@@ -615,7 +615,10 @@ function buildGlobalPaxTar(paxBody: Uint8Array, files: Array<{ name: string; dat
     b.set(bytes, 0)
     return b
   }
-  const parts: Uint8Array[] = [block('PaxHeader', paxBody.length, 'g'), bodyBlock(paxBody)]
+  const parts: Uint8Array[] = []
+  for (const paxBody of Array.isArray(paxBodies) ? paxBodies : [paxBodies]) {
+    parts.push(block('PaxHeader', paxBody.length, 'g'), bodyBlock(paxBody))
+  }
   for (const f of files) {
     parts.push(block(f.name, f.data.length, '0'), bodyBlock(f.data))
   }
@@ -644,6 +647,18 @@ test('tarExtract applies a PAX "g" global extended header\'s "path" key to every
   expect(entries[0].text).toBe('first')
   expect(entries[1].name).toBe(globalPath)
   expect(entries[1].text).toBe('second')
+})
+
+test('tarExtract merges a second PAX "g" global header into the running defaults instead of replacing them', () => {
+  const globalPath = 'g/'.repeat(60) + 'deep/global.txt'
+  const firstPaxBody = strToU8(paxRecord('path', globalPath))
+  const secondPaxBody = strToU8(paxRecord('comment', 'unrelated'))
+  const packed = buildGlobalPaxTar([firstPaxBody, secondPaxBody], [{ name: 'a.txt', data: strToU8('first') }])
+  const { entries, skipped } = tarExtract(packed)
+  expect(skipped).toEqual([])
+  expect(entries.length).toBe(1)
+  expect(entries[0].name).toBe(globalPath)
+  expect(entries[0].text).toBe('first')
 })
 
 test('archiveCreate rejects gzip with more than one file', () => {
