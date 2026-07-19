@@ -303,7 +303,27 @@ There is no linter in this repo. Run both locally before pushing.
   cancellation test). Primitives below the checkpoint level (`tokenBucket`,
   `concurrency`/aimd, a leaf's own in-flight effect) are not signal-aware —
   matching the issue's own scoping, this stays a checkpoint-based scheme, not
-  a preemptive-kill one.
+  a preemptive-kill one. Update (#297): `tokenBucket.take`/`Concurrency.acquire`
+  (`src/control/token-bucket.ts`, `src/control/aimd.ts`) are now signal-aware
+  too, so a leaf queued behind a starved bucket or a full limiter can be
+  cancelled without waiting for a slot — same "checkpoint, not preemptive"
+  rule: once a slot is actually granted it's never revoked. `OpAbortError`/
+  `sleepOrAbort` moved to a new dependency-free `src/control/abort.ts` (re-
+  exported from `governor.ts` for backward compat) specifically so
+  token-bucket.ts/aimd.ts could throw/race the same error without an import
+  cycle back through governor.ts, which imports both — reach for that pattern
+  again (a tiny shared leaf module, not a re-export chain) any time a
+  primitive `governor.ts` builds needs to share an error type or helper with
+  `governor.ts` itself. `runGoverned`'s catch block now checks `err instanceof
+  OpAbortError` (after concurrency/probe cleanup, before breaker bookkeeping)
+  since these two primitives can now throw it from inside the try — without
+  that check it'd be misclassified as a leaf failure (breaker.onFailure,
+  a spurious retry-attempt event), the same class of bug #275's post-success
+  guard exists to prevent. Left un-threaded: `runInline`'s own `map`/
+  `mapField` item-level `node.concurrency.acquire()` calls (`src/runtime/
+  inline.ts:58,72`) — a different, unnamed limiter from `governor.ts`'s
+  per-leaf one, out of #297's stated scope, so a map item queued behind a
+  full fan-out limiter still can't be cancelled early.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than

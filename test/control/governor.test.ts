@@ -504,6 +504,37 @@ test('aborting during the backoff sleep rejects immediately, without waiting out
   await expect(run).rejects.toThrow(OpAbortError)
 })
 
+test('aborting while queued behind a starved token bucket rejects immediately (#297)', async () => {
+  let calls = 0
+  const fn = async () => { calls++; return 'ok' }
+  const bucket = tokenBucket({ capacity: 1, refillPerMs: 0, clock: { now: () => 0 } })
+  bucket.tryTake(1, 0) // drain it, so the leaf's own take() must wait
+  const controller = new AbortController()
+  const blockingSleep = () => new Promise<void>(() => {}) // never resolves on its own
+  const run = runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { tokenBucket: bucket }, { sleep: blockingSleep, signal: controller.signal })
+  await Promise.resolve()
+  controller.abort()
+  await expect(run).rejects.toThrow(OpAbortError)
+  expect(calls).toBe(0)
+})
+
+test('aborting while queued behind a full concurrency limiter rejects immediately, without polluting the breaker or emitting a retry-attempt event (#297)', async () => {
+  let calls = 0
+  const fn = async () => { calls++; return 'ok' }
+  const concurrency = fixed(1)
+  await concurrency.acquire() // hold the only slot so the leaf's own acquire() must wait
+  const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
+  const events: any[] = []
+  const controller = new AbortController()
+  const run = runGoverned('leaf', { kind: 'effect', retries: 5 }, fn, null, caps(), { circuitBreaker: breaker, concurrency }, { rand: () => 0, onEvent: (e) => events.push(e), signal: controller.signal })
+  await Promise.resolve()
+  controller.abort()
+  await expect(run).rejects.toThrow(OpAbortError)
+  expect(calls).toBe(0)
+  expect(events).toEqual([])           // no spurious retry-attempt event
+  expect(breaker.state).toBe('closed') // abort must not be misclassified as a leaf failure
+})
+
 test('a throw from post-success bookkeeping does not permanently strand the half-open probe reservation (#290)', async () => {
   const concurrency = { async acquire() {}, release() {} }
   const breaker = circuitBreaker({

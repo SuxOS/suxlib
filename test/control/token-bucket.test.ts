@@ -1,5 +1,6 @@
 import { test, expect } from 'vitest'
 import { tokenBucket } from '../../src/control/token-bucket.js'
+import { OpAbortError } from '../../src/control/abort.js'
 
 test('tryTake consumes tokens up to capacity and refuses beyond it', () => {
   const b = tokenBucket({ capacity: 10, refillPerMs: 0, clock: { now: () => 0 } })
@@ -85,4 +86,25 @@ test('take() uses an injected sleep instead of a real setTimeout wait', async ()
   const sleep = async (ms: number) => { sleepCalls.push(ms); simulatedNow += ms }
   await b.take(3, clock, sleep)
   expect(sleepCalls.length).toBeGreaterThan(0)
+})
+
+test('take() rejects immediately with OpAbortError on an already-aborted signal, without waiting (#297)', async () => {
+  const clock = { now: () => 0 }
+  const b = tokenBucket({ capacity: 5, refillPerMs: 0, clock })
+  b.tryTake(5, 0) // drain it, so a normal take() would have to wait
+  const controller = new AbortController()
+  controller.abort()
+  await expect(b.take(3, clock, undefined, controller.signal)).rejects.toThrow(OpAbortError)
+})
+
+test('take() blocked on a starved bucket rejects on abort instead of waiting out the full delay (#297)', async () => {
+  const clock = { now: () => 0 } // never refills -- take() would otherwise wait forever
+  const b = tokenBucket({ capacity: 5, refillPerMs: 0, clock })
+  b.tryTake(5, 0) // drain it
+  const controller = new AbortController()
+  const blockingSleep = () => new Promise<void>(() => {}) // never resolves on its own
+  const run = b.take(3, clock, blockingSleep, controller.signal)
+  await Promise.resolve() // let take() reach its first wait
+  controller.abort()
+  await expect(run).rejects.toThrow(OpAbortError)
 })
