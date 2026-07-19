@@ -121,7 +121,17 @@ There is no linter in this repo. Run both locally before pushing.
   the same change (folding #242's budget guard into #241's work, fixing the
   trace regression as part of #249's work) — that closes the follow-up issue
   as a side effect instead of every future batch re-claiming and re-dropping
-  #242/#251 as a no-op forever.
+  #242/#251 as a no-op forever. Update: #247 landed this way, but via a
+  *different* PR than the one this note originally named — #249 itself was
+  closed unmerged; #281 ("feat: per-file --mtime for CLI archive create;
+  gate sink writes through runGoverned") is the PR that actually fixed the
+  trace regression and merged, closing #247 (and #246). #251 (per-target
+  sink.fanout opts) built cleanly on top once #247 landed. #234/#241 (the
+  `trace: 'full'` snapshotValue budget guard, #242's prerequisite) were
+  still open/stuck as of this note — don't assume a prerequisite's PR number
+  stays fixed once you go looking; re-check via `gh pr list --search
+  "<issue>" --state all` rather than trusting a previously-recorded PR
+  number.
 
 ## Consumers
 
