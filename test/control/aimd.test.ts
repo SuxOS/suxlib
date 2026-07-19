@@ -35,3 +35,10 @@ test('fixed(n) clamps n <= 0 to 1 instead of deadlocking forever', async () => {
   await c2.acquire()
   c2.release(true)
 })
+test('aimd clamps min <= 0 to 1 instead of decaying to 0 and deadlocking forever', async () => {
+  const c = aimd({ start: 1, min: 0 })
+  await c.acquire(); c.release(false) // failure -> limit would floor to 0 without the clamp
+  expect(c.limit).toBe(1)
+  await c.acquire() // must still be admitted, not queued forever
+  c.release(true)
+})
