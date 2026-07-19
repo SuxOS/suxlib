@@ -183,6 +183,26 @@ test('buildOp threads a sink spec\'s opts.retries into a retried write via caps.
   expect(calls).toBe(2)
 })
 
+test('buildOp rejects a sink spec with an invalid per-target `opts.retries` (#251)', () => {
+  expect(() => buildOp({ tag: 'sink', targets: [{ name: 'out', opts: { retries: -1 } }] })).toThrow(/targets/)
+  expect(() => buildOp({ tag: 'sink', targets: [{ name: '' }] })).toThrow(/targets/)
+})
+
+test('buildOp threads a per-target sink opts.retries, overriding the fanout-level default (#251)', async () => {
+  let logCalls = 0; let vaultCalls = 0
+  const spec: OpSpec = { tag: 'sink', targets: ['log', { name: 'vault', opts: { retries: 0 } }], opts: { retries: 3 } }
+  const tree = buildOp(spec)
+  await expect(runInline(tree, 'value', {
+    store: caps().store, llm: {} as any, clock: { now: () => 0 },
+    sinks: {
+      log: { name: 'log', write: async (v: any) => { logCalls++; if (logCalls < 3) throw new Error('flaky'); return v } },
+      vault: { name: 'vault', write: async () => { vaultCalls++; throw new Error('flaky') } },
+    },
+  }, { sleep: async () => {}, rand: () => 0 })).rejects.toThrow('flaky')
+  expect(logCalls).toBe(3)
+  expect(vaultCalls).toBe(1)
+})
+
 test('buildOp rejects an empty pipe', () => {
   expect(() => buildOp({ tag: 'pipe', steps: [] })).toThrow(/non-empty `steps`/)
 })

@@ -367,6 +367,31 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await flakyServer.close()
   })
 
+  it('run_pipeline: a sink spec\'s per-target `{ name, opts }` pair reaches buildOp through the MCP tool schema (not silently stripped), overriding the fanout-level opts.retries (#251)', async () => {
+    let logCalls = 0; let vaultCalls = 0
+    const fanoutServer = new McpServer({ name: 'test-fanout-sink', version: '0.0.0' })
+    registerFileopsTools(fanoutServer, {
+      opRunSinks: {
+        log: { name: 'log', write: async (v) => { logCalls++; if (logCalls < 3) throw new Error('flaky'); return v } },
+        vault: { name: 'vault', write: async () => { vaultCalls++; throw new Error('flaky') } },
+      },
+    })
+    const fanoutClient = new Client({ name: 'test-fanout-sink-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([fanoutServer.connect(serverTransport), fanoutClient.connect(clientTransport)])
+
+    const result = await fanoutClient.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'sink', targets: ['log', { name: 'vault', opts: { retries: 0 } }], opts: { retries: 3 } }, input: { a: 1 } },
+    })
+    expect(result.isError).toBeTruthy()
+    expect(logCalls).toBe(3)
+    expect(vaultCalls).toBe(1)
+
+    await fanoutClient.close()
+    await fanoutServer.close()
+  })
+
   it('run_pipeline: opts.opRunLlm wires a real Llm capability through to the summarize leaf', async () => {
     const llmServer = new McpServer({ name: 'test-llm', version: '0.0.0' })
     registerFileopsTools(llmServer, { opRunLlm: { markdownFromPdf: async () => { throw new Error('unused') }, summarize: async (text) => `summary of ${text}` } })

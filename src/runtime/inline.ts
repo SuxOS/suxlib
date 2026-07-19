@@ -79,17 +79,30 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       // guarantees every target's node-exit has landed before this node decides
       // success/failure.
       return traced('sink', undefined, path, caps, gOpts, async () => {
-        const results = await Promise.allSettled(node.targets.map(t => traced('sink-target', t, childPath(path, t), caps, gOpts, async () => {
-          const s = caps.sinks[t]
-          if (!s) throw new Error(`unknown sink "${t}" (registered: ${Object.keys(caps.sinks).join(', ')})`)
-          // Each write runs through runGoverned exactly like an 'effect' leaf's
-          // fn -- retries/breaker/tokenBucket/concurrency -- keyed `sink:<target>`
-          // in caps.governors so a sink target's gating can't collide with a
-          // same-named leaf's own governor entry.
-          const governorName = `sink:${t}`
-          const opts = { kind: 'effect' as const, retries: node.opts?.retries, heavy: node.opts?.heavy, memo: node.opts?.memo }
-          return runGoverned(governorName, opts, (v, c) => s.write(v, c), input, caps, caps.governors?.[governorName], gOpts)
-        })))
+        const results = await Promise.allSettled(node.targets.map(t => {
+          // A bare string target falls back entirely to the fanout call's own
+          // `opts`; a `{ name, opts }` pair overrides per-field, per-target
+          // (#251) -- e.g. target 'vault' can opt out of the fanout's default
+          // retries by declaring its own `opts: { retries: 0 }`.
+          const name = typeof t === 'string' ? t : t.name
+          const targetOpts = typeof t === 'string' ? undefined : t.opts
+          return traced('sink-target', name, childPath(path, name), caps, gOpts, async () => {
+            const s = caps.sinks[name]
+            if (!s) throw new Error(`unknown sink "${name}" (registered: ${Object.keys(caps.sinks).join(', ')})`)
+            // Each write runs through runGoverned exactly like an 'effect' leaf's
+            // fn -- retries/breaker/tokenBucket/concurrency -- keyed `sink:<target>`
+            // in caps.governors so a sink target's gating can't collide with a
+            // same-named leaf's own governor entry.
+            const governorName = `sink:${name}`
+            const opts = {
+              kind: 'effect' as const,
+              retries: targetOpts?.retries ?? node.opts?.retries,
+              heavy: targetOpts?.heavy ?? node.opts?.heavy,
+              memo: targetOpts?.memo ?? node.opts?.memo,
+            }
+            return runGoverned(governorName, opts, (v, c) => s.write(v, c), input, caps, caps.governors?.[governorName], gOpts)
+          })
+        }))
         const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
         if (failed) throw failed.reason
         return input

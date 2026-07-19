@@ -37,6 +37,21 @@ test('runInline retries a flaky sink write per its own opts.retries (#247)', asy
   expect(calls).toBe(3)
 })
 
+test('runInline lets one sink.fanout target override the fanout-level opts.retries (#251)', async () => {
+  let logCalls = 0; let vaultCalls = 0
+  const caps: any = {
+    store: new MemoryStore(), llm: {}, clock: { now: () => 0 },
+    sinks: {
+      log: { name: 'log', write: async (v: any) => { logCalls++; if (logCalls < 3) throw new Error('flaky'); return v } },
+      vault: { name: 'vault', write: async (v: any) => { vaultCalls++; throw new Error('flaky') } },
+    },
+  }
+  const tree = sink.fanout([{ name: 'log' }, { name: 'vault', opts: { retries: 0 } }], { retries: 3 })
+  await expect(runInline(tree, 'value', caps, { sleep: async () => {}, rand: () => 0 })).rejects.toThrow('flaky')
+  expect(logCalls).toBe(3)
+  expect(vaultCalls).toBe(1)
+})
+
 test('runInline gates a sink target through caps.governors keyed "sink:<name>", separate from a same-named leaf\'s own governor (#247)', async () => {
   const sinkGovernor = createGovernor('sink:out', { circuitBreaker: { failureThreshold: 1, cooldownMs: 10_000, halfOpenSuccesses: 1 } })
   const leafGovernor = createGovernor('out', { circuitBreaker: { failureThreshold: 1, cooldownMs: 10_000, halfOpenSuccesses: 1 } })

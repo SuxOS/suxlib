@@ -6,12 +6,15 @@ import { fixed } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
 export type OpSpecSinkOpts = { retries?: number; heavy?: boolean; memo?: boolean }
+// Mirrors src/op/types.ts's SinkFanoutTarget -- a bare name falls back to the
+// sink spec's own `opts`, a `{ name, opts }` pair overrides per-field (#251).
+export type OpSpecSinkTarget = string | { name: string; opts?: OpSpecSinkOpts }
 export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
   | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: number; renameTo?: string }
-  | { tag: 'sink'; targets: string[]; opts?: OpSpecSinkOpts }
+  | { tag: 'sink'; targets: OpSpecSinkTarget[]; opts?: OpSpecSinkOpts }
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
@@ -185,6 +188,22 @@ export type OpSpecError = { path: string; message: string }
 
 const isBadFieldName = (f: unknown): boolean => typeof f !== 'string' || !f || f === '__proto__' || f === 'constructor' || f === 'prototype'
 
+// A sink target is either a bare non-empty name, or a `{ name, opts? }` pair
+// whose own opts.retries (if present) is range-checked the same way the
+// fanout-level opts.retries already is (#251) -- mirrored by buildOpNode's
+// sink case below, same one-source-of-truth tradeoff this file's other
+// buildOp/validateOpSpec pairs already accept (see collectSpecErrors's doc).
+const isValidSinkTarget = (t: unknown): boolean => {
+  if (typeof t === 'string') return !!t
+  if (!t || typeof t !== 'object' || Array.isArray(t)) return false
+  const o = t as { name?: unknown; opts?: unknown }
+  if (typeof o.name !== 'string' || !o.name) return false
+  if (o.opts === undefined) return true
+  if (typeof o.opts !== 'object' || o.opts === null || Array.isArray(o.opts)) return false
+  const r = (o.opts as OpSpecSinkOpts).retries
+  return r === undefined || (Number.isInteger(r) && r >= 0 && r <= MAX_LEAF_RETRIES)
+}
+
 /**
  * Validates a caller-supplied OpSpec against the same rules buildOp enforces
  * (leaf existence, retries/concurrency ranges, ask/reconcile/mapField field
@@ -287,8 +306,8 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       return
     }
     case 'sink': {
-      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
-        errors.push({ path, message: 'sink spec requires a non-empty `targets` array of non-empty strings' })
+      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
+        errors.push({ path, message: 'sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES })
       }
       const so = spec.opts?.retries
       if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
@@ -406,8 +425,8 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       return mapField(spec.arrayField, spec.elementField, buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency), renameTo: spec.renameTo })
     }
     case 'sink': {
-      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
-        throw new Error('sink spec requires a non-empty `targets` array of non-empty strings')
+      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
+        throw new Error('sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES)
       }
       const so = spec.opts?.retries
       if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {

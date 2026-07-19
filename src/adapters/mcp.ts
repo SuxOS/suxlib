@@ -73,7 +73,13 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
     concurrency: z.number().int().min(1).max(MAX_MAP_CONCURRENCY),
     renameTo: z.string().optional(),
   }),
-  z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1), opts: opSpecSinkOptsSchema }),
+  z.object({
+    tag: z.literal('sink'),
+    // A bare name falls back to the sink spec's own `opts`; a `{ name, opts }`
+    // pair overrides per-field (#251) -- mirrors src/op/spec.ts's OpSpecSinkTarget.
+    targets: z.array(z.union([z.string(), z.object({ name: z.string(), opts: opSpecSinkOptsSchema })])).min(1),
+    opts: opSpecSinkOptsSchema,
+  }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
   z.object({ tag: z.literal('catch'), try: opSpecSchema, catch: opSpecSchema }),
   z.object({ tag: z.literal('ask'), prompt: z.string(), timeout: z.string(), onTimeout: z.enum(['proceed', 'fail']) }),
