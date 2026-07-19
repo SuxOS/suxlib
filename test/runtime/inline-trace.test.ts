@@ -75,6 +75,34 @@ test('runInline traces mapField: item paths address the array index, not the ele
   expect(enters.find((e) => e.path === '0')).toMatchObject({ tag: 'leaf', name: 'double' })
 })
 
+test('runInline traces a map fanout: a fast-failing item does not race ahead of a slower sibling\'s own node-exit', async () => {
+  const tree = map(op('maybe-fail', async (n: number) => {
+    if (n === 1) throw new Error('item 1 failed')
+    await new Promise(resolve => setTimeout(resolve, 5))
+    return n * 2
+  }, { kind: 'pure' }), { concurrency: fixed(2) })
+  const trace: TraceEvent[] = []
+  await expect(runInline(tree, [0, 1], clockCaps(), { onTrace: (e) => trace.push(e) })).rejects.toThrow('item 1 failed')
+  const exits = trace.filter((e) => e.kind === 'node-exit')
+  expect(exits.find((e) => e.path === '0')).toMatchObject({ ok: true })
+  expect(exits.find((e) => e.path === '1')).toMatchObject({ ok: false, error: 'item 1 failed' })
+  expect(exits.find((e) => e.tag === 'map')).toMatchObject({ ok: false })
+})
+
+test('runInline traces a mapField fanout: a fast-failing item does not race ahead of a slower sibling\'s own node-exit', async () => {
+  const tree = mapField('entries', 'handle', op('maybe-fail', async (n: number) => {
+    if (n === 1) throw new Error('item 1 failed')
+    await new Promise(resolve => setTimeout(resolve, 5))
+    return n * 2
+  }, { kind: 'pure' }), { concurrency: fixed(2) })
+  const trace: TraceEvent[] = []
+  await expect(runInline(tree, { entries: [{ handle: 0 }, { handle: 1 }] }, clockCaps(), { onTrace: (e) => trace.push(e) })).rejects.toThrow('item 1 failed')
+  const exits = trace.filter((e) => e.kind === 'node-exit')
+  expect(exits.find((e) => e.path === '0')).toMatchObject({ ok: true })
+  expect(exits.find((e) => e.path === '1')).toMatchObject({ ok: false, error: 'item 1 failed' })
+  expect(exits.find((e) => e.tag === 'mapField')).toMatchObject({ ok: false })
+})
+
 test('runInline traces a catch node: the try branch\'s node-exit surfaces why the fallback fired', async () => {
   const tree = catchOp(
     op('boom', async () => { throw new Error('primary failed') }, { kind: 'pure' }),

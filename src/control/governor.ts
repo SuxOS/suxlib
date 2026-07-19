@@ -112,8 +112,11 @@ export async function runGoverned(
   const concurrency = gated ? (opts.heavy ? governor?.heavyConcurrency ?? governor?.concurrency : governor?.concurrency) : undefined
   // Computed once, outside the retry loop, so every retry attempt hands the fn
   // the same key -- letting a capability that dedupes on it (e.g. an idempotent
-  // HTTP POST) collapse retried attempts into a single side effect.
-  const idemKey = gated ? await idempotencyKey(name, input) : undefined
+  // HTTP POST) collapse retried attempts into a single side effect. Skipped
+  // entirely when there's nothing to dedupe (maxRetries === 0): the digest is
+  // a real crypto.subtle.digest call, not free, and a leaf/sink with no
+  // retries has no repeated attempt for a capability to collapse.
+  const idemKey = gated && maxRetries > 0 ? await idempotencyKey(name, input) : undefined
 
   for (let attempt = 0; ; attempt++) {
     let probeReserved = false

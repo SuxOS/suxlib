@@ -239,6 +239,13 @@ test('does not compute an idempotencyKey for pure leaves', async () => {
   expect(seenKey).toBeUndefined()
 })
 
+test('does not compute an idempotencyKey for an effect leaf with no retries -- nothing to dedupe', async () => {
+  let seenKey: string | undefined = 'not-called'
+  const fn = async (_input: any, _caps: any, idemKey?: string) => { seenKey = idemKey; return 'ok' }
+  await runGoverned('leaf', { kind: 'effect' }, fn, { a: 1 }, caps(), undefined, noSleep)
+  expect(seenKey).toBeUndefined()
+})
+
 test('gates an effect leaf through governor.concurrency, never exceeding its limit', async () => {
   const limiter = fixed(1)
   let inFlight = 0, maxInFlight = 0
