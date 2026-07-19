@@ -44,11 +44,18 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
     case 'map':
       return traced('map', undefined, path, caps, gOpts, async () => {
         const items: any[] = input; const out = new Array(items.length)
-        await Promise.all(items.map(async (it, i) => {
+        // Promise.allSettled, not Promise.all -- see the 'sink' case below for
+        // why: an item's own runInline call may still be mid-flight (e.g.
+        // gated through runGoverned's idempotencyKey digest) when a sibling
+        // item throws, and Promise.all would resolve/reject before that
+        // slower item's node-exit trace has landed.
+        const results = await Promise.allSettled(items.map(async (it, i) => {
           await node.concurrency.acquire()
           try { out[i] = await runInline(node.op, it, caps, gOpts, childPath(path, i)); node.concurrency.release(true) }
           catch (e) { node.concurrency.release(false); throw e }
         }))
+        const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+        if (failed) throw failed.reason
         return out
       })
     case 'mapField':
@@ -56,7 +63,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         const obj = input as Record<string, unknown>
         const items = obj[node.arrayField] as any[]
         const out = new Array(items.length)
-        await Promise.all(items.map(async (it, i) => {
+        const results = await Promise.allSettled(items.map(async (it, i) => {
           await node.concurrency.acquire()
           try {
             const value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts, childPath(path, i))
@@ -64,6 +71,8 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
             node.concurrency.release(true)
           } catch (e) { node.concurrency.release(false); throw e }
         }))
+        const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+        if (failed) throw failed.reason
         const { [node.arrayField]: _dropped, ...rest } = obj
         return { ...rest, [node.renameTo ?? node.arrayField]: out }
       })

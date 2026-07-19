@@ -93,6 +93,25 @@ test('toXml sanitizes a digit-leading key without colliding into the same tag as
   expect(new Set(values.map(String))).toEqual(new Set(['1', '2']))
 })
 
+test('toXml sanitizes two keys that differ only in their invalid characters without colliding onto the same tag', () => {
+  const obj = { 'a>b': 1, 'a<b': 2 }
+  const xml = toXml(obj, 'root')
+  const parsed = parseXml(xml) as Record<string, Record<string, unknown>>
+  const values = Object.values(parsed.root)
+  // Two distinct source keys must not be merged into one array-valued tag.
+  expect(values).toHaveLength(2)
+  expect(new Set(values.map(String))).toEqual(new Set(['1', '2']))
+})
+
+test('toXml sanitizes a key containing a literal underscore without colliding with a key whose invalid char hex-escapes to the same text', () => {
+  const obj = { 'a_3eb': 1, 'a>b': 2 }
+  const xml = toXml(obj, 'root')
+  const parsed = parseXml(xml) as Record<string, Record<string, unknown>>
+  const values = Object.values(parsed.root)
+  expect(values).toHaveLength(2)
+  expect(new Set(values.map(String))).toEqual(new Set(['1', '2']))
+})
+
 test('toXml escapes attribute quotes and parseXml round-trips them', () => {
   const obj = { n: { '@id': 'a"b', '#text': 'hi' } }
   const xml = toXml(obj)
