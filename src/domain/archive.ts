@@ -294,12 +294,12 @@ export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {
 
 // ---------- gzip ----------
 
-export function gzipCreate(data: Uint8Array, mtime = 0): Uint8Array {
+export function gzipCreate(data: Uint8Array, mtime = 0, filename?: string): Uint8Array {
   if (data.length > MAX_UNPACK_BYTES) throw new Error(`archive input totals more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
   // fflate only omits the header's wall-clock MTIME when mtime is exactly 0
   // (any other value, including undefined, embeds Date.now()) — default to 0
   // so gzipCreate(tarCreate(files)) stays fully deterministic end to end.
-  return gzipSync(data, { level: 6, mtime })
+  return gzipSync(data, filename ? { level: 6, mtime, filename } : { level: 6, mtime })
 }
 
 // Gzip's FLG byte (RFC 1952 §2.3.1, offset 3) has an FNAME bit (0x08) that,
@@ -436,6 +436,34 @@ export function tarCreate(files: ArchiveFile[]): Uint8Array {
  */
 export type TarExtractResult = { entries: UnpackedEntry[]; skipped: Array<{ name: string; typeflag: string }> }
 
+/**
+ * Parse a PAX extended header body (typeflag 'x'/'g'): a sequence of
+ * `"<len> <key>=<value>\n"` records, where `<len>` is the decimal byte length
+ * of the whole record (itself included). Only the keys callers actually
+ * consult (currently 'path') need to round-trip correctly, but every
+ * well-formed record is parsed so an unrecognized key is just ignored rather
+ * than desyncing the scan.
+ */
+function parsePaxHeader(data: Uint8Array): Record<string, string> {
+  const result: Record<string, string> = Object.create(null)
+  const text = strFromU8(data)
+  let i = 0
+  while (i < text.length) {
+    const spaceIdx = text.indexOf(' ', i)
+    if (spaceIdx === -1) break
+    const len = parseInt(text.slice(i, spaceIdx), 10)
+    if (!(len > 0)) break
+    const record = text.slice(i, i + len)
+    const eq = record.indexOf('=', spaceIdx - i + 1)
+    if (eq !== -1) {
+      const key = record.slice(spaceIdx - i + 1, eq)
+      result[key] = record.slice(eq + 1).replace(/\n$/, '')
+    }
+    i += len
+  }
+  return result
+}
+
 /** Parse an uncompressed USTAR tar archive. */
 export function tarExtract(bytes: Uint8Array): TarExtractResult {
   const entries: UnpackedEntry[] = []
@@ -443,6 +471,11 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
   let off = 0
   let count = 0
   let declared = 0
+  // GNU longname ('L') and PAX extended header ('x'/'g') entries are metadata
+  // carriers, not content: each overrides the *next* real entry's name rather
+  // than being an entry of its own, mirroring the USTAR `prefix` field fix
+  // above but for the two other real-world long-path mechanisms (see #226).
+  let pendingName: string | undefined
   while (off + BLOCK <= bytes.length) {
     const header = bytes.subarray(off, off + BLOCK)
     // Two consecutive zero blocks (or a header of all zero bytes) mark the end.
@@ -470,14 +503,27 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
     const data = bytes.subarray(off, off + size)
     off += padTo(size, BLOCK)
 
+    if (typeflag === 'L') {
+      pendingName = readCString(data)
+      continue
+    }
+    if (typeflag === 'x' || typeflag === 'g') {
+      const path = parsePaxHeader(data).path
+      if (path) pendingName = path
+      continue
+    }
+
+    const entryName = pendingName ?? name
+    pendingName = undefined
+
     // '0' and '\0' (header[156] is never absent, so fromCharCode always yields
     // a real char -- '\0' covers pre-POSIX tar, never an empty string) are
     // regular files; everything else (directories, symlinks, hardlinks, devices,
     // ...) is dropped and recorded in `skipped`.
     if (typeflag === '0' || typeflag === '\0') {
-      entries.push(decodeEntry(name, new Uint8Array(data), mtime))
+      entries.push(decodeEntry(entryName, new Uint8Array(data), mtime))
     } else {
-      skipped.push({ name, typeflag })
+      skipped.push({ name: entryName, typeflag })
     }
   }
   return { entries, skipped }
@@ -502,7 +548,7 @@ export function archiveCreate(format: ArchiveFormat, files: ArchiveFile[]): Uint
       return gzipCreate(tarCreate(files))
     case 'gzip':
       if (files.length !== 1) throw new Error(`gzip packs exactly one file — got ${files.length}. Use format='zip' or 'tar' for multiple.`)
-      return gzipCreate(files[0].data, files[0].mtime ?? 0)
+      return gzipCreate(files[0].data, files[0].mtime ?? 0, files[0].name)
   }
 }
 
