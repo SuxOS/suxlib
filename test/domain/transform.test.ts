@@ -55,6 +55,14 @@ test('parseCsv keeps a quoted-empty row but drops a truly blank line', () => {
   expect(parseCsv('a\n\nb\n', ',')).toEqual([['a'], ['b']])
 })
 
+test('parseCsv strips a leading UTF-8 BOM instead of baking it into the first field', () => {
+  expect(parseCsv('﻿name,age\nAda,36\n', ',')).toEqual([
+    ['name', 'age'],
+    ['Ada', '36'],
+  ])
+  expect(csvToRows('﻿name,age\nAda,36\n', ',')).toEqual([{ name: 'Ada', age: '36' }])
+})
+
 test('csvToRows suffixes duplicate headers until unique', () => {
   expect(csvToRows('a,a\n1,2\n', ',')).toEqual([{ a: '1', a_2: '2' }])
   expect(csvToRows('a,a,a_2\n1,2,3\n', ',')).toEqual([{ a: '1', a_2: '2', a_2_2: '3' }])
@@ -73,6 +81,16 @@ test('toCsv folds scalars in a mixed scalar/object array into a synthetic value 
 test('toCsv emits a single value column for an array of scalars instead of dropping the data', () => {
   expect(toCsv(['a', 'b', 'c'], ',')).toBe('value\na\nb\nc')
   expect(toCsv([1, 2, 3], ',')).toBe('value\n1\n2\n3')
+})
+
+test('toXml sanitizes a digit-leading key without colliding into the same tag as a distinct underscore-leading key', () => {
+  const obj = { '123abc': 1, _123abc: 2 }
+  const xml = toXml(obj, 'root')
+  const parsed = parseXml(xml) as Record<string, Record<string, unknown>>
+  const values = Object.values(parsed.root)
+  // Two distinct source keys must not be merged into one array-valued tag.
+  expect(values).toHaveLength(2)
+  expect(new Set(values.map(String))).toEqual(new Set(['1', '2']))
 })
 
 test('toXml escapes attribute quotes and parseXml round-trips them', () => {
