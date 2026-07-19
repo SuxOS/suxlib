@@ -214,7 +214,17 @@ There is no linter in this repo. Run both locally before pushing.
   node the tree visits, which would silently flood/break every one of them.
   `onTrace` rides the same already-threaded `gOpts` bag, so it's reachable
   from `POST /op/run`/`run_pipeline`/`pipeline run` via `opRunGOpts.onTrace`
-  with zero adapter changes.
+  with zero adapter changes. Update (#247): a `sink` node's per-target write
+  now goes through `runGoverned` too, via an opt-in `SinkOpts` (`retries`/
+  `heavy`/`memo`, same shape as `LeafOpts` minus `kind` — a sink write is
+  always I/O) on `Op`'s `sink` variant. Each target is gated by
+  `caps.governors["sink:<target>"]`, not `caps.governors["<target>"]` — the
+  `sink:` prefix is deliberate, so a sink target's governor entry can never
+  collide with a same-named leaf's own. `opts` applies uniformly to every
+  target in one `sink.fanout(names, opts)` call (which moved from a vararg
+  target list to `(names: string[], opts?: SinkOpts)` to make room for this);
+  there's no way to give two targets in the same fanout different retry
+  policies short of two separate `sink()` calls composed some other way.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
