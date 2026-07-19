@@ -23,12 +23,14 @@ export function tokenBucket(opts: { capacity: number; refillPerMs: number; clock
   const bucket: TokenBucket = {
     get tokens() { return tokens },
     tryTake(cost, nowMs) {
+      if (cost < 0) throw new Error(`tokenBucket.tryTake: cost ${cost} must not be negative`)
       refill(nowMs)
       if (tokens < cost) return false
       tokens -= cost
       return true
     },
     async take(cost, clock, sleep = defaultSleep) {
+      if (cost < 0) throw new Error(`tokenBucket.take: cost ${cost} must not be negative`)
       if (cost > opts.capacity) {
         throw new Error(`tokenBucket.take: requested cost ${cost} exceeds bucket capacity ${opts.capacity} and can never be satisfied`)
       }

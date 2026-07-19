@@ -15,3 +15,8 @@ test('idempotencyKey does not collide on differing __proto__-named fields', asyn
   const k2 = await idempotencyKey('x', JSON.parse('{"a":1,"__proto__":{"b":3}}'))
   expect(k1).not.toBe(k2)
 })
+test('idempotencyKey does not collide when name/args boundary shifts (no separator bug)', async () => {
+  const k1 = await idempotencyKey('foo2', 3)
+  const k2 = await idempotencyKey('foo', 23)
+  expect(k1).not.toBe(k2)
+})

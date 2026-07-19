@@ -505,14 +505,16 @@ export type TarExtractResult = { entries: UnpackedEntry[]; skipped: Array<{ name
  */
 function parsePaxHeader(data: Uint8Array): Record<string, string> {
   const result: Record<string, string> = Object.create(null)
-  const text = strFromU8(data)
   let i = 0
-  while (i < text.length) {
-    const spaceIdx = text.indexOf(' ', i)
+  while (i < data.length) {
+    let spaceIdx = -1
+    for (let j = i; j < data.length; j++) {
+      if (data[j] === 0x20) { spaceIdx = j; break }
+    }
     if (spaceIdx === -1) break
-    const len = parseInt(text.slice(i, spaceIdx), 10)
+    const len = parseInt(strFromU8(data.subarray(i, spaceIdx)), 10)
     if (!(len > 0)) break
-    const record = text.slice(i, i + len)
+    const record = strFromU8(data.subarray(i, i + len))
     const eq = record.indexOf('=', spaceIdx - i + 1)
     if (eq !== -1) {
       const key = record.slice(spaceIdx - i + 1, eq)
