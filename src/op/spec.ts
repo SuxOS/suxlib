@@ -229,6 +229,9 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       if (o.retries !== undefined && (!Number.isInteger(o.retries) || o.retries < 0 || o.retries > MAX_LEAF_RETRIES)) {
         errors.push({ path, message: `leaf "${spec.name}": \`retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}` })
       }
+      if (o.kind !== undefined && o.kind !== 'pure' && o.kind !== 'effect') {
+        errors.push({ path, message: `leaf "${spec.name}": \`opts.kind\` must be "pure" or "effect"` })
+      }
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         errors.push({ path, message: `leaf "${spec.name}": \`params\` must be an object` })
       }
@@ -335,6 +338,9 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       const o = spec.opts ?? {}
       if (o.retries !== undefined && (!Number.isInteger(o.retries) || o.retries < 0 || o.retries > MAX_LEAF_RETRIES)) {
         throw new Error(`leaf "${spec.name}": \`retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}`)
+      }
+      if (o.kind !== undefined && o.kind !== 'pure' && o.kind !== 'effect') {
+        throw new Error(`leaf "${spec.name}": \`opts.kind\` must be "pure" or "effect"`)
       }
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         throw new Error(`leaf "${spec.name}": \`params\` must be an object`)
