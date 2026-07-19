@@ -500,6 +500,13 @@ export function archiveExtract(format: ArchiveFormat, bytes: Uint8Array): Archiv
   }
 }
 
+// 'tar.gz' and 'gzip' share 'application/gzip' -- gzip is a byte-stream codec
+// with no format-level tar marker, so there's no MIME value that distinguishes
+// a tar bundle piped through gzip from a single gzip'd file. Don't add a
+// MIME-based format auto-detection path against this map; a caller's own
+// format tag (as CLI's inferArchiveFormat already uses, off the filename
+// extension) is the only reliable signal -- distinguishing the two from bytes
+// alone needs peeking the decompressed stream for a valid tar header.
 export const ARCHIVE_MIME: Record<ArchiveFormat, string> = {
   zip: 'application/zip',
   gzip: 'application/gzip',

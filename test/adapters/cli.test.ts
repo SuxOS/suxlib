@@ -186,6 +186,10 @@ describe('cli `archive extract` (real CLI entry point)', () => {
     const outPath = join(work, 'out.zip')
     writeFileSync(outPath, archiveCreate('zip', [{ name: 'in.txt', data: new TextEncoder().encode('hello'), mtime: 1700000000000 }]))
 
+    // Read .mock.calls before mockRestore() below, not after: mockRestore()
+    // resets the mock's call history as part of restoring the original
+    // implementation, so a later .mock.calls read comes back undefined even
+    // though the spy WAS invoked during the test.
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     await main(['node', 'suxlib-fileops', 'archive', 'extract', outPath])
     expect(process.exitCode).toBeFalsy()

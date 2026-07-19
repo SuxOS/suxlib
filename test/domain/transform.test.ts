@@ -153,6 +153,11 @@ test('decodeEntities decodes named and numeric entities, and survives an out-of-
   expect(decodeEntities('&#99999999;')).toBe('&#99999999;')
 })
 
+test('decodeEntities decodes in a single pass, so a numeric entity decoding to "&" is not re-scanned by the &amp; decode', () => {
+  expect(decodeEntities('&#38;amp;')).toBe('&amp;')
+  expect(decodeEntities('Ben &#38;amp; Jerry')).toBe('Ben &amp; Jerry')
+})
+
 test('toYaml/toXml refuse to recurse past MAX_TRANSFORM_DEPTH', () => {
   let deep: unknown = 'leaf'
   for (let i = 0; i < MAX_TRANSFORM_DEPTH + 5; i++) deep = { n: deep }
