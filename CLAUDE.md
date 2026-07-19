@@ -108,7 +108,20 @@ There is no linter in this repo. Run both locally before pushing.
   names; if absent, check whether the prerequisite issue is still open with
   an unmerged PR and drop the follow-up as blocked (not superseded) rather
   than reimplementing the prerequisite yourself and risking duplicate/
-  conflicting work when that PR lands.
+  conflicting work when that PR lands. Update (#267): don't stop at "still
+  unmerged" — check *why* with `gh pr checks <prereq-pr>` /
+  `gh run view <run-id> --log-failed`. #241 (#234) and #249 (#247) are each
+  stuck on one concrete, fixable CI failure, not flakiness: #241 fails
+  `security-review` with exactly the finding #242 itself describes
+  (`snapshotValue()` has no byte/node-count budget); #249 fails `Test &
+  build` because the sink-governance change broke per-target trace emission
+  for sink fanout
+  (`test/runtime/inline-trace.test.ts > runInline traces a sink fanout`). A
+  batch that lands #234 or #247 should fix that PR's own failure as part of
+  the same change (folding #242's budget guard into #241's work, fixing the
+  trace regression as part of #249's work) — that closes the follow-up issue
+  as a side effect instead of every future batch re-claiming and re-dropping
+  #242/#251 as a no-op forever.
 
 ## Consumers
 
