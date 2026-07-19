@@ -347,7 +347,37 @@ function writeOctal(value: number, length: number): Uint8Array {
   return strToU8(s.slice(0, length))
 }
 
+/**
+ * GNU tar's base-256 extension: whenever a numeric field (size/mtime/uid/gid)
+ * doesn't fit the field's octal width, GNU tar sets the field's first byte's
+ * high bit (0x80) and packs a raw big-endian binary value in the rest of the
+ * field instead of octal ASCII (see #235 — without this, such a field's
+ * first byte is non-ASCII noise that fails octal parsing and silently reads
+ * as 0, desyncing the rest of the archive scan). A leading byte of exactly
+ * 0xff marks a *negative* value (e.g. a pre-1970 mtime) two's-complement-
+ * encoded across the whole field, mirroring GNU tar's own encode/decode
+ * (node-tar's large-numbers.js) — any other value with the high bit set is
+ * a positive magnitude using the field's remaining 7+8n bits.
+ */
 function readOctal(bytes: Uint8Array): number {
+  if (bytes.length > 0 && bytes[0] === 0xff) {
+    let sum = 0
+    let flipped = false
+    for (let i = bytes.length - 1; i >= 0; i--) {
+      const byte = bytes[i]
+      let f: number
+      if (flipped) f = 0xff ^ byte
+      else if (byte === 0) f = 0
+      else { flipped = true; f = ((0xff ^ byte) + 1) & 0xff }
+      if (f !== 0) sum -= f * Math.pow(256, bytes.length - 1 - i)
+    }
+    return sum
+  }
+  if (bytes.length > 0 && (bytes[0] & 0x80) !== 0) {
+    let value = bytes[0] & 0x7f
+    for (let i = 1; i < bytes.length; i++) value = value * 256 + bytes[i]
+    return value
+  }
   const s = strFromU8(bytes).replace(/\0.*$/, '').trim()
   return s ? parseInt(s, 8) || 0 : 0
 }
