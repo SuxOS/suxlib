@@ -135,3 +135,29 @@ test('runInline\'s catch does not run the fallback when the try branch fails due
   await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
   expect(fallbackRan).toBe(false)
 })
+
+test('runInline cancels a map item still queued behind a full item-level concurrency limiter once aborted (#301)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  let secondRan = false
+  const tree = map(op('maybeAbort', async (n: number) => {
+    if (n === 1) controller.abort()
+    else secondRan = true
+    return n
+  }, { kind: 'pure' }), { concurrency: fixed(1) })
+  await expect(runInline(tree, [1, 2], caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(secondRan).toBe(false)
+})
+
+test('runInline cancels a mapField item still queued behind a full item-level concurrency limiter once aborted (#301)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  let secondRan = false
+  const tree = mapField('entries', 'n', op('maybeAbort', async (n: number) => {
+    if (n === 1) controller.abort()
+    else secondRan = true
+    return n
+  }, { kind: 'pure' }), { concurrency: fixed(1) })
+  await expect(runInline(tree, { entries: [{ n: 1 }, { n: 2 }] }, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(secondRan).toBe(false)
+})
