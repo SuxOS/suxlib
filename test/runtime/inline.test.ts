@@ -4,6 +4,7 @@ import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/
 import { fixed } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
+import { createGovernor } from '../../src/control/governor.js'
 test('runInline threads a pipe: split → map → reconcile → sink', async () => {
   const store = new MemoryStore(); const written: any[] = []
   const caps: any = { store, llm: {}, clock: { now: () => 0 },
@@ -23,6 +24,30 @@ test('runInline throws a clear error for an unregistered sink target', async () 
   const store = new MemoryStore()
   const caps: any = { store, llm: {}, clock: { now: () => 0 }, sinks: { out: { name: 'out', write: async (v: any) => v } } }
   await expect(runInline(sink('missing'), 'value', caps)).rejects.toThrow(/unknown sink "missing".*out/)
+})
+
+test('runInline retries a flaky sink write per its own opts.retries (#247)', async () => {
+  let calls = 0
+  const caps: any = {
+    store: new MemoryStore(), llm: {}, clock: { now: () => 0 },
+    sinks: { out: { name: 'out', write: async (v: any) => { calls++; if (calls < 3) throw new Error('flaky'); return v } } },
+  }
+  const result = await runInline(sink('out', { retries: 3 }), 'value', caps, { sleep: async () => {}, rand: () => 0 })
+  expect(result).toBe('value')
+  expect(calls).toBe(3)
+})
+
+test('runInline gates a sink target through caps.governors keyed "sink:<name>", separate from a same-named leaf\'s own governor (#247)', async () => {
+  const sinkGovernor = createGovernor('sink:out', { circuitBreaker: { failureThreshold: 1, cooldownMs: 10_000, halfOpenSuccesses: 1 } })
+  const leafGovernor = createGovernor('out', { circuitBreaker: { failureThreshold: 1, cooldownMs: 10_000, halfOpenSuccesses: 1 } })
+  const caps: any = {
+    store: new MemoryStore(), llm: {}, clock: { now: () => 0 },
+    sinks: { out: { name: 'out', write: async () => { throw new Error('boom') } } },
+    governors: { 'sink:out': sinkGovernor, out: leafGovernor },
+  }
+  await expect(runInline(sink('out'), 'v', caps, { sleep: async () => {} })).rejects.toThrow('boom')
+  await expect(runInline(sink('out'), 'v', caps, { sleep: async () => {} })).rejects.toThrow(/circuit open for leaf "sink:out"/)
+  expect(leafGovernor.circuitBreaker!.state).toBe('closed')
 })
 
 test('runInline runs mapField over one named field of each array element, passing the rest through and renaming the array field', async () => {

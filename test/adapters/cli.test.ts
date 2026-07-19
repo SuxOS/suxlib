@@ -179,6 +179,39 @@ describe('cli `archive create` (real CLI entry point)', () => {
     process.exitCode = 0
     errSpy.mockRestore()
   })
+
+  it('honors a distinct --mtime per file via name=epoch-ms pairs (#246)', async () => {
+    const work = tmpDir()
+    const pathA = join(work, 'a.txt')
+    const pathB = join(work, 'b.txt')
+    const outPath = join(work, 'out.zip')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(pathA, 'first')
+    writeFileSync(pathB, 'second')
+    const mtimeA = new Date(2021, 0, 1).getTime()
+    const mtimeB = new Date(2022, 5, 15).getTime()
+    await main(['node', 'suxlib-fileops', 'archive', 'create', '-o', outPath, '-m', `a.txt=${mtimeA},b.txt=${mtimeB}`, pathA, pathB])
+    const { archiveExtract } = await import('../../src/domain/archive.js')
+    const { entries } = archiveExtract('zip', new Uint8Array(readFileSync(outPath)))
+    expect(entries.find((e) => e.name === 'a.txt')!.mtime).toBe(mtimeA)
+    expect(entries.find((e) => e.name === 'b.txt')!.mtime).toBe(mtimeB)
+  })
+
+  it('rejects a --mtime name=epoch-ms pair referencing a file not being packed', async () => {
+    const work = tmpDir()
+    const inPath = join(work, 'in.txt')
+    const outPath = join(work, 'out.zip')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(inPath, 'hello')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'archive', 'create', '-o', outPath, '-m', 'nope.txt=1700000000000', inPath])
+    expect(process.exitCode).toBe(1)
+    expect(existsSync(outPath)).toBe(false)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/--mtime references unknown file 'nope.txt'/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
 })
 
 describe('cli `archive extract` (real CLI entry point)', () => {

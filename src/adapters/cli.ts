@@ -40,16 +40,36 @@ archiveCmd
   .argument('<files...>', 'files to pack')
   .requiredOption('-o, --output <path>', 'output archive path')
   .option('-f, --format <format>', 'zip | tar | gzip | tar.gz (gzip supports exactly one input file)', 'zip')
-  .option('-m, --mtime <epoch-ms>', "override every packed file's mtime (default: each input file's own filesystem mtime)")
+  .option('-m, --mtime <epoch-ms-or-pairs>', "override packed file mtime(s): a bare epoch-ms value applies to every file, or 'name=epoch-ms[,name=epoch-ms...]' to override specific files by their basename (default: each input file's own filesystem mtime)")
   .action((files: string[], opts: { output: string; format: string; mtime?: string }) => {
     const format = opts.format as ArchiveFormat
     if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, gzip, or tar.gz (got '${format}')`)
     let mtimeOverride: number | undefined
+    let perFileMtime: Map<string, number> | undefined
     if (opts.mtime !== undefined) {
-      mtimeOverride = Number(opts.mtime)
-      if (Number.isNaN(mtimeOverride)) throw new Error(`--mtime must be a numeric epoch-ms value (got '${opts.mtime}')`)
+      if (opts.mtime.includes('=')) {
+        perFileMtime = new Map()
+        for (const pair of opts.mtime.split(',')) {
+          const eq = pair.indexOf('=')
+          const name = eq === -1 ? '' : pair.slice(0, eq)
+          const v = Number(pair.slice(eq + 1))
+          if (!name || Number.isNaN(v)) throw new Error(`--mtime per-file entries must be 'name=epoch-ms' with a numeric value (got '${pair}')`)
+          perFileMtime.set(name, v)
+        }
+        const basenames = new Set(files.map((f) => basename(f)))
+        for (const name of perFileMtime.keys()) {
+          if (!basenames.has(name)) throw new Error(`--mtime references unknown file '${name}' (packed files: ${[...basenames].join(', ')})`)
+        }
+      } else {
+        mtimeOverride = Number(opts.mtime)
+        if (Number.isNaN(mtimeOverride)) throw new Error(`--mtime must be a numeric epoch-ms value or 'name=epoch-ms[,name=epoch-ms...]' (got '${opts.mtime}')`)
+      }
     }
-    const entries = files.map((f) => ({ name: basename(f), data: new Uint8Array(readFileSync(f)), mtime: mtimeOverride ?? statSync(f).mtimeMs }))
+    const entries = files.map((f) => {
+      const name = basename(f)
+      const mtime = perFileMtime?.get(name) ?? mtimeOverride ?? statSync(f).mtimeMs
+      return { name, data: new Uint8Array(readFileSync(f)), mtime }
+    })
     const out = archiveCreate(format, entries)
     writeFileSync(opts.output, out)
     console.log(`wrote ${opts.output} (${out.length} bytes, ${ARCHIVE_MIME[format]}, ${entries.length} file(s))`)

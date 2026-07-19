@@ -73,11 +73,17 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       // Traced per-target, not just once for the whole fanout: Promise.all
       // gives every target's write equal opportunity to fail independently,
       // and node-exit is the only way to see which target(s) actually failed.
+      // Each write runs through runGoverned exactly like an 'effect' leaf's
+      // fn -- retries/breaker/tokenBucket/concurrency -- keyed `sink:<target>`
+      // in caps.governors so a sink target's gating can't collide with a
+      // same-named leaf's own governor entry.
       return traced('sink', undefined, path, caps, gOpts, async () => {
         await Promise.all(node.targets.map(t => traced('sink-target', t, childPath(path, t), caps, gOpts, async () => {
           const s = caps.sinks[t]
           if (!s) throw new Error(`unknown sink "${t}" (registered: ${Object.keys(caps.sinks).join(', ')})`)
-          return s.write(input, caps)
+          const governorName = `sink:${t}`
+          const opts = { kind: 'effect' as const, retries: node.opts?.retries, heavy: node.opts?.heavy, memo: node.opts?.memo }
+          return runGoverned(governorName, opts, (v, c) => s.write(v, c), input, caps, caps.governors?.[governorName], gOpts)
         })))
         return input
       })

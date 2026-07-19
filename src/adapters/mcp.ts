@@ -33,6 +33,14 @@ const opSpecLeafOptsSchema = z.object({
   kind: z.enum(['pure', 'effect']).optional(),
 }).optional()
 
+// Same shape as opSpecLeafOptsSchema minus `kind` -- a sink write is always
+// I/O, so there's no 'pure'/'effect' choice to make (see op/types.ts's SinkOpts).
+const opSpecSinkOptsSchema = z.object({
+  retries: z.number().int().min(0).max(MAX_LEAF_RETRIES).optional(),
+  heavy: z.boolean().optional(),
+  memo: z.boolean().optional(),
+}).optional()
+
 // Derived from spec.ts's FIELD_POLICIES (not a hand-duplicated literal array)
 // so this schema can't silently drift from what buildOp actually validates --
 // the concrete example CLAUDE.md's OpSpec-validation footgun note calls out (#187).
@@ -65,7 +73,7 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
     concurrency: z.number().int().min(1).max(MAX_MAP_CONCURRENCY),
     renameTo: z.string().optional(),
   }),
-  z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1) }),
+  z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1), opts: opSpecSinkOptsSchema }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
   z.object({ tag: z.literal('catch'), try: opSpecSchema, catch: opSpecSchema }),
   z.object({ tag: z.literal('ask'), prompt: z.string(), timeout: z.string(), onTimeout: z.enum(['proceed', 'fail']) }),

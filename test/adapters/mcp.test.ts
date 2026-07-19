@@ -348,6 +348,25 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await sinkServer.close()
   })
 
+  it('run_pipeline: a sink spec\'s opts.retries reaches buildOp through the MCP tool schema (not silently stripped), retrying a flaky write (#247)', async () => {
+    let calls = 0
+    const flakyServer = new McpServer({ name: 'test-flaky-sink', version: '0.0.0' })
+    registerFileopsTools(flakyServer, { opRunSinks: { flaky: { name: 'flaky', write: async (v) => { calls++; if (calls < 2) throw new Error('flaky'); return v } } } })
+    const flakyClient = new Client({ name: 'test-flaky-sink-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([flakyServer.connect(serverTransport), flakyClient.connect(clientTransport)])
+
+    const result = await flakyClient.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'sink', targets: ['flaky'], opts: { retries: 1 } }, input: { a: 1 } },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(calls).toBe(2)
+
+    await flakyClient.close()
+    await flakyServer.close()
+  })
+
   it('run_pipeline: opts.opRunLlm wires a real Llm capability through to the summarize leaf', async () => {
     const llmServer = new McpServer({ name: 'test-llm', version: '0.0.0' })
     registerFileopsTools(llmServer, { opRunLlm: { markdownFromPdf: async () => { throw new Error('unused') }, summarize: async (text) => `summary of ${text}` } })
