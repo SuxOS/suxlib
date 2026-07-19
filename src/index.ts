@@ -5,5 +5,6 @@ export * from './op/registry.js'; export * from './op/spec.js'; export * from '.
 export * from './op/introspect.js'
 export * from './control/aimd.js'; export * from './control/retry.js'; export * from './control/events.js'; export * from './control/memo.js'
 export * from './control/token-bucket.js'; export * from './control/circuit-breaker.js'; export * from './control/governor.js'
+export * from './control/trace.js'
 export * from './domain/archive.js'; export * from './domain/text.js'; export * from './runtime/inline.js'
 export * from './domain/sanitize.js'; export * from './domain/transform.js'; export * from './domain/pdf.js'

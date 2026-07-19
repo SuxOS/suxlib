@@ -204,7 +204,17 @@ There is no linter in this repo. Run both locally before pushing.
   on every variant but `retry-attempt`) — pass the same `onEvent` function to both
   `createGovernor` (per leaf, at `caps.governors` construction time) and
   `runInline`'s `gOpts.onEvent` (once, per run) to get one leaf-labeled stream
-  instead of wiring a matching callback into each primitive by hand.
+  instead of wiring a matching callback into each primitive by hand. Update
+  (#215): per-node execution tracing (`{tag, name?, path, durationMs, ok,
+  error?}` node-enter/node-exit around every `runInline` switch case, not
+  just governed leaves) is a deliberately *separate* `RunGovernedOpts.onTrace`
+  stream (`src/control/trace.ts`), not an extension of `GovernorEvent`/
+  `onEvent` — several existing `onEvent` consumers (tests and, potentially,
+  production wiring) assert exact event sequences, and a trace fires once per
+  node the tree visits, which would silently flood/break every one of them.
+  `onTrace` rides the same already-threaded `gOpts` bag, so it's reachable
+  from `POST /op/run`/`run_pipeline`/`pipeline run` via `opRunGOpts.onTrace`
+  with zero adapter changes.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
