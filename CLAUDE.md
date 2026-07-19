@@ -326,3 +326,16 @@ There is no linter in this repo. Run both locally before pushing.
   itself null-prototype. Build the merged object with `Object.assign(
   Object.create(null), REGISTRY, extra)` instead (see
   `src/adapters/op-run.ts`'s `caps.sinks` construction for the pattern).
+- `cli.ts`'s `main()` gotcha: `program`/every subcommand (`archiveCmd`, etc.) are
+  module-level Commander singletons, not rebuilt per call — a Commander `Option`
+  that threw during one `main()` invocation (e.g. `archive create -m not-a-number`)
+  leaves that option's *stale* parsed value sitting on the Command instance, and a
+  later `main()` call to the *same* subcommand that omits the flag silently reads
+  the previous call's bad value instead of `undefined`/its default. Reproduced with
+  `archive create -m not-a-number` followed immediately by a clean `archive create`
+  call with no `-m` — the second call still throws the first call's mtime error. A
+  test (or any programmatic caller) invoking `main()` more than once against the
+  same subcommand within one process must not rely on a prior failed call's flags
+  being reset — build fixtures via the domain function directly instead of a second
+  CLI invocation, the way `test/adapters/cli.test.ts`'s `archive extract` listing
+  test does.
