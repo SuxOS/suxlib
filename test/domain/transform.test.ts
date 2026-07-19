@@ -199,3 +199,18 @@ test('htmlToMarkdown converts headings, lists, links, and code', () => {
   expect(md).toContain('- one')
   expect(md).toContain('[link](https://x.test)')
 })
+
+test('htmlToMarkdown strips a literal NUL byte instead of letting it desync the block-marker split parity (#178)', () => {
+  const md = htmlToMarkdown('<p>foo\x00bar</p><h1>Second</h1>')
+  expect(md).not.toContain('\x00')
+  expect(md).toContain('foobar')
+  expect(md).toContain('# Second')
+})
+
+test('markdownToHtml (via inlineMdToHtml) strips a literal NUL byte instead of letting it collide with the code-span restore marker (#178)', () => {
+  const html = markdownToHtml('`code` and a NUL: \x001\x00 and more `after`')
+  expect(html).not.toContain('\x00')
+  expect(html).toContain('<code>code</code>')
+  expect(html).toContain('<code>after</code>')
+  expect(html).not.toContain('undefined')
+})

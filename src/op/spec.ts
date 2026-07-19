@@ -94,7 +94,12 @@ function stepLabel(s: OpSpec): string {
  * sensible shallow merge target. `__proto__`/`constructor`/`prototype` are
  * skipped the same way op-run.ts's hydrate() and reconcile.ts's fieldMerge
  * already guard untrusted JSON keys -- `params` comes from the same
- * caller-supplied spec JSON they do.
+ * caller-supplied spec JSON they do. Callers never reach this merge target
+ * for a bare-Handle (or undeclared-shape) leaf input -- buildOpNode's 'leaf'
+ * case rejects `params` before building the pipe -- otherwise this would
+ * happily overwrite a Handle's own `r2Key`/`sha256` identity fields, letting
+ * a caller point a leaf at an arbitrary Store entry it never legitimately
+ * produced or received (#172/#174).
  */
 function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return input
@@ -158,6 +163,26 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         throw new Error(`leaf "${spec.name}": \`params\` must be an object`)
+      }
+      if (spec.params !== undefined) {
+        // A bare-Handle-shaped input (declared 'handle'/'handle[]' in LEAF_SHAPES) IS
+        // the object mergeParams would merge onto -- letting params overwrite its own
+        // r2Key/sha256 identity fields would redirect the leaf at an arbitrary Store
+        // entry (#172). A name absent from LEAF_SHAPES entirely (a host-registered
+        // extraLeaves leaf, or a future built-in nobody added an entry for) has an
+        // undeclared shape that *could* be a bare Handle too, so it's denied by
+        // default rather than inheriting shapeCompatible's separate "unknown passes"
+        // permissiveness, which exists only to avoid false-positive pipe-adjacency
+        // errors, not to gate a security-sensitive merge (#174).
+        const hasShape = Object.prototype.hasOwnProperty.call(LEAF_SHAPES, spec.name)
+        const inputShape = hasShape ? LEAF_SHAPES[spec.name].input : undefined
+        if (!hasShape || inputShape === 'handle' || inputShape === 'handle[]') {
+          throw new Error(
+            hasShape
+              ? `leaf "${spec.name}": \`params\` cannot be used on a bare-Handle input -- merging onto a Handle's own fields (r2Key/sha256/...) would let a caller overwrite its identity/location and read arbitrary Store entries (#172)`
+              : `leaf "${spec.name}": \`params\` cannot be used on a leaf with no declared LEAF_SHAPES entry -- its input shape is unknown and could be a bare Handle, so \`params\` is rejected by default (#174)`,
+          )
+        }
       }
       const opts: LeafOpts = { kind: o.kind ?? 'effect', retries: o.retries ?? 0, heavy: o.heavy, memo: o.memo }
       const params = spec.params

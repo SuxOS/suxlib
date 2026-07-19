@@ -642,7 +642,11 @@ function listItems(html: string, ordered: boolean): string {
 }
 
 export function htmlToMarkdown(html: string): string {
+  // \x00 is used below as an internal "already converted" marker (split/idx-parity
+  // scheme) -- a NUL byte surviving from the caller's input would desync that parity
+  // for every block after it, so strip it before it can ever reach a marker position.
   let s = html
+    .replace(/\x00/g, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -687,7 +691,10 @@ function sanitizeUrl(raw: string): string {
 
 function inlineMdToHtml(s: string): string {
   const codes: string[] = []
-  return encodeEntitiesXml(s)
+  // \x00 is used below as an internal code-span placeholder marker -- a NUL byte
+  // surviving from the caller's input could otherwise match the restore regex and
+  // splice in an unrelated code span (or the literal string "undefined").
+  return encodeEntitiesXml(s.replace(/\x00/g, ''))
     .replace(/`([^`]+)`/g, (_m, c) => `\x00${codes.push(`<code>${c}</code>`) - 1}\x00`)
     .replace(/\[([^\]]*)\]\(([^)]*)\)/g, (_m, txt, href) => `<a href="${sanitizeUrl(href)}">${txt}</a>`)
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')

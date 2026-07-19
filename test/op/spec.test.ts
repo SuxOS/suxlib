@@ -117,6 +117,18 @@ test('buildOp rejects a non-object `params`', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'convert', params: [] as unknown as Record<string, unknown> })).toThrow(/params/)
 })
 
+test('buildOp rejects `params` on a bare-Handle-input leaf, since merging would overwrite the Handle\'s own r2Key/sha256 identity fields (#172)', () => {
+  expect(() => buildOp({ tag: 'leaf', name: 'unzip', params: { r2Key: 'other-key' } })).toThrow(/params.*cannot be used on a bare-Handle input/)
+  expect(() => buildOp({ tag: 'leaf', name: 'scrub', params: { r2Key: 'other-key' } })).toThrow(/params.*cannot be used on a bare-Handle input/)
+})
+
+test('buildOp rejects `params` on a host-registered extraLeaves leaf with no LEAF_SHAPES entry, since its input shape is unknown and could itself be a bare Handle (#174)', () => {
+  const shout: (input: unknown) => Promise<unknown> = async (input) => ({ shouted: input })
+  expect(() => buildOp({ tag: 'leaf', name: 'shout', params: { r2Key: 'other-key' } }, { shout })).toThrow(
+    /params.*cannot be used on a leaf with no declared LEAF_SHAPES entry/,
+  )
+})
+
 test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })
