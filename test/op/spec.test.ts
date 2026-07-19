@@ -179,6 +179,10 @@ test('buildOp rejects an out-of-range leaf retries', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { retries: 6 } })).toThrow(/retries/)
 })
 
+test('buildOp rejects an invalid leaf `opts.kind` instead of silently bypassing reliability gating (#262)', () => {
+  expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { kind: 'nope' as any } })).toThrow(/opts\.kind/)
+})
+
 test('buildOp resolves a host-registered leaf via its `extraLeaves` param', async () => {
   const { store, ...rest } = caps()
   const handle = await putBytes(store, new TextEncoder().encode('hi'), 'text/plain')
@@ -491,4 +495,10 @@ test('validateOpSpec resolves extraLeaves the same way buildOp does', () => {
   const spec: OpSpec = { tag: 'leaf', name: 'shout' }
   expect(validateOpSpec(spec)).not.toEqual([])
   expect(validateOpSpec(spec, { shout: async (i) => i })).toEqual([])
+})
+
+test('validateOpSpec reports an invalid leaf `opts.kind` the same way buildOp\'s throw does (#262)', () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'scrub', opts: { kind: 'nope' as any } }
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => /opts\.kind/.test(e.message))).toBe(true)
 })
