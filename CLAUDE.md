@@ -339,3 +339,17 @@ There is no linter in this repo. Run both locally before pushing.
   being reset — build fixtures via the domain function directly instead of a second
   CLI invocation, the way `test/adapters/cli.test.ts`'s `archive extract` listing
   test does.
+- Update to the OpSpec-validation footgun above (#208): `validateOpSpec`
+  (`src/op/spec.ts`) collects every structural error `buildOp` would otherwise
+  throw on one-at-a-time, but over the MCP surface specifically, `opSpecSchema`
+  (the parallel zod schema) already range-checks `retries`/`concurrency` and
+  rejects empty `steps`/`targets` arrays *before* a `validate_pipeline` call
+  ever reaches the handler — those errors can never appear in `validate_pipeline`'s
+  output, only in `POST /op/validate` (HTTP, no such schema) or `pipeline
+  validate` (CLI, raw JSON). Only checks `opSpecSchema` doesn't already enforce
+  (unknown leaf name, pipe-adjacency shape mismatches, reconcile
+  `policy`/`defaultPolicy` values) are reachable through all three surfaces
+  alike. A future validate-mode test written against the MCP tool needs a spec
+  whose problem is one of those, not an out-of-range number, or it'll
+  incorrectly observe `isError: true` from schema rejection instead of a
+  `{ valid: false }` result.

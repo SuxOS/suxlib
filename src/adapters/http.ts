@@ -10,7 +10,7 @@ import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../dom
 import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
-import type { OpSpec } from '../op/spec.js'
+import { validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm } from '../effects/types.js'
@@ -233,6 +233,16 @@ const routes: Route[] = [
     method: 'GET',
     path: '/op/schema',
     handle: async (_rawBody, env) => json(describePipelineSchema(env.opRunLeaves, env.opRunSinks)),
+  },
+  {
+    method: 'POST',
+    path: '/op/validate',
+    handle: async (rawBody, env) => {
+      const body = rawBody as { spec?: unknown }
+      if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
+      const errors = validateOpSpec(body.spec as OpSpec, env.opRunLeaves)
+      return json({ valid: errors.length === 0, errors })
+    },
   },
 ]
 

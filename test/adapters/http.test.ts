@@ -264,4 +264,32 @@ describe('http adapter', () => {
     expect(Object.keys(body.leaves)).toContain('shout')
     expect(body.sinks).toContain('log')
   })
+
+  it('POST /op/validate: a well-formed spec reports valid with no errors, without running it', async () => {
+    const res = await post('op/validate', { spec: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } } })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ valid: true, errors: [] })
+  })
+
+  it('POST /op/validate: collects every structural error in one pass instead of stopping at the first (#208)', async () => {
+    const res = await post('op/validate', {
+      spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'nope' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 0 }] },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { valid: boolean; errors: Array<{ path: string; message: string }> }
+    expect(body.valid).toBe(false)
+    expect(body.errors.some((e) => /unknown leaf "nope"/.test(e.message))).toBe(true)
+    expect(body.errors.some((e) => /concurrency/.test(e.message))).toBe(true)
+  })
+
+  it('POST /op/validate: a missing `spec` surfaces a 400', async () => {
+    const res = await post('op/validate', {})
+    expect(res.status).toBe(400)
+  })
+
+  it('POST /op/validate: env.opRunLeaves lets a host-registered leaf validate as known', async () => {
+    const env: Env = { opRunLeaves: { shout: async (input) => input } }
+    const res = await post('op/validate', { spec: { tag: 'leaf', name: 'shout' } }, {}, env)
+    expect(await res.json()).toEqual({ valid: true, errors: [] })
+  })
 })

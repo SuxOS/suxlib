@@ -33,7 +33,7 @@ describe('mcp adapter', () => {
 
   it('lists the expected tools', async () => {
     const { tools } = await client.listTools()
-    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline', 'describe_pipeline'].sort())
+    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline', 'describe_pipeline', 'validate_pipeline'].sort())
   })
 
   it('transform: happy path json -> yaml', async () => {
@@ -241,6 +241,32 @@ describe('mcp adapter', () => {
     expect(body.reconcileModes).toContain('field-merge')
     expect(body.fieldPolicies).toContain('union')
   })
+
+  it('validate_pipeline: a well-formed spec reports valid with no errors, without running it', async () => {
+    const result = await client.callTool({
+      name: 'validate_pipeline',
+      arguments: { spec: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } } },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ valid: true, errors: [] })
+  })
+
+  it('validate_pipeline: collects every structural error in one pass instead of stopping at the first (#208)', async () => {
+    // Two distinct unknown-leaf errors, not an out-of-range retries/concurrency
+    // (the MCP tool's own zod inputSchema already range-checks those before a
+    // call ever reaches this handler, unlike an unknown leaf name -- opSpecSchema
+    // only requires `name` be a string, see CLAUDE.md's OpSpec-validation
+    // footgun note about buildOp/opSpecSchema being two separate layers).
+    const result = await client.callTool({
+      name: 'validate_pipeline',
+      arguments: { spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'nope-1' }, { tag: 'leaf', name: 'nope-2' }] } },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { valid: boolean; errors: Array<{ path: string; message: string }> }
+    expect(body.valid).toBe(false)
+    expect(body.errors.some((e) => /unknown leaf "nope-1"/.test(e.message))).toBe(true)
+    expect(body.errors.some((e) => /unknown leaf "nope-2"/.test(e.message))).toBe(true)
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {
@@ -387,6 +413,9 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     const body = parseResult(result) as { leaves: Record<string, unknown>; sinks: string[] }
     expect(Object.keys(body.leaves)).toContain('shout')
     expect(body.sinks).toContain('log')
+
+    const validated = await describeClient.callTool({ name: 'validate_pipeline', arguments: { spec: { tag: 'leaf', name: 'shout' } } })
+    expect(parseResult(validated)).toEqual({ valid: true, errors: [] })
 
     await describeClient.close()
     await describeServer.close()
