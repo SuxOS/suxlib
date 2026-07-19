@@ -122,23 +122,47 @@ test('toXml escapes attribute quotes and parseXml round-trips them', () => {
 test('toXml preserves a key whose value is an empty array instead of silently dropping it, and parseXml round-trips it back to []', () => {
   const obj = { a: 1, tags: [] as unknown[] }
   const xml = toXml(obj, 'root')
-  expect(xml).toBe('<root><a>1</a><tags empty-array="true"/></root>')
+  expect(xml).toBe('<root><a>1</a><tags sux:empty-array="true"/></root>')
   expect(parseXml(xml)).toEqual({ root: { a: '1', tags: [] } })
 })
 
 test('toXml preserves a key whose value is a single-element array, and parseXml round-trips it back to a 1-element array instead of a bare scalar', () => {
   const obj = { tags: ['a'] }
   const xml = toXml(obj, 'root')
-  expect(xml).toBe('<root><tags single-array="true">a</tags></root>')
+  expect(xml).toBe('<root><tags sux:single-array="true">a</tags></root>')
   expect(parseXml(xml)).toEqual({ root: { tags: ['a'] } })
 })
 
 test('toXml marks a null value distinctly from an empty-string scalar, and parseXml round-trips it back to null instead of ""', () => {
   const obj = { a: null }
   const xml = toXml(obj, 'root')
-  expect(xml).toBe('<root><a null-value="true"/></root>')
+  expect(xml).toBe('<root><a sux:null-value="true"/></root>')
   expect(parseXml(xml)).toEqual({ root: { a: null } })
   expect(parseXml('<root><a></a></root>')).not.toEqual(parseXml(xml))
+})
+
+test('toXml/parseXml round-trip a real attribute whose key collides with the single-array marker word', () => {
+  const obj = { row: { '@single-array': 'true', value: 'x' } }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
+})
+
+test('toXml/parseXml round-trip a real attribute whose key collides with the nested-array marker word', () => {
+  const obj = { row: { '@nested-array': 'true', value: 'x' } }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
+})
+
+test('toXml/parseXml round-trip a real attribute whose key collides with the empty-array marker word', () => {
+  const obj = { row: { '@empty-array': 'true' } }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
+})
+
+test('toXml/parseXml round-trip a real attribute whose key collides with the null-value marker word', () => {
+  const obj = { row: { '@null-value': 'true' } }
+  const xml = toXml(obj, 'root')
+  expect(parseXml(xml)).toEqual({ root: obj })
 })
 
 test('toXml/parseXml round-trip a single-element array containing null', () => {

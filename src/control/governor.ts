@@ -135,8 +135,8 @@ export async function runGoverned(
       result = await fn(input, caps, idemKey)
     } catch (err) {
       if (acquired) concurrency!.release(false)
-      breaker?.onFailure(caps.clock.now())
       if (probeReserved) breaker!.releaseHalfOpenProbe()
+      breaker?.onFailure(caps.clock.now())
       if (attempt >= maxRetries) throw err
       const delayMs = backoffFullJitter(attempt, backoff, gOpts.rand)
       gOpts.onEvent?.({ kind: 'retry-attempt', name, attempt, delayMs })
@@ -150,8 +150,8 @@ export async function runGoverned(
     // concurrency slot and reopen a breaker that just legitimately closed
     // (#275).
     if (acquired) concurrency!.release(true)
-    breaker?.onSuccess(caps.clock.now())
     if (probeReserved) breaker!.releaseHalfOpenProbe()
+    breaker?.onSuccess(caps.clock.now())
     return result
   }
 }
