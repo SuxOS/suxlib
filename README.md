@@ -76,7 +76,7 @@ on) and only differs in how it reads input and shapes output:
 ### Composable pipelines: `POST /op/run` and the `run_pipeline` MCP tool
 
 Beyond one-shot single-leaf calls, all three adapters also expose the op engine
-itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch', ... }`
+itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask', ... }`
 spec (`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`
 (`pack`/`unpack`/`shrink`/`redact`/`scrub`/`convert`/`unzip`), which gets built into a
 real `Op` tree and run via `runInline` — a multi-step job (e.g. unzip a bundle,

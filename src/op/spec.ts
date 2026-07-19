@@ -22,6 +22,12 @@ export type OpSpec =
 export const FIELD_POLICIES = ['last-write-wins', 'union', 'keep-first'] as const satisfies readonly FieldPolicy[]
 export const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge'] as const satisfies readonly ReconcileOpts['mode'][]
 
+// Same reasoning: derive any hand-written list of OpSpec tags (mcp.ts's
+// run_pipeline tool description, README's tag union prose) from this one
+// array instead of re-enumerating the tag literals, which drifted twice
+// already (#166, #158) before drifting a third time for reconcile/ask (#213).
+export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask'] as const satisfies readonly OpSpec['tag'][]
+
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
 // into an unbounded retry storm or a huge fan-out.

@@ -19,6 +19,7 @@ import type { Caps, Governor, SinkTarget, LeafFn } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import { runInline } from '../runtime/inline.js'
+import type { RunGovernedOpts } from '../control/governor.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 export type HandleRef = { $handle: true; base64: string; type?: string }
@@ -145,8 +146,17 @@ export type OpRunRequest = { spec: OpSpec; input: unknown }
  * ever hitting runInline's no-capability-supplied fallback (`onTimeout:
  * 'fail'` throws `AskTimeoutError`, `'proceed'` passes the piped value
  * through). Omitted entirely, that fallback behavior is unchanged.
+ *
+ * `gOpts`: passed through unchanged as runInline's 4th argument -- the only
+ * way to reach retry-attempt/memo-hit/memo-miss GovernorEvents (runGoverned
+ * emits those directly from `gOpts.onEvent`, unlike breaker/tokenBucket/
+ * concurrency events which are observable via a host-constructed `governors`
+ * Governor's own onEvent) or to supply a custom backoff/sleep/rand. Host-only
+ * config (carries function callbacks), same as governors/cache/store/leaves
+ * above -- never JSON-caller-supplied. Omitted entirely, runInline's own
+ * defaults apply as before.
  */
-export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn>; ask?: Ask }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn>; ask?: Ask; gOpts?: RunGovernedOpts }
 
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
@@ -165,6 +175,6 @@ export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts =
   const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache, ask: opts.ask }
   const tree = buildOp(spec, opts.leaves)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
-  const result = await runInline(tree, hydrated, caps)
+  const result = await runInline(tree, hydrated, caps, opts.gOpts)
   return dehydrate(store, result)
 }

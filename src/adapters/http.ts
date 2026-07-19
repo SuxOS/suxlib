@@ -14,6 +14,7 @@ import { validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm } from '../effects/types.js'
+import type { RunGovernedOpts } from '../control/governor.js'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
@@ -54,11 +55,16 @@ function errorResponse(e: unknown, status = 400): Response {
 // op-run.ts's OpRunOpts doc), so a spec's `leaf.name` can resolve against
 // logic this library never shipped.
 //
+// opRunGOpts: a host-supplied RunGovernedOpts (onEvent, custom backoff/sleep/
+// rand), passed through unchanged to runInline's 4th argument -- the only way
+// to observe retry-attempt/memo-hit/memo-miss GovernorEvents (see op-run.ts's
+// OpRunOpts doc). Omitted entirely, runInline's own defaults apply.
+//
 // allowRoutes: restrict routing to these paths (e.g. "/transform",
 // "/sanitize/text") — every route is reachable when omitted. Mirrors
 // mcp.ts's `RegisterFileopsToolsOptions.allow`, so a host embedding this
 // Worker can expose a chosen subset without forking the route table.
-export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn>; allowRoutes?: string[] }
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn>; opRunGOpts?: RunGovernedOpts; allowRoutes?: string[] }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -225,7 +231,7 @@ const routes: Route[] = [
     handle: async (rawBody, env) => {
       const body = rawBody as { spec?: unknown; input?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves })
+      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts: env.opRunGOpts })
       return json({ result })
     },
   },
