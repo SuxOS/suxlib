@@ -198,6 +198,11 @@ test('tarCreate honors an explicit per-file mtime instead of always defaulting t
   expect(parseInt(octal, 8)).toBe(Math.floor(mtime / 1000))
 })
 
+test('tarCreate rejects a pre-1970 (negative) mtime instead of silently clamping it to epoch', () => {
+  const mtime = new Date(1969, 0, 1).getTime()
+  expect(() => tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])).toThrow(/pre-1970/)
+})
+
 test('zipCreate/zipExtract round-trips an explicit per-file mtime', () => {
   const mtime = new Date(2022, 4, 17, 10, 30, 0).getTime() // May has DOS-representable 2-second resolution
   const packed = zipCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])

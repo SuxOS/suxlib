@@ -387,6 +387,20 @@ function headerChecksumValid(header: Uint8Array): boolean {
   return sum === stored
 }
 
+/**
+ * Reject a pre-1970 (negative) mtime rather than silently clamping it to
+ * epoch, mirroring zipCreate's assertZipMtimeInRange guard. tarExtract's
+ * readOctal doesn't yet decode GNU base-256 two's-complement negative
+ * fields (only the positive-overflow case from #235/#236), so writing a
+ * negative value here couldn't round-trip anyway — throw instead of
+ * producing a tar entry silently dated 1970-01-01.
+ */
+function assertTarMtimeNotNegative(name: string, mtime: number): void {
+  if (mtime < 0) {
+    throw new Error(`file '${name}' has a pre-1970 mtime (${mtime}), which tar's on-disk format can't represent — negative mtimes are rejected instead of being silently clamped to epoch.`)
+  }
+}
+
 function tarHeader(name: string, size: number, mtime: number): Uint8Array {
   const h = new Uint8Array(BLOCK)
   const nameBytes = strToU8(name.slice(0, 100))
@@ -395,7 +409,7 @@ function tarHeader(name: string, size: number, mtime: number): Uint8Array {
   h.set(writeOctal(0, 8), 108) // uid
   h.set(writeOctal(0, 8), 116) // gid
   h.set(writeOctal(size, 12), 124) // size
-  h.set(writeOctal(Math.max(0, Math.floor(mtime / 1000)), 12), 136) // mtime (Unix seconds, not ms)
+  h.set(writeOctal(Math.floor(mtime / 1000), 12), 136) // mtime (Unix seconds, not ms)
   h.set(strToU8('        '), 148) // checksum placeholder (8 spaces)
   h[156] = '0'.charCodeAt(0) // typeflag: regular file
   h.set(strToU8('ustar\0'), 257) // magic
@@ -421,6 +435,7 @@ export function tarCreate(files: ArchiveFile[]): Uint8Array {
   const parts: Uint8Array[] = []
   let total = 0
   for (const f of files) {
+    if (f.mtime !== undefined) assertTarMtimeNotNegative(f.name, f.mtime)
     const header = tarHeader(f.name, f.data.length, f.mtime ?? 0)
     const paddedSize = padTo(f.data.length, BLOCK)
     const body = new Uint8Array(paddedSize)
