@@ -323,7 +323,19 @@ There is no linter in this repo. Run both locally before pushing.
   `mapField` item-level `node.concurrency.acquire()` calls (`src/runtime/
   inline.ts:58,72`) — a different, unnamed limiter from `governor.ts`'s
   per-leaf one, out of #297's stated scope, so a map item queued behind a
-  full fan-out limiter still can't be cancelled early.
+  full fan-out limiter still can't be cancelled early. Update (#303): the
+  companion release-side bug is fixed — `map`/`mapField`'s item catch blocks
+  (`src/runtime/inline.ts`) used to call `node.concurrency.release(false)` on
+  *any* thrown error, including an `OpAbortError` an item never actually ran
+  (thrown by `traced()`'s abort checkpoint before dispatch). For a stateful
+  `aimd()` limiter that meant every still-queued item at cancellation time
+  triggered a spurious multiplicative-decrease. `Concurrency` (`src/op/types.ts`)
+  now has an optional `releaseCancelled?()` — frees the slot without touching
+  `limit`/`successes` or emitting an aimd event — and `map`/`mapField` call it
+  instead of `release(false)` specifically for `OpAbortError`, falling back to
+  `release(false)` for any `Concurrency` implementation that predates it. Any
+  future fan-out loop with its own acquire/release-on-catch pattern over a
+  stateful limiter needs the same abort-vs-real-failure distinction.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than

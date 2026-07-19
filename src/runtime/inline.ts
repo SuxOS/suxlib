@@ -1,6 +1,19 @@
-import type { Op, Caps } from '../op/types.js'
+import type { Op, Caps, Concurrency } from '../op/types.js'
 import { runReconcile } from '../op/reconcile.js'
 import { runGoverned, OpAbortError, type RunGovernedOpts } from '../control/governor.js'
+
+// A map/mapField item that throws OpAbortError never actually ran the leaf --
+// traced() (below) refuses to start it -- so it must not be charged as a leaf
+// failure against a stateful limiter like aimd() (#303). release(false) would
+// trigger aimd's multiplicative-decrease for every still-queued item once a
+// run is aborted, permanently punishing throughput for a cancellation that
+// says nothing about leaf reliability. Falls back to release(false) when the
+// concurrency implementation predates releaseCancelled (still frees the
+// slot, just via the pre-#303 path).
+function releaseFailedItem(concurrency: Concurrency, err: unknown): void {
+  if (err instanceof OpAbortError && concurrency.releaseCancelled) concurrency.releaseCancelled()
+  else concurrency.release(false)
+}
 
 export class AskTimeoutError extends Error {
   constructor(readonly prompt: string) {
@@ -57,7 +70,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         const results = await Promise.allSettled(items.map(async (it, i) => {
           await node.concurrency.acquire()
           try { out[i] = await runInline(node.op, it, caps, gOpts, childPath(path, i)); node.concurrency.release(true) }
-          catch (e) { node.concurrency.release(false); throw e }
+          catch (e) { releaseFailedItem(node.concurrency, e); throw e }
         }))
         const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
         if (failed) throw failed.reason
@@ -74,7 +87,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
             const value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts, childPath(path, i))
             out[i] = { ...(it as Record<string, unknown>), [node.elementField]: value }
             node.concurrency.release(true)
-          } catch (e) { node.concurrency.release(false); throw e }
+          } catch (e) { releaseFailedItem(node.concurrency, e); throw e }
         }))
         const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
         if (failed) throw failed.reason

@@ -1,7 +1,7 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
 import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
-import { fixed } from '../../src/control/aimd.js'
+import { fixed, aimd } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { createGovernor, OpAbortError } from '../../src/control/governor.js'
@@ -134,4 +134,29 @@ test('runInline\'s catch does not run the fallback when the try branch fails due
   )
   await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
   expect(fallbackRan).toBe(false)
+})
+
+test('map does not multiplicatively-decrease an aimd concurrency limiter for items cancelled by abort, not a real leaf failure (#303)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  const events: any[] = []
+  // start/min 1 so item 0 alone holds the slot -- items 1 and 2 stay queued
+  // until item 0's release() frees it, guaranteeing they hit the map's
+  // OpAbortError catch path (from traced()'s abort checkpoint) rather than
+  // ever running their own op fn.
+  const limiter = aimd({ start: 1, min: 1, max: 8, onEvent: (e) => events.push(e) })
+  const tree = map(op('abortFirst', async (n: number) => { controller.abort(); return n }, { kind: 'pure' }), { concurrency: limiter })
+  await expect(runInline(tree, [1, 2, 3], caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(events.filter((e) => e.kind === 'aimd-decrease')).toEqual([])
+})
+
+test('mapField does not multiplicatively-decrease an aimd concurrency limiter for items cancelled by abort (#303)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  const events: any[] = []
+  const limiter = aimd({ start: 1, min: 1, max: 8, onEvent: (e) => events.push(e) })
+  const tree = mapField('entries', 'handle', op('abortFirst', async (n: number) => { controller.abort(); return n }, { kind: 'pure' }), { concurrency: limiter })
+  const input = { entries: [{ handle: 1 }, { handle: 2 }, { handle: 3 }] }
+  await expect(runInline(tree, input, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(events.filter((e) => e.kind === 'aimd-decrease')).toEqual([])
 })

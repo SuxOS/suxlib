@@ -95,3 +95,21 @@ test('aborting after a queued acquire has already been granted a slot has no eff
   controller.abort() // must not retroactively fail the already-acquired slot
   c.release(true)
 })
+
+test('aimd.releaseCancelled frees the slot without halving the limit or emitting an event (#303)', async () => {
+  const events: any[] = []
+  const c = aimd({ start: 8, min: 1, onEvent: (e) => events.push(e) })
+  await c.acquire(); c.releaseCancelled!()
+  expect(c.limit).toBe(8) // neither an aimd-decrease (release(false)) nor an aimd-increase
+  expect(events).toEqual([])
+  await c.acquire() // the slot must actually be free again
+  c.release(true)
+})
+
+test('fixed(n).releaseCancelled frees the slot same as release (#303)', async () => {
+  const c = fixed(1)
+  await c.acquire()
+  c.releaseCancelled!()
+  await c.acquire() // must not deadlock -- the slot was freed
+  c.release(true)
+})

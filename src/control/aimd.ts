@@ -27,9 +27,11 @@ export function fixed(n: number): Concurrency {
   const limit = Math.max(1, n)
   let inflight = 0; const q: Array<() => void> = []
   const pump = () => { while (inflight < limit && q.length) { inflight++; q.shift()!() } }
+  const releaseSlot = () => { inflight--; pump() }
   return {
     async acquire(signal?: AbortSignal) { await enqueue(q, pump, signal) },
-    release() { inflight--; pump() },
+    release() { releaseSlot() },
+    releaseCancelled() { releaseSlot() },
   }
 }
 
@@ -55,5 +57,9 @@ export function aimd(opts: { start?: number; min?: number; max?: number; onEvent
       }
       pump()
     },
+    // Frees the slot without touching limit/successes or emitting an
+    // aimd-increase/decrease event -- a cancelled item is neither a success
+    // nor a failure of the leaf itself.
+    releaseCancelled() { inflight--; pump() },
   }
 }

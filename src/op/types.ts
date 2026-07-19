@@ -5,7 +5,14 @@ import type { CircuitBreaker } from '../control/circuit-breaker.js'
 export interface SinkTarget { name: string; write(input: any, caps: Caps): Promise<any> }
 export interface Governor { tokenBucket?: TokenBucket; circuitBreaker?: CircuitBreaker; concurrency?: Concurrency; heavyConcurrency?: Concurrency }
 export interface Caps { store: Store; llm: Llm; clock: Clock; sinks: Record<string, SinkTarget>; governors?: Record<string, Governor>; ask?: Ask; cache?: Cache }
-export interface Concurrency { acquire(signal?: AbortSignal): Promise<void>; release(ok: boolean): void }
+// releaseCancelled is optional (not every Concurrency implementation needs
+// it) and deliberately distinct from release(false): a cooperative abort
+// (OpAbortError, #279) isn't a leaf failure -- see CLAUDE.md's #303 note --
+// so it must free the held slot without charging a stateful limiter like
+// aimd() a multiplicative-decrease it didn't earn. release(true) would be
+// equally wrong the other way (a false "success"), so this is a third,
+// neutral outcome rather than a boolean.
+export interface Concurrency { acquire(signal?: AbortSignal): Promise<void>; release(ok: boolean): void; releaseCancelled?(): void }
 export interface LeafOpts { kind: 'pure' | 'effect'; retries?: number; heavy?: boolean; memo?: boolean }
 // A sink write is always I/O (there's no 'pure' sink), so unlike LeafOpts
 // there's no `kind` to declare -- runGoverned gates it the same way it gates
