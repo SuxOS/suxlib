@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -158,6 +158,21 @@ describe('cli `archive create` (real CLI entry point)', () => {
     expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/--mtime must be a numeric epoch-ms value/))
     process.exitCode = 0
     errSpy.mockRestore()
+  })
+})
+
+describe('cli `archive extract` (real CLI entry point)', () => {
+  it('lists entry name/bytes/mtime as JSON to stdout instead of extracting when -o is omitted (#182)', async () => {
+    const work = tmpDir()
+    const outPath = join(work, 'out.zip')
+    writeFileSync(outPath, archiveCreate('zip', [{ name: 'in.txt', data: new TextEncoder().encode('hello'), mtime: 1700000000000 }]))
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'archive', 'extract', outPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(printed.entries).toEqual([{ name: 'in.txt', bytes: 5, mtime: 1700000000000, truncated: undefined }])
+    logSpy.mockRestore()
   })
 })
 

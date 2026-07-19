@@ -121,8 +121,8 @@ test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })
 
-test('buildOp rejects an unsupported tag (e.g. ask, which needs a host Ask capability)', () => {
-  expect(() => buildOp({ tag: 'ask' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "ask"/)
+test('buildOp rejects an unsupported tag', () => {
+  expect(() => buildOp({ tag: 'nope' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "nope"/)
 })
 
 test('buildOp builds a reconcile node that merges Handles via caps.store, no extra host capability needed', async () => {
@@ -427,4 +427,19 @@ test('mapField rejects `__proto__` as `arrayField`/`elementField`/`renameTo`', (
   expect(() => buildOp({ tag: 'mapField', arrayField: '__proto__', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/arrayField/)
   expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: '__proto__', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/elementField/)
   expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2, renameTo: '__proto__' })).toThrow(/renameTo/)
+})
+
+test('buildOp builds an ask node that degrades gracefully with no Ask capability (#181)', async () => {
+  const store = new MemoryStore()
+  const askOp: OpSpec = { tag: 'ask', prompt: 'proceed?', timeout: '5m', onTimeout: 'proceed' }
+  expect(await runInline(buildOp(askOp), 'piped-through', { store, llm: undefined as any, clock: { now: () => 0 }, sinks: {} })).toBe('piped-through')
+
+  const failOp: OpSpec = { tag: 'ask', prompt: 'proceed?', timeout: '5m', onTimeout: 'fail' }
+  await expect(runInline(buildOp(failOp), 'x', { store, llm: undefined as any, clock: { now: () => 0 }, sinks: {} })).rejects.toThrow(/ask timed out/)
+})
+
+test('buildOp rejects an ask spec missing `prompt`/`timeout` or with a bad `onTimeout`', () => {
+  expect(() => buildOp({ tag: 'ask', timeout: '5m', onTimeout: 'proceed' } as unknown as OpSpec)).toThrow(/prompt/)
+  expect(() => buildOp({ tag: 'ask', prompt: 'x', onTimeout: 'proceed' } as unknown as OpSpec)).toThrow(/timeout/)
+  expect(() => buildOp({ tag: 'ask', prompt: 'x', timeout: '5m', onTimeout: 'nope' } as unknown as OpSpec)).toThrow(/onTimeout/)
 })

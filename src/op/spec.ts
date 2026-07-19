@@ -1,6 +1,6 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, mapField, sink, reconcile, catchOp } from './combinators.js'
+import { op, pipe, map, mapField, sink, reconcile, catchOp, ask } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
@@ -13,6 +13,7 @@ export type OpSpec =
   | { tag: 'sink'; targets: string[] }
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
+  | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
 
 const FIELD_POLICIES: FieldPolicy[] = ['last-write-wins', 'union', 'keep-first']
 const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge']
@@ -135,9 +136,11 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * reshapes/renames the array's own field. `reconcile` only needs
  * `caps.store` (already supplied by every adapter call, see runInline's
  * `case 'reconcile'`), so it's expressible directly as an OpSpec variant.
- * `ask` still depends on a live Ask capability a stateless adapter call has
- * no way to supply, so composing that still requires building an Op tree
- * in-process. `catch` (#183) runs its `try` branch and, on any thrown error
+ * `ask` is a straight pass-through to the `ask()` combinator -- `runInline`
+ * already degrades gracefully with no `Ask` capability supplied (throws on
+ * `onTimeout: 'fail'`, proceeds with the piped value on `'proceed'`), so no
+ * extra validation is needed here beyond the tagged-union shape check. `catch`
+ * (#183) runs its `try` branch and, on any thrown error
  * (retries exhausted, `CircuitOpenError`, `AskTimeoutError`, or a plain leaf
  * throw), re-runs its `catch` branch against the *original* input instead of
  * aborting the whole pipe -- e.g. "try the primary `sink`, fall back to a
@@ -259,7 +262,13 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       if (!spec.catch) throw new Error('catch spec requires a `catch`')
       return catchOp(buildOpNode(spec.try, leaves), buildOpNode(spec.catch, leaves))
     }
+    case 'ask': {
+      if (typeof spec.prompt !== 'string' || !spec.prompt) throw new Error('ask spec requires a non-empty `prompt`')
+      if (typeof spec.timeout !== 'string' || !spec.timeout) throw new Error('ask spec requires a non-empty `timeout`')
+      if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') throw new Error('ask spec\'s `onTimeout` must be "proceed" or "fail"')
+      return ask(spec.prompt, { timeout: spec.timeout, onTimeout: spec.onTimeout })
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)`)
   }
 }

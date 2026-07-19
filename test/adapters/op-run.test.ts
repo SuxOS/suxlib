@@ -163,3 +163,11 @@ test('runOpSpec: an unknown leaf name still surfaces a clear error when opts.lea
   const spec: OpSpec = { tag: 'leaf', name: 'nope' }
   await expect(runOpSpec({ spec, input: null }, { leaves: { shout: async (input) => input } })).rejects.toThrow(/unknown leaf "nope"/)
 })
+
+test('runOpSpec: an ask spec fails without opts.ask (onTimeout: fail), and opts.ask lets a host answer it', async () => {
+  const spec: OpSpec = { tag: 'ask', prompt: 'approve?', timeout: '5m', onTimeout: 'fail' }
+  await expect(runOpSpec({ spec, input: null })).rejects.toThrow(/ask timed out/)
+
+  const result = await runOpSpec({ spec, input: null }, { ask: { request: async () => ({ answered: true, value: 'approved' }) } })
+  expect(result).toBe('approved')
+})

@@ -222,6 +222,15 @@ describe('mcp adapter', () => {
     expect(result.isError).toBeFalsy()
     expect(parseResult(result)).toEqual({ a: 1 })
   })
+
+  it('run_pipeline: an ask spec reaches buildOp through the MCP tool schema (not silently stripped), degrading gracefully with no Ask capability wired (#181)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'ask', prompt: 'approve?', timeout: '5m', onTimeout: 'proceed' }, input: { a: 1 } },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ a: 1 })
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {

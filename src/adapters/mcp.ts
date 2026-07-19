@@ -63,6 +63,7 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1) }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
   z.object({ tag: z.literal('catch'), try: opSpecSchema, catch: opSpecSchema }),
+  z.object({ tag: z.literal('ask'), prompt: z.string(), timeout: z.string(), onTimeout: z.enum(['proceed', 'fail']) }),
 ]))
 
 export type RegisterFileopsToolsOptions = {
