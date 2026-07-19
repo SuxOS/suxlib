@@ -90,8 +90,10 @@ can't do since it only replaces a whole array element. A `sink` step names its
 target(s) by string, resolved against `Caps.sinks`/`OpRunOpts.sinks` at run time, and a
 `reconcile` step needs only `caps.store`, which every adapter call already supplies —
 neither needs a live capability inside the spec itself, so both are spec-expressible.
-`ask` is the sole exception still not accepted from a spec, since it needs a
-host-supplied `Ask` implementation a stateless call has no way to provide. A
+An `ask` step builds a real `ask()` op node directly from the spec (`prompt`,
+`timeout`, `onTimeout`); with no host-supplied `Ask` capability, `runInline`
+degrades gracefully — it throws on `onTimeout: 'fail'` or proceeds with the
+piped value on `'proceed'`. A
 `catch` step runs its `try` branch and, on any thrown error, re-runs its
 `catch` branch against the original input instead of aborting the whole
 pipe — e.g. `{ tag: 'catch', try: <primary sink>, catch: <fallback sink> }`.
