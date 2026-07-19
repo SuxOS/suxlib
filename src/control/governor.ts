@@ -9,8 +9,8 @@ import { tokenBucket } from './token-bucket.js'
 import { fixed, aimd } from './aimd.js'
 
 export class CircuitOpenError extends Error {
-  constructor(readonly leafName: string) {
-    super(`circuit open for leaf "${leafName}"`)
+  constructor(readonly governedName: string) {
+    super(`circuit open for "${governedName}"`)
     this.name = 'CircuitOpenError'
   }
 }
