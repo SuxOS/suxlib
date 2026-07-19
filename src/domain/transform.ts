@@ -355,12 +355,20 @@ function encodeEntitiesXml(s: string): string {
 /**
  * Sanitize an object key before using it as an XML tag/attribute name: names
  * may only contain `[A-Za-z0-9_.-]` and can't start with a digit, `.`, or `-`
- * (those are valid mid-name but not as the first char). Anything else is
- * replaced with `_` so `toXml` never interpolates a raw key into markup —
- * without this a key like `a><script>` would inject its own tag/attribute.
+ * (those are valid mid-name but not as the first char). Every character
+ * outside `[A-Za-z0-9.-]` -- including a literal `_`, which is reserved below
+ * as the escape delimiter -- is replaced by a self-delimited `_<hex>_` escape,
+ * so `toXml` never interpolates a raw key into markup (without this a key
+ * like `a><script>` would inject its own tag/attribute) *and* two distinct
+ * keys that differ only in which invalid characters they contain (e.g. 'a>b'
+ * vs 'a<b', which used to both collapse onto the bare substitute 'a_b' and
+ * silently merge into one array-valued tag) can no longer collide: since a
+ * literal `_` never survives un-escaped from the input, every `_` in `safe`
+ * marks the start of a self-delimited escape block, so the key -> safe
+ * mapping stays injective the same way the digit-prefix step below is.
  */
 function xmlName(key: string): string {
-  const safe = key.replace(/[^A-Za-z0-9_.-]/g, '_')
+  const safe = [...key].map(ch => (/[A-Za-z0-9.-]/.test(ch) ? ch : `_${ch.codePointAt(0)!.toString(16)}_`)).join('')
   // Prefixing must apply whenever `safe` doesn't already start with a letter —
   // including when it already starts with `_` — or two distinct keys (e.g.
   // '123abc' and '_123abc') sanitize to the same escaped name. Unconditionally
