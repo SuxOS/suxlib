@@ -103,6 +103,13 @@ local JSON file, resolving any input value shaped `{ "$file": "<path>", "type"?:
 "<mime>" }` off disk into a Handle ref, and (with `-o <dir>`) writing dehydrated Handle
 results back to files instead of inlining base64 in the printed JSON.
 
+To discover what a spec can currently contain — registered leaf names and their
+declared input/output shapes, sink target names, reconcile modes, and field-merge
+policies — without reading source, all three adapters also expose a read-only schema
+query: `GET /op/schema`, the `describe_pipeline` MCP tool, and `suxlib-fileops pipeline
+describe`. Each merges in any host-registered `opRunLeaves`/`opRunSinks` alongside the
+built-in registry, the same way `POST /op/run`/`run_pipeline`/`pipeline run` do.
+
 ## Development
 
 ```sh

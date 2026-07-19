@@ -15,6 +15,7 @@ import { dispatchTransform, type Format } from '../domain/transform.js'
 import { runOpSpec, type OpRunOpts } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import type { OpSpec } from '../op/spec.js'
+import { describePipelineSchema } from '../op/introspect.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 const program = new Command()
@@ -328,6 +329,20 @@ export const pipelineRunCmd = pipelineCmd
     } else {
       console.log(JSON.stringify(result))
     }
+  })
+
+/** Prints the same leaf/sink/reconcile-mode/field-policy schema `describe_pipeline`
+ * (mcp.ts) and `GET /op/schema` (http.ts) expose, so a caller building a
+ * `pipeline run` spec file can discover the current op-tree grammar without
+ * digging through source (#187). `--config` mirrors `pipeline run`'s own flag,
+ * so host-registered leaves/sinks show up here too, not just the built-ins. */
+pipelineCmd
+  .command('describe')
+  .description('Print the op-tree pipeline schema (leaves, sinks, reconcile modes, field-merge policies) as JSON')
+  .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- same as `pipeline run --config`, for host-registered leaves/sinks')
+  .action(async (opts: { config?: string }) => {
+    const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
+    console.log(JSON.stringify(describePipelineSchema(runOpts.leaves, runOpts.sinks)))
   })
 
 /** Re-exported for tests: the actual dispatch logic is `dispatchTransform` in

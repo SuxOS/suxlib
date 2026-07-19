@@ -11,6 +11,7 @@ import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/tra
 import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import type { OpSpec } from '../op/spec.js'
+import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm } from '../effects/types.js'
 
@@ -227,6 +228,11 @@ const routes: Route[] = [
       const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves })
       return json({ result })
     },
+  },
+  {
+    method: 'GET',
+    path: '/op/schema',
+    handle: async (_rawBody, env) => json(describePipelineSchema(env.opRunLeaves, env.opRunSinks)),
   },
 ]
 
