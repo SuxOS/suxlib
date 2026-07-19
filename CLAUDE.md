@@ -74,6 +74,14 @@ There is no linter in this repo. Run both locally before pushing.
   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
 - **Update a branch by rebasing onto `main`** (`git rebase main`) — never merge `main`
   back in.
+- **`git fetch origin main` before trusting a local `main`/`origin/main` ref to
+  decide whether a prerequisite has merged.** A fresh checkout's local refs can be
+  stale relative to what's actually on GitHub — confirmed when #301 (which depends
+  on #297's `Concurrency.acquire(signal?)`) initially looked unbuildable against a
+  stale local `main` that predated #297's merge, until an explicit fetch picked up
+  the real tip. Symptom: grepping `src/` for a prerequisite's symbol comes up empty
+  even though `gh pr list --search "<issue>" --state all` shows it merged — fetch
+  before concluding "not merged yet" and dropping/reimplementing.
 - **Integrate via PR.** PR bodies end with:
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`
 - **Before merging anything substantial: run `/code-review`.** Findings-fix rounds
