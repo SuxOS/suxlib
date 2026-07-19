@@ -13,7 +13,7 @@ export function fixed(n: number): Concurrency {
 
 export interface Aimd extends Concurrency { readonly limit: number }
 export function aimd(opts: { start?: number; min?: number; max?: number; onEvent?: GovernorEventHandler } = {}): Aimd {
-  const min = Math.max(1, opts.min ?? 1), max = opts.max ?? 64
+  const min = Math.max(1, opts.min ?? 1), max = Math.max(min, opts.max ?? 64)
   let limit = Math.min(max, Math.max(min, opts.start ?? 4))
   let inflight = 0; let successes = 0; const q: Array<() => void> = []
   const pump = () => { while (inflight < limit && q.length) { inflight++; q.shift()!() } }

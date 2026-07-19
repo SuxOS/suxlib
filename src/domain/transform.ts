@@ -621,17 +621,24 @@ export function dispatchTransform(data: string, from: Format | 'auto', to: Forma
 // Common subset: headings, links, bold/em, lists, inline code, code blocks,
 // blockquotes, paragraphs.
 
+// Strips tags without decoding entities -- used for substitutions inside
+// inlineToMd, which decodes entities exactly once, on the fully-assembled
+// string, to avoid double-decoding already-decoded doubly-encoded content (#263).
+function stripTags(s: string): string {
+  return s.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+}
+
 function inlineText(s: string): string {
-  return decodeEntities(s.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim()
+  return decodeEntities(stripTags(s))
 }
 
 function inlineToMd(s: string): string {
   return decodeEntities(
     s
-      .replace(/<a\b[^>]*\bhref=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, txt) => `[${inlineText(txt)}](${href})`)
-      .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `**${inlineText(txt)}**`)
-      .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `*${inlineText(txt)}*`)
-      .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, txt) => `\`${inlineText(txt)}\``)
+      .replace(/<a\b[^>]*\bhref=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, txt) => `[${stripTags(txt)}](${href})`)
+      .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `**${stripTags(txt)}**`)
+      .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `*${stripTags(txt)}*`)
+      .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, txt) => `\`${stripTags(txt)}\``)
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<[^>]+>/g, ''),
   )

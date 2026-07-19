@@ -559,6 +559,22 @@ test('tarExtract decodes a GNU base-256-encoded size field instead of misreading
   expect(entries[0].text).toBe('hello from a base-256 size field')
 })
 
+test('tarExtract rejects a GNU base-256-encoded negative size field instead of misreading it as a huge/negative length', () => {
+  const header = new Uint8Array(BLOCK)
+  header.set(strToU8('evil.txt'), 0)
+  header.set(encodeNegativeBase256(-1024, 12), 124)
+  header[156] = '0'.charCodeAt(0)
+  header.set(strToU8('        '), 148)
+  let checksum = 0
+  for (let i = 0; i < BLOCK; i++) checksum += header[i]
+  header.set(octalField(checksum, 8), 148)
+  const footer = new Uint8Array(BLOCK * 2)
+  const packed = new Uint8Array(header.length + footer.length)
+  packed.set(header, 0)
+  packed.set(footer, header.length)
+  expect(() => tarExtract(packed)).toThrow(/negative size/)
+})
+
 /** GNU tar's base-256 two's-complement negative encoding (leading byte 0xff, vs 0x80 for a positive magnitude), mirroring node-tar's encodeNegative -- used to build a fixture whose mtime field encodes a pre-1970 timestamp. */
 function encodeNegativeBase256(value: number, length: number): Uint8Array {
   const buf = new Uint8Array(length)

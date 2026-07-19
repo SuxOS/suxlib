@@ -204,3 +204,8 @@ test('htmlToMarkdown converts headings, lists, links, and code', () => {
   expect(md).toContain('- one')
   expect(md).toContain('[link](https://x.test)')
 })
+
+test('htmlToMarkdown does not double-decode doubly-encoded entities inside inline tags', () => {
+  expect(dispatchTransform('<strong>&amp;#65;</strong>', 'html', 'markdown')).toBe('**&#65;**')
+  expect(dispatchTransform('<p>plain &amp;amp; text</p>', 'html', 'markdown')).toBe('plain &amp; text')
+})
