@@ -312,8 +312,9 @@ export function gzipExtract(bytes: Uint8Array): UnpackedEntry {
 }
 
 // ---------- tar (USTAR, uncompressed) ----------
-// Minimal pure-JS tar reader/writer. No compression — pair with gzip above for
-// .tar.gz if needed (gzipCreate(tarCreate(files))).
+// Minimal pure-JS tar reader/writer. No compression of its own — the
+// 'tar.gz' ArchiveFormat below composes this with gzip above
+// (gzipCreate(tarCreate(files)) / tarExtract(gunzipCapped(bytes))).
 
 const BLOCK = 512
 
@@ -453,7 +454,7 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
 
 // ---------- unified entry points ----------
 
-export const ARCHIVE_FORMATS = ['zip', 'gzip', 'tar'] as const
+export const ARCHIVE_FORMATS = ['zip', 'gzip', 'tar', 'tar.gz'] as const
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number]
 
 export function archiveCreate(format: ArchiveFormat, files: ArchiveFile[]): Uint8Array {
@@ -466,6 +467,8 @@ export function archiveCreate(format: ArchiveFormat, files: ArchiveFile[]): Uint
       return zipCreate(files)
     case 'tar':
       return tarCreate(files)
+    case 'tar.gz':
+      return gzipCreate(tarCreate(files))
     case 'gzip':
       if (files.length !== 1) throw new Error(`gzip packs exactly one file — got ${files.length}. Use format='zip' or 'tar' for multiple.`)
       return gzipCreate(files[0].data, files[0].mtime ?? 0)
@@ -488,6 +491,10 @@ export function archiveExtract(format: ArchiveFormat, bytes: Uint8Array): Archiv
       const { entries, skipped } = tarExtract(bytes)
       return skipped.length ? { entries, skipped } : { entries }
     }
+    case 'tar.gz': {
+      const { entries, skipped } = tarExtract(gunzipCapped(bytes))
+      return skipped.length ? { entries, skipped } : { entries }
+    }
     case 'gzip':
       return { entries: [gzipExtract(bytes)] }
   }
@@ -497,6 +504,7 @@ export const ARCHIVE_MIME: Record<ArchiveFormat, string> = {
   zip: 'application/zip',
   gzip: 'application/gzip',
   tar: 'application/x-tar',
+  'tar.gz': 'application/gzip',
 }
 
 // ---------- op-engine leaf ----------

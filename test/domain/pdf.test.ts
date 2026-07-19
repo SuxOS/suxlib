@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { PDFDocument } from 'pdf-lib'
-import { pdfShrink, pdfPageCount, loadBoundedPdf, shrink, MAX_PDF_INPUT_BYTES } from '../../src/domain/pdf.js'
+import { pdfShrink, pdfPageCount, loadBoundedPdf, shrink, pageCount, MAX_PDF_INPUT_BYTES } from '../../src/domain/pdf.js'
 import { MemoryStore } from '../../src/effects/types.js'
 import { putBytes, resolve } from '../../src/handles/handle.js'
 
@@ -44,6 +44,13 @@ test('shrink (Handle-based leaf) round-trips a PDF through a Store and reports t
 test('pdfPageCount reports the page count', async () => {
   const input = await blankPdf(3)
   expect(await pdfPageCount(input)).toBe(3)
+})
+
+test('pageCount (Handle-based leaf) resolves the input Handle and reports the same count as pdfPageCount', async () => {
+  const store = new MemoryStore()
+  const input = await blankPdf(3)
+  const handle = await putBytes(store, input, 'application/pdf')
+  expect(await pageCount(handle, { store } as any)).toBe(3)
 })
 
 test('loadBoundedPdf rejects a PDF larger than MAX_PDF_INPUT_BYTES', async () => {

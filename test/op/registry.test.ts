@@ -2,14 +2,14 @@ import { test, expect } from 'vitest'
 import { LEAF_REGISTRY, LEAF_SHAPES, resolveLeaf, mergeLeaves } from '../../src/op/registry.js'
 import type { LeafFn } from '../../src/op/types.js'
 import { pack, unpack, unzip } from '../../src/domain/archive.js'
-import { shrink } from '../../src/domain/pdf.js'
+import { shrink, pageCount } from '../../src/domain/pdf.js'
 import { redact, scrub } from '../../src/domain/sanitize.js'
 import { convert } from '../../src/domain/transform.js'
 import { extract, summarize } from '../../src/domain/text.js'
 import { wrapHandle, unwrapHandle, stampLeaf } from '../../src/op/reshape.js'
 
 test('LEAF_REGISTRY contains every domain leaf under its wrapper name', () => {
-  expect(LEAF_REGISTRY).toEqual({ pack, unpack, unzip, shrink, redact, scrub, convert, extract, summarize, wrapHandle, unwrapHandle, stamp: stampLeaf })
+  expect(LEAF_REGISTRY).toEqual({ pack, unpack, unzip, shrink, pageCount, redact, scrub, convert, extract, summarize, wrapHandle, unwrapHandle, stamp: stampLeaf })
 })
 
 test('resolveLeaf returns the exact registered fn for a known name', () => {
@@ -59,6 +59,7 @@ test('LEAF_SHAPES matches each leaf\'s actual {handle, ...} vs bare-Handle wrapp
   expect(LEAF_SHAPES.unzip).toEqual({ input: 'handle', output: 'handle[]' })
   expect(LEAF_SHAPES.convert).toEqual({ input: { object: { handle: 'handle' } }, output: 'handle' })
   expect(LEAF_SHAPES.shrink).toEqual({ input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } })
+  expect(LEAF_SHAPES.pageCount).toEqual({ input: 'handle', output: 'unknown' })
   expect(LEAF_SHAPES.wrapHandle).toEqual({ input: 'handle', output: { object: { handle: 'handle' } } })
   expect(LEAF_SHAPES.unwrapHandle).toEqual({ input: { object: { handle: 'handle' } }, output: 'handle' })
 })

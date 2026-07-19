@@ -68,6 +68,15 @@ describe('extractArchiveTo (CLI filesystem extract path)', () => {
     expect(statSync(join(out, 'a.txt')).mtimeMs).toBeCloseTo(mtime, -3)
   })
 
+  it('writes entries from a tar.gz archive', () => {
+    const out = tmpDir()
+    const packed = archiveCreate('tar.gz', [{ name: 'a.txt', data: new TextEncoder().encode('hello') }])
+    const { written, skipped } = extractArchiveTo('tar.gz', packed, out)
+    expect(written).toBe(1)
+    expect(skipped).toEqual([])
+    expect(readFileSync(join(out, 'a.txt'), 'utf8')).toBe('hello')
+  })
+
   it('refuses to extract (and writes nothing outside the output dir) for a zip-slip entry name', () => {
     const out = tmpDir()
     const escapeTarget = resolve(out, '..', 'suxlib-fileops-zip-slip-victim.txt')

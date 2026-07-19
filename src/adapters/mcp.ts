@@ -125,7 +125,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
     server.registerTool(
       'archive_create',
       {
-        description: 'Pack one or more files into a zip, tar, or gzip archive.',
+        description: 'Pack one or more files into a zip, tar, gzip, or tar.gz archive.',
         inputSchema: {
           format: z.enum(ARCHIVE_FORMATS).default('zip'),
           files: z.array(z.object({ name: z.string(), base64: z.string(), mtime: z.number().optional() })).min(1).max(MAX_ENTRIES),
@@ -156,7 +156,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
     server.registerTool(
       'archive_extract',
       {
-        description: 'Extract a zip, tar, or gzip archive into its entries.',
+        description: 'Extract a zip, tar, gzip, or tar.gz archive into its entries.',
         inputSchema: {
           format: z.enum(ARCHIVE_FORMATS).default('zip'),
           base64: z.string(),
