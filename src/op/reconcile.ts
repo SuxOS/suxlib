@@ -6,6 +6,7 @@ export type ReconcileOpts =
   | { mode: 'last-write-wins' }
   | { mode: 'field-merge'; defaultPolicy?: FieldPolicy; policy?: Record<string, FieldPolicy> }
 export async function faithfulUnion(handles: Handle[], store: Store): Promise<Handle> {
+  if (handles.length === 0) throw new Error('faithfulUnion: empty input')
   const seen = new Set<string>(); const blocks: string[] = []
   for (const h of handles) {
     if (seen.has(h.sha256)) continue; seen.add(h.sha256)

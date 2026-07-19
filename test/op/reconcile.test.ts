@@ -11,3 +11,7 @@ test('faithfulUnion concatenates and dedups identical blocks', async () => {
   expect(master.match(/shared/g)!.length).toBe(1)  // deduped
   expect(master).toContain('unique')
 })
+test('faithfulUnion throws on empty input, matching lastWriteWins/fieldMerge', async () => {
+  const s = new MemoryStore()
+  await expect(faithfulUnion([], s)).rejects.toThrow('faithfulUnion: empty input')
+})

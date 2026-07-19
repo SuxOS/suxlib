@@ -340,10 +340,26 @@ export const transform = dispatchTransform
  * `opRunOpts` lets a programmatic caller (not the bin script, which has no
  * way to construct a live JS object from argv) supply `pipeline run` the
  * same host-configurable governors/cache/store/sinks/llm HTTP's Env and
- * MCP's RegisterFileopsToolsOptions already offer runOpSpec. */
-export async function main(argv: string[] = process.argv, opRunOpts: OpRunOpts = {}): Promise<void> {
+ * MCP's RegisterFileopsToolsOptions already offer runOpSpec. `allowCommands`
+ * restricts the exposed top-level command tree (e.g. `['transform',
+ * 'sanitize']`) to that subset, mirroring MCP's `RegisterFileopsToolsOptions
+ * .allow` / HTTP's `Env.allowRoutes` -- every command is available when
+ * omitted. Re-applied fresh on every call against the full command list
+ * captured at module load, so one call's subset never leaks into the next
+ * call's default. */
+export async function main(argv: string[] = process.argv, opRunOpts: OpRunOpts = {}, allowCommands?: string[]): Promise<void> {
   cliOpRunOpts = opRunOpts
   pipelineRunCmd.description(pipelineRunDescription(mergeLeaves(opRunOpts.leaves)))
+  // argv[2] is the top-level subcommand name (archive/pdf/sanitize/transform/pipeline)
+  // for every invocation shape this CLI supports -- checked ahead of commander's own
+  // parsing rather than by mutating `program.commands` (a readonly-typed array on the
+  // module-level singleton Command; reassigning/splicing it would also need resetting
+  // back to the full set on every call to avoid one call's subset leaking into the next).
+  if (allowCommands && argv[2] !== undefined && !allowCommands.includes(argv[2]) && argv[2] !== '--help' && argv[2] !== '-h') {
+    console.error(`error: unknown command '${argv[2]}' (allowed: ${allowCommands.join(', ')})`)
+    process.exitCode = 1
+    return
+  }
   try {
     await program.parseAsync(argv)
   } catch (e) {
