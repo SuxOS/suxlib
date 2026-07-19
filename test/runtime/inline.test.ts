@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
-import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
+import { op, pipe, map, mapField, parallel, reconcile, sink, catchOp } from '../../src/op/combinators.js'
 import { fixed } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
@@ -70,6 +70,43 @@ test('runInline runs mapField over one named field of each array element, passin
   const tree = mapField('entries', 'handle', op('double', async (n: number) => n * 2, { kind: 'pure' }), { concurrency: fixed(2), renameTo: 'files' })
   const result = await runInline(tree, { entries: [{ name: 'a', handle: 1 }, { name: 'b', handle: 2 }], skipped: ['x'] }, caps)
   expect(result).toEqual({ skipped: ['x'], files: [{ name: 'a', handle: 2 }, { name: 'b', handle: 4 }] })
+})
+
+test('runInline runs parallel branches over the same input, collecting results in branch order (#289)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = parallel(
+    op('double', async (n: number) => n * 2, { kind: 'pure' }),
+    op('triple', async (n: number) => n * 3, { kind: 'pure' }),
+  )
+  const result = await runInline(tree, 5, caps)
+  expect(result).toEqual([10, 15])
+})
+
+test('runInline feeds parallel\'s Handle[] result straight into reconcile (#289)', async () => {
+  const store = new MemoryStore()
+  const caps: any = { store, llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = pipe(
+    parallel(
+      op('a', async (s: string) => putText(store, s + '-a'), { kind: 'effect' }),
+      op('b', async (s: string) => putText(store, s + '-b'), { kind: 'effect' }),
+    ),
+    reconcile({ mode: 'faithful-union' }),
+  )
+  const result = await runInline(tree, 'x', caps)
+  const text = await resolveText(store, result)
+  expect(text).toContain('x-a')
+  expect(text).toContain('x-b')
+})
+
+test('runInline lets every parallel branch settle before rejecting on the first failure', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let slowRan = false
+  const tree = parallel(
+    op('boom', async () => { throw new Error('branch failed') }, { kind: 'pure' }),
+    op('slow', async (n: number) => { slowRan = true; return n }, { kind: 'pure' }),
+  )
+  await expect(runInline(tree, 5, caps)).rejects.toThrow('branch failed')
+  expect(slowRan).toBe(true)
 })
 
 test('runInline runs the catch branch against the original input when the try branch throws', async () => {

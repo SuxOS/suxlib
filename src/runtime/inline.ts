@@ -81,6 +81,17 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         const { [node.arrayField]: _dropped, ...rest } = obj
         return { ...rest, [node.renameTo ?? node.arrayField]: out }
       })
+    case 'parallel':
+      // Same allSettled-over-Promise.all reasoning as 'map' above/'sink' below: a
+      // branch may still be mid-flight (retries, idempotencyKey digest) when
+      // a sibling branch throws, and allSettled lets every branch's own
+      // node-exit trace land before this node decides success/failure.
+      return traced('parallel', undefined, path, caps, gOpts, async () => {
+        const results = await Promise.allSettled(node.ops.map((o, i) => runInline(o, input, caps, gOpts, childPath(path, i))))
+        const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+        if (failed) throw failed.reason
+        return results.map(r => (r as PromiseFulfilledResult<any>).value)
+      })
     case 'reconcile':
       return traced('reconcile', undefined, path, caps, gOpts, () => runReconcile(node.opts, input, caps.store))
     case 'sink':

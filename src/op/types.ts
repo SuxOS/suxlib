@@ -23,6 +23,7 @@ export type Op =
   | { tag: 'pipe'; steps: Op[] }
   | { tag: 'map'; op: Op; concurrency: Concurrency }
   | { tag: 'mapField'; arrayField: string; elementField: string; op: Op; concurrency: Concurrency; renameTo?: string }
+  | { tag: 'parallel'; ops: Op[] }
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'sink'; targets: SinkFanoutTarget[]; opts?: SinkOpts }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }

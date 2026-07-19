@@ -1,6 +1,6 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, mapField, sink, reconcile, catchOp, ask } from './combinators.js'
+import { op, pipe, map, mapField, parallel, sink, reconcile, catchOp, ask } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
@@ -14,6 +14,7 @@ export type OpSpec =
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
   | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: number; renameTo?: string }
+  | { tag: 'parallel'; ops: OpSpec[] }
   | { tag: 'sink'; targets: OpSpecSinkTarget[]; opts?: OpSpecSinkOpts }
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
@@ -30,7 +31,7 @@ export const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merg
 // run_pipeline tool description, README's tag union prose) from this one
 // array instead of re-enumerating the tag literals, which drifted twice
 // already (#166, #158) before drifting a third time for reconcile/ask (#213).
-export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask'] as const satisfies readonly OpSpec['tag'][]
+export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'parallel', 'sink', 'reconcile', 'catch', 'ask'] as const satisfies readonly OpSpec['tag'][]
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -91,6 +92,14 @@ function shapesEqual(a: LeafShape, b: LeafShape): boolean {
  * branch could run at runtime, a mismatched pair collapses to 'unknown'
  * rather than guessing which branch a downstream step should be checked
  * against, same permissive fallback as an unrepresentable map/mapField case.
+ * `parallel`'s boundary is derived from its N branches together, not one
+ * inner op: on the input side, every branch receives the same piped value,
+ * so the shape only resolves when every branch declares the *same* input
+ * shape (shapesEqual across all of them); on the output side, mirroring
+ * `map`'s one-array-level-up trick, the branches' results collect into an
+ * array, so the shape resolves to `handle[]` only when every branch outputs
+ * a bare `handle` -- any other mix (including an empty/malformed `ops`)
+ * collapses to 'unknown', same permissive fallback as elsewhere.
  */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (!s || typeof s !== 'object') return 'unknown'
@@ -100,6 +109,13 @@ function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
     const field: LeafFieldShape = stepShape(s.op, side) === 'handle' ? 'handle' : 'unknown'
     const arrayField = side === 'output' ? (s.renameTo ?? s.arrayField) : s.arrayField
     return { object: { [arrayField]: { arrayObject: { [s.elementField]: field } } } }
+  }
+  if (s.tag === 'parallel') {
+    const ops = Array.isArray(s.ops) ? s.ops : []
+    if (!ops.length) return 'unknown'
+    if (side === 'output') return ops.every(o => stepShape(o, 'output') === 'handle') ? 'handle[]' : 'unknown'
+    const shapes = ops.map(o => stepShape(o, 'input'))
+    return shapes.every(sh => shapesEqual(sh, shapes[0])) ? shapes[0] : 'unknown'
   }
   if (s.tag === 'catch') {
     const tryShape = stepShape(s.try, side); const catchShape = stepShape(s.catch, side)
@@ -137,7 +153,7 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
 /**
  * Builds a real Op tree from a caller-supplied JSON description, resolving
  * every leaf name against the registry -- a spec can never carry a live `fn`,
- * only a name. Supports `leaf`/`pipe`/`map`/`mapField`/`sink`: a `sink` spec
+ * only a name. Supports `leaf`/`pipe`/`map`/`mapField`/`parallel`/`sink`: a `sink` spec
  * carries target *names*, resolved against Caps.sinks at run time
  * (runInline's `case 'sink'`) the same way it already works for an in-process
  * caller -- see SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks
@@ -151,7 +167,11 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * renaming the array field itself -- e.g. bridging unpack's `entries` into
  * pack's `files` while transforming each entry's `handle` in between, which
  * `map` alone can't do since it only replaces a whole array element, never
- * reshapes/renames the array's own field. `reconcile` only needs
+ * reshapes/renames the array's own field. `parallel` (#289) runs N branches
+ * concurrently over the *same* input, collecting their results into an array
+ * -- the one shape that can then feed straight into `reconcile`, which needs
+ * a `Handle[]` no other spec-expressible tag can produce from a single input
+ * inside one pipeline. `reconcile` only needs
  * `caps.store` (already supplied by every adapter call, see runInline's
  * `case 'reconcile'`), so it's expressible directly as an OpSpec variant.
  * `ask` is a straight pass-through to the `ask()` combinator -- `runInline`
@@ -305,6 +325,14 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       }
       return
     }
+    case 'parallel': {
+      if (!Array.isArray(spec.ops) || !spec.ops.length) {
+        errors.push({ path, message: 'parallel spec requires a non-empty `ops` array' })
+      } else {
+        spec.ops.forEach((s, i) => collectSpecErrors(s, leaves, `${path}.ops[${i}]`, errors))
+      }
+      return
+    }
     case 'sink': {
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
         errors.push({ path, message: 'sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES })
@@ -353,7 +381,7 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       return
     }
     default:
-      errors.push({ path, message: `unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)` })
+      errors.push({ path, message: `unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, parallel, sink, reconcile, catch, ask)` })
   }
 }
 
@@ -424,6 +452,10 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       return mapField(spec.arrayField, spec.elementField, buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency), renameTo: spec.renameTo })
     }
+    case 'parallel': {
+      if (!Array.isArray(spec.ops) || !spec.ops.length) throw new Error('parallel spec requires a non-empty `ops` array')
+      return parallel(...spec.ops.map((s) => buildOpNode(s, leaves)))
+    }
     case 'sink': {
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
         throw new Error('sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES)
@@ -467,6 +499,6 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       return ask(spec.prompt, { timeout: spec.timeout, onTimeout: spec.onTimeout })
     }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, parallel, sink, reconcile, catch, ask)`)
   }
 }

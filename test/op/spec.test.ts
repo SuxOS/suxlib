@@ -402,6 +402,33 @@ test('buildOp\'s shape check still rejects mapField feeding pack when the array 
   expect(() => buildOp(spec)).toThrow(/pipe step 2 \("pack"\) expects \{format, files\} input, but step 1 \("mapField"\) produces \{entries\}/)
 })
 
+test('parallel op spec fans one input into N branches, feeding straight into reconcile (#289)', async () => {
+  const c = caps()
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'parallel', ops: [{ tag: 'leaf', name: 'stamp' }, { tag: 'leaf', name: 'stamp' }] },
+      { tag: 'reconcile', opts: { mode: 'faithful-union' } },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+  const h = await putBytes(c.store, new Uint8Array([1]), 'application/octet-stream')
+  const result = await runInline(buildOp(spec), h, c)
+  expect(result.sha256).toBeDefined()
+})
+
+test('parallel spec requires a non-empty `ops` array', () => {
+  expect(() => buildOp({ tag: 'parallel', ops: [] } as unknown as OpSpec)).toThrow(/non-empty `ops` array/)
+  expect(() => buildOp({ tag: 'parallel' } as unknown as OpSpec)).toThrow(/non-empty `ops` array/)
+  expect(validateOpSpec({ tag: 'parallel', ops: [] } as unknown as OpSpec)[0].message).toMatch(/non-empty `ops` array/)
+})
+
+test('parallel spec propagates a child leaf error from one of its branches', () => {
+  const spec: OpSpec = { tag: 'parallel', ops: [{ tag: 'leaf', name: 'stamp' }, { tag: 'leaf', name: 'not-a-leaf' }] }
+  expect(() => buildOp(spec)).toThrow(/unknown leaf "not-a-leaf"/)
+  expect(validateOpSpec(spec).some(e => /unknown leaf "not-a-leaf"/.test(e.message))).toBe(true)
+})
+
 test('buildOp builds a catch node that falls back to a secondary sink when the primary sink fails (#183)', async () => {
   const { store } = caps()
   const written: string[] = []

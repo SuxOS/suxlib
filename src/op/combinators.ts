@@ -10,6 +10,13 @@ export const map = (inner: Op, o: { concurrency: Concurrency }): Op => ({ tag: '
 // alone can only replace a whole element, not reshape+rename the array's own field.
 export const mapField = (arrayField: string, elementField: string, inner: Op, o: { concurrency: Concurrency; renameTo?: string }): Op =>
   ({ tag: 'mapField', arrayField, elementField, op: inner, concurrency: o.concurrency, renameTo: o.renameTo })
+// Fans the same single input into N op subtrees concurrently, collecting their
+// results into an array in branch order -- closes #289. Distinct from `map`
+// (which distributes an *array's elements* one-to-one across one inner op) and
+// `sink.fanout` (which writes one input to N registered sink targets, not
+// arbitrary op subtrees). The array result feeds directly into `reconcile`,
+// e.g. `pipe(parallel(transformA, transformB, transformC), reconcile({ mode: 'faithful-union' }))`.
+export const parallel = (...ops: Op[]): Op => ({ tag: 'parallel', ops })
 export const reconcile = (opts: ReconcileOpts): Op => ({ tag: 'reconcile', opts })
 export const sink = Object.assign(
   (name: string, opts?: SinkOpts): Op => ({ tag: 'sink', targets: [name], ...(opts ? { opts } : {}) }),
