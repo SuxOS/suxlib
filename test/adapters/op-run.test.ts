@@ -103,6 +103,20 @@ test('runOpSpec: hydrate() bails on the aggregate byte guard across multiple $ha
   await expect(runOpSpec({ spec, input })).rejects.toThrow(/bomb guard/)
 })
 
+test('runOpSpec: opts.gOpts.onTrace (the same gOpts bag onEvent already rides) receives node-enter/node-exit for every node the spec visits (#215)', async () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'convert' }] }
+  const trace: unknown[] = []
+  const input = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' }
+  const result = await runOpSpec({ spec, input }, { gOpts: { onTrace: (e) => trace.push(e) } }) as { base64: string }
+  expect(Buffer.from(result.base64, 'base64').toString('utf8')).toBe('a: 1')
+  expect(trace).toEqual([
+    { kind: 'node-enter', tag: 'pipe', name: undefined, path: '' },
+    { kind: 'node-enter', tag: 'leaf', name: 'convert', path: '0' },
+    { kind: 'node-exit', tag: 'leaf', name: 'convert', path: '0', durationMs: expect.any(Number), ok: true },
+    { kind: 'node-exit', tag: 'pipe', name: undefined, path: '', durationMs: expect.any(Number), ok: true },
+  ])
+})
+
 test('runOpSpec: a sink spec resolves the built-in `store` target with no host wiring required, echoing the piped value through', async () => {
   const spec: OpSpec = { tag: 'sink', targets: ['store'] }
   const result = await runOpSpec({ spec, input: { a: 1 } })

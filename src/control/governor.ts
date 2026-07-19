@@ -1,6 +1,7 @@
 import type { LeafFn, LeafOpts, Caps, Governor } from '../op/types.js'
 import type { Clock } from '../effects/types.js'
 import type { GovernorEventHandler } from './events.js'
+import type { TraceEventHandler } from './trace.js'
 import { backoffFullJitter, idempotencyKey } from './retry.js'
 import { memoKey } from './memo.js'
 import { circuitBreaker } from './circuit-breaker.js'
@@ -19,6 +20,11 @@ export interface RunGovernedOpts {
   rand?: () => number
   sleep?: (ms: number) => Promise<void>
   onEvent?: GovernorEventHandler
+  // Per-node execution trace for the whole runInline call, not just this
+  // leaf's own governed retry -- see src/control/trace.ts's header comment
+  // for why this is a separate stream from onEvent above. runGoverned itself
+  // never reads this field; runInline's `traced()` wrapper is what emits it.
+  onTrace?: TraceEventHandler
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
