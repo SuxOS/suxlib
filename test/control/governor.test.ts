@@ -438,3 +438,29 @@ test('a failed attempt is not cached: a later call retries fn', async () => {
   await expect(runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, noSleep)).rejects.toThrow('boom')
   expect(calls).toBe(2)
 })
+
+test('a throw from post-success bookkeeping (e.g. breaker onSuccess -> onEvent) propagates without double-releasing the concurrency slot or reopening the breaker (#275)', async () => {
+  const releases: boolean[] = []
+  const concurrency = {
+    async acquire() {},
+    release(ok: boolean) { releases.push(ok) },
+  }
+  const breaker = circuitBreaker({
+    failureThreshold: 1,
+    cooldownMs: 100,
+    halfOpenSuccesses: 1,
+    onEvent: (e) => { if (e.kind === 'breaker-close') throw new Error('host onEvent boom') },
+  })
+  breaker.onFailure(0) // -> open
+  breaker.allow(100)   // cooldown elapsed -> half-open
+  const fn = async () => 'ok'
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(100), { circuitBreaker: breaker, concurrency }, noSleep),
+  ).rejects.toThrow('host onEvent boom')
+  // The leaf itself succeeded and the breaker legitimately closed -- the throw
+  // came from bookkeeping *after* that, so it must not be reclassified as a
+  // leaf failure: exactly one release (the success release), not a second
+  // failure release, and the breaker must stay closed, not reopen.
+  expect(releases).toEqual([true])
+  expect(breaker.state).toBe('closed')
+})

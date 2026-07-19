@@ -532,11 +532,13 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
   let off = 0
   let count = 0
   let declared = 0
-  // GNU longname ('L') and PAX extended header ('x'/'g') entries are metadata
-  // carriers, not content: each overrides the *next* real entry's name rather
-  // than being an entry of its own, mirroring the USTAR `prefix` field fix
-  // above but for the two other real-world long-path mechanisms (see #226).
+  // GNU longname ('L'), longlink ('K'), and PAX extended header ('x'/'g')
+  // entries are metadata carriers, not content: each overrides the *next*
+  // real entry's name/link-target rather than being an entry of its own,
+  // mirroring the USTAR `prefix` field fix above but for the real-world
+  // long-path mechanisms (see #226, #272).
   let pendingName: string | undefined
+  let pendingPaxSparse = false
   // A PAX 'g' global extended header applies to every following entry until
   // superseded by another 'g' header (unlike 'x', which applies only to the
   // entry immediately after it) -- kept as running defaults rather than a
@@ -574,24 +576,43 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
       pendingName = readCString(data)
       continue
     }
+    if (typeflag === 'K') {
+      // GNU longlink: carries an oversized symlink/hardlink target for the
+      // entry that follows. We drop symlinks/hardlinks regardless of target
+      // length, so there's nothing to reconstruct here -- just don't let it
+      // fall through to generic entry classification (which would push a
+      // fake 'K' member into `skipped` and clobber a pending 'L' longname).
+      continue
+    }
     if (typeflag === 'g') {
       globalPax = { ...globalPax, ...parsePaxHeader(data) }
       continue
     }
     if (typeflag === 'x') {
-      const path = parsePaxHeader(data).path
-      if (path) pendingName = path
+      const pax = parsePaxHeader(data)
+      if (pax.path) pendingName = pax.path
+      // GNU sparse (PAX-based, tar --sparse since GNU tar 1.15+) stores the
+      // real file as a hole/data map in these keys; the following regular
+      // entry's `data` is only the packed non-hole bytes, not the real byte
+      // layout. We don't reconstruct the sparse map, so decoding it as-is
+      // would silently return truncated/wrong content -- refuse it instead
+      // (see #274).
+      pendingPaxSparse = Object.keys(pax).some((k) => k.startsWith('GNU.sparse.'))
       continue
     }
 
     const entryName = pendingName ?? globalPax.path ?? name
+    const isSparse = pendingPaxSparse
     pendingName = undefined
+    pendingPaxSparse = false
 
     // '0' and '\0' (header[156] is never absent, so fromCharCode always yields
     // a real char -- '\0' covers pre-POSIX tar, never an empty string) are
     // regular files; everything else (directories, symlinks, hardlinks, devices,
     // ...) is dropped and recorded in `skipped`.
-    if (typeflag === '0' || typeflag === '\0') {
+    if (isSparse) {
+      skipped.push({ name: entryName, typeflag: 'S' })
+    } else if (typeflag === '0' || typeflag === '\0') {
       entries.push(decodeEntry(entryName, new Uint8Array(data), mtime))
     } else {
       skipped.push({ name: entryName, typeflag })
