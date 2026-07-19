@@ -547,6 +547,105 @@ test('tarExtract decodes a GNU base-256-encoded size field instead of misreading
   expect(entries[0].text).toBe('hello from a base-256 size field')
 })
 
+/** GNU tar's base-256 two's-complement negative encoding (leading byte 0xff, vs 0x80 for a positive magnitude), mirroring node-tar's encodeNegative -- used to build a fixture whose mtime field encodes a pre-1970 timestamp. */
+function encodeNegativeBase256(value: number, length: number): Uint8Array {
+  const buf = new Uint8Array(length)
+  buf[0] = 0xff
+  let n = -value
+  let flipped = false
+  for (let i = length; i > 1; i--) {
+    const byte = n & 0xff
+    n = Math.floor(n / 256)
+    if (flipped) buf[i - 1] = 0xff ^ byte
+    else if (byte === 0) buf[i - 1] = 0
+    else {
+      flipped = true
+      buf[i - 1] = ((0xff ^ byte) + 1) & 0xff
+    }
+  }
+  return buf
+}
+
+/** Build a single-entry tar whose `mtime` field is GNU base-256 two's-complement-encoded for a pre-1970 (negative) value. */
+function buildNegativeMtimeTar(name: string, data: Uint8Array, mtimeSecs: number): Uint8Array {
+  const header = new Uint8Array(BLOCK)
+  header.set(strToU8(name.slice(0, 100)), 0)
+  header.set(octalField(data.length, 12), 124)
+  header.set(encodeNegativeBase256(mtimeSecs, 12), 136)
+  header[156] = '0'.charCodeAt(0) // typeflag: regular file
+  header.set(strToU8('        '), 148) // checksum placeholder
+  let checksum = 0
+  for (let i = 0; i < BLOCK; i++) checksum += header[i]
+  header.set(octalField(checksum, 8), 148)
+
+  const paddedSize = Math.ceil(data.length / BLOCK) * BLOCK
+  const body = new Uint8Array(paddedSize)
+  body.set(data, 0)
+  const footer = new Uint8Array(BLOCK * 2)
+  const out = new Uint8Array(header.length + body.length + footer.length)
+  out.set(header, 0)
+  out.set(body, header.length)
+  out.set(footer, header.length + body.length)
+  return out
+}
+
+test('tarExtract decodes a GNU base-256 two\'s-complement negative mtime field instead of a huge positive number', () => {
+  const data = strToU8('pre-1970')
+  const packed = buildNegativeMtimeTar('old.txt', data, -86400) // 1969-12-31T00:00:00Z
+  const { entries } = tarExtract(packed)
+  expect(entries.length).toBe(1)
+  expect(entries[0].mtime).toBe(-86400 * 1000)
+})
+
+/** Build a PAX 'g' global extended header followed by two regular-file entries, mirroring how a GNU tar/bsdtar producer emits archive-wide defaults once rather than repeating them per-entry. */
+function buildGlobalPaxTar(paxBody: Uint8Array, files: Array<{ name: string; data: Uint8Array }>): Uint8Array {
+  function block(name: string, size: number, tflag: string): Uint8Array {
+    const h = new Uint8Array(BLOCK)
+    h.set(strToU8(name.slice(0, 100)), 0)
+    h.set(octalField(size, 12), 124)
+    h[156] = tflag.charCodeAt(0)
+    h.set(strToU8('        '), 148)
+    let checksum = 0
+    for (let i = 0; i < BLOCK; i++) checksum += h[i]
+    h.set(octalField(checksum, 8), 148)
+    return h
+  }
+  function bodyBlock(bytes: Uint8Array): Uint8Array {
+    const b = new Uint8Array(padTo(bytes.length, BLOCK))
+    b.set(bytes, 0)
+    return b
+  }
+  const parts: Uint8Array[] = [block('PaxHeader', paxBody.length, 'g'), bodyBlock(paxBody)]
+  for (const f of files) {
+    parts.push(block(f.name, f.data.length, '0'), bodyBlock(f.data))
+  }
+  parts.push(new Uint8Array(BLOCK * 2))
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    out.set(p, off)
+    off += p.length
+  }
+  return out
+}
+
+test('tarExtract applies a PAX "g" global extended header\'s "path" key to every following entry, not just the first', () => {
+  const globalPath = 'g/'.repeat(60) + 'deep/global.txt'
+  const paxBody = strToU8(paxRecord('path', globalPath))
+  const packed = buildGlobalPaxTar(paxBody, [
+    { name: 'a.txt', data: strToU8('first') },
+    { name: 'b.txt', data: strToU8('second') },
+  ])
+  const { entries, skipped } = tarExtract(packed)
+  expect(skipped).toEqual([])
+  expect(entries.length).toBe(2)
+  expect(entries[0].name).toBe(globalPath)
+  expect(entries[0].text).toBe('first')
+  expect(entries[1].name).toBe(globalPath)
+  expect(entries[1].text).toBe('second')
+})
+
 test('archiveCreate rejects gzip with more than one file', () => {
   expect(() => archiveCreate('gzip', [{ name: 'a', data: strToU8('1') }, { name: 'b', data: strToU8('2') }])).toThrow(/exactly one file/)
 })

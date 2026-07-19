@@ -357,12 +357,42 @@ function writeOctal(value: number, length: number): Uint8Array {
  */
 function readOctal(bytes: Uint8Array): number {
   if (bytes.length > 0 && (bytes[0] & 0x80) !== 0) {
+    if (bytes[0] === 0xff) return readTwosComplementBase256(bytes)
     let value = bytes[0] & 0x7f
     for (let i = 1; i < bytes.length; i++) value = value * 256 + bytes[i]
     return value
   }
   const s = strFromU8(bytes).replace(/\0.*$/, '').trim()
   return s ? parseInt(s, 8) || 0 : 0
+}
+
+/**
+ * GNU tar's base-256 negative encoding: a leading byte of exactly 0xff (vs
+ * 0x80 for a positive magnitude) marks a two's-complement value spanning the
+ * whole field -- used for a pre-1970 mtime and other negative numeric
+ * fields. Ported from node-tar's large-numbers.js `twos()`: walking from the
+ * least-significant byte and only accumulating once a non-zero complement
+ * byte flips `flipped` keeps the running sum small even though the field's
+ * leading bytes are 0xff sign-extension padding -- computing the two's
+ * complement magnitude across the full field width up front and subtracting
+ * would lose precision past Number.MAX_SAFE_INTEGER for a typical 12-byte
+ * field.
+ */
+function readTwosComplementBase256(bytes: Uint8Array): number {
+  let sum = 0
+  let flipped = false
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    const byte = bytes[i]
+    let f: number
+    if (flipped) f = 0xff ^ byte
+    else if (byte === 0) f = 0
+    else {
+      flipped = true
+      f = ((0xff ^ byte) + 1) & 0xff
+    }
+    if (f !== 0) sum -= f * Math.pow(256, bytes.length - 1 - i)
+  }
+  return sum
 }
 
 function readCString(bytes: Uint8Array): string {
@@ -389,11 +419,12 @@ function headerChecksumValid(header: Uint8Array): boolean {
 
 /**
  * Reject a pre-1970 (negative) mtime rather than silently clamping it to
- * epoch, mirroring zipCreate's assertZipMtimeInRange guard. tarExtract's
- * readOctal doesn't yet decode GNU base-256 two's-complement negative
- * fields (only the positive-overflow case from #235/#236), so writing a
- * negative value here couldn't round-trip anyway — throw instead of
- * producing a tar entry silently dated 1970-01-01.
+ * epoch, mirroring zipCreate's assertZipMtimeInRange guard. writeOctal (used
+ * by tarHeader) only emits plain octal ASCII, with no GNU base-256
+ * two's-complement encoder of its own (readOctal decodes that form on the
+ * extract side, #237, but nothing here writes it), so a negative value
+ * couldn't round-trip anyway — throw instead of producing a tar entry
+ * silently dated 1970-01-01.
  */
 function assertTarMtimeNotNegative(name: string, mtime: number): void {
   if (mtime < 0) {
@@ -504,6 +535,11 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
   // than being an entry of its own, mirroring the USTAR `prefix` field fix
   // above but for the two other real-world long-path mechanisms (see #226).
   let pendingName: string | undefined
+  // A PAX 'g' global extended header applies to every following entry until
+  // superseded by another 'g' header (unlike 'x', which applies only to the
+  // entry immediately after it) -- kept as running defaults rather than a
+  // pendingName-style one-shot (#230).
+  let globalPax: Record<string, string> = Object.create(null)
   while (off + BLOCK <= bytes.length) {
     const header = bytes.subarray(off, off + BLOCK)
     // Two consecutive zero blocks (or a header of all zero bytes) mark the end.
@@ -535,13 +571,17 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
       pendingName = readCString(data)
       continue
     }
-    if (typeflag === 'x' || typeflag === 'g') {
+    if (typeflag === 'g') {
+      globalPax = parsePaxHeader(data)
+      continue
+    }
+    if (typeflag === 'x') {
       const path = parsePaxHeader(data).path
       if (path) pendingName = path
       continue
     }
 
-    const entryName = pendingName ?? name
+    const entryName = pendingName ?? globalPax.path ?? name
     pendingName = undefined
 
     // '0' and '\0' (header[156] is never absent, so fromCharCode always yields
