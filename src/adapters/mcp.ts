@@ -13,7 +13,8 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import type { OpSpec } from '../op/spec.js'
+import { FIELD_POLICIES, type OpSpec } from '../op/spec.js'
+import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm } from '../effects/types.js'
 
@@ -31,7 +32,10 @@ const opSpecLeafOptsSchema = z.object({
   kind: z.enum(['pure', 'effect']).optional(),
 }).optional()
 
-const fieldPolicySchema = z.enum(['last-write-wins', 'union', 'keep-first'])
+// Derived from spec.ts's FIELD_POLICIES (not a hand-duplicated literal array)
+// so this schema can't silently drift from what buildOp actually validates --
+// the concrete example CLAUDE.md's OpSpec-validation footgun note calls out (#187).
+const fieldPolicySchema = z.enum(FIELD_POLICIES)
 
 // Mirrors src/op/reconcile.ts's ReconcileOpts discriminated union; buildOp
 // (src/op/spec.ts) re-validates mode/defaultPolicy/policy itself, so this
@@ -275,6 +279,19 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         },
       },
       async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves })),
+    )
+  }
+
+  if (enabled('describe_pipeline')) {
+    server.registerTool(
+      'describe_pipeline',
+      {
+        description:
+          'Describe every leaf/sink/reconcile option a `run_pipeline` OpSpec can currently use: ' +
+          'each registered leaf\'s declared input/output shape, sink target names, reconcile modes, and field-merge policies.',
+        inputSchema: {},
+      },
+      async () => textResult(describePipelineSchema(opts.opRunLeaves, opts.opRunSinks)),
     )
   }
 }

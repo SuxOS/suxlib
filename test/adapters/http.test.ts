@@ -245,4 +245,23 @@ describe('http adapter', () => {
     const body = (await res.json()) as { result: { shouted: { a: number } } }
     expect(body.result.shouted).toEqual({ a: 1 })
   })
+
+  it('GET /op/schema: reports the built-in leaf registry, sink targets, reconcile modes, and field policies', async () => {
+    const res = await handler.fetch(new Request('https://fileops.example/op/schema'))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { leaves: Record<string, unknown>; sinks: string[]; reconcileModes: string[]; fieldPolicies: string[] }
+    expect(Object.keys(body.leaves)).toContain('convert')
+    expect(body.sinks).toEqual(['store'])
+    expect(body.reconcileModes).toContain('field-merge')
+    expect(body.fieldPolicies).toContain('union')
+  })
+
+  it('GET /op/schema: reports env.opRunLeaves/opRunSinks-registered names alongside the built-in registry', async () => {
+    const env: Env = { opRunLeaves: { shout: async (input) => input }, opRunSinks: { log: { name: 'log', write: async (v) => v } } }
+    const res = await handler.fetch(new Request('https://fileops.example/op/schema'), env)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { leaves: Record<string, unknown>; sinks: string[] }
+    expect(Object.keys(body.leaves)).toContain('shout')
+    expect(body.sinks).toContain('log')
+  })
 })

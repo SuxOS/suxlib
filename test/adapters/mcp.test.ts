@@ -33,7 +33,7 @@ describe('mcp adapter', () => {
 
   it('lists the expected tools', async () => {
     const { tools } = await client.listTools()
-    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline'].sort())
+    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline', 'describe_pipeline'].sort())
   })
 
   it('transform: happy path json -> yaml', async () => {
@@ -231,6 +231,16 @@ describe('mcp adapter', () => {
     expect(result.isError).toBeFalsy()
     expect(parseResult(result)).toEqual({ a: 1 })
   })
+
+  it('describe_pipeline: reports the built-in leaf registry, sink targets, reconcile modes, and field policies', async () => {
+    const result = await client.callTool({ name: 'describe_pipeline', arguments: {} })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { leaves: Record<string, unknown>; sinks: string[]; reconcileModes: string[]; fieldPolicies: string[] }
+    expect(Object.keys(body.leaves)).toContain('convert')
+    expect(body.sinks).toEqual(['store'])
+    expect(body.reconcileModes).toContain('field-merge')
+    expect(body.fieldPolicies).toContain('union')
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {
@@ -360,5 +370,25 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
 
     await sinksClient.close()
     await sinksServer.close()
+  })
+
+  it('describe_pipeline reports opts.opRunLeaves/opRunSinks-registered names alongside the built-in registry', async () => {
+    const describeServer = new McpServer({ name: 'test-describe', version: '0.0.0' })
+    registerFileopsTools(describeServer, {
+      opRunLeaves: { shout: async (input) => input },
+      opRunSinks: { log: { name: 'log', write: async (v) => v } },
+    })
+    const describeClient = new Client({ name: 'test-describe-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([describeServer.connect(serverTransport), describeClient.connect(clientTransport)])
+
+    const result = await describeClient.callTool({ name: 'describe_pipeline', arguments: {} })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { leaves: Record<string, unknown>; sinks: string[] }
+    expect(Object.keys(body.leaves)).toContain('shout')
+    expect(body.sinks).toContain('log')
+
+    await describeClient.close()
+    await describeServer.close()
   })
 })

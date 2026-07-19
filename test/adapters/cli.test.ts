@@ -394,3 +394,33 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     errSpy.mockRestore()
   })
 })
+
+describe('cli `pipeline describe` (real CLI entry point)', () => {
+  it('prints the leaf/sink/reconcile-mode/field-policy schema as JSON', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'describe'])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { leaves: Record<string, unknown>; sinks: string[]; reconcileModes: string[]; fieldPolicies: string[] }
+    expect(Object.keys(printed.leaves)).toContain('convert')
+    expect(printed.sinks).toEqual(['store'])
+    expect(printed.reconcileModes).toContain('field-merge')
+    expect(printed.fieldPolicies).toContain('union')
+    logSpy.mockRestore()
+  })
+
+  it('--config merges host-registered leaves/sinks into the printed schema', async () => {
+    const work = tmpDir()
+    const configPath = join(work, 'op-run.config.mjs')
+    writeFileSync(
+      configPath,
+      'export default { leaves: { shout: async (input) => input }, sinks: { log: { name: "log", write: async (v) => v } } }\n',
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'describe', '--config', configPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { leaves: Record<string, unknown>; sinks: string[] }
+    expect(Object.keys(printed.leaves)).toContain('shout')
+    expect(printed.sinks).toContain('log')
+    logSpy.mockRestore()
+  })
+})

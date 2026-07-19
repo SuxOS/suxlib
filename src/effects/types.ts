@@ -22,7 +22,11 @@ export class MemoryStore implements Store {
     return { r2Key, sha256: sha, type, size: bytes.byteLength }
   }
   async get(h: Handle): Promise<Uint8Array> {
-    const b = this.m.get(h.r2Key); if (!b) throw new Error(`handle not found: ${h.r2Key}`); return b
+    const b = this.m.get(h.r2Key); if (!b) throw new Error(`handle not found: ${h.r2Key}`)
+    if (b.byteLength !== h.size) throw new Error(`handle size mismatch for ${h.r2Key}: expected ${h.size}, got ${b.byteLength}`)
+    const sha = await sha256Hex(b)
+    if (sha !== h.sha256) throw new Error(`handle sha256 mismatch for ${h.r2Key}: expected ${h.sha256}, got ${sha}`)
+    return b
   }
 }
 export class MemoryCache implements Cache {

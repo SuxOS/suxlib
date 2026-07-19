@@ -15,8 +15,12 @@ export type OpSpec =
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
 
-const FIELD_POLICIES: FieldPolicy[] = ['last-write-wins', 'union', 'keep-first']
-const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge']
+// Exported (not module-private) so mcp.ts's opSpecSchema and op/introspect.ts's
+// describePipelineSchema derive their field-policy/reconcile-mode enums from
+// this one array instead of hand-duplicating the literal strings -- the
+// concrete drift CLAUDE.md's OpSpec-validation footgun note warns about (#187).
+export const FIELD_POLICIES = ['last-write-wins', 'union', 'keep-first'] as const satisfies readonly FieldPolicy[]
+export const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge'] as const satisfies readonly ReconcileOpts['mode'][]
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -238,7 +242,7 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
     }
     case 'reconcile': {
       const o = spec.opts
-      if (!o || typeof o !== 'object' || !RECONCILE_MODES.includes(o.mode as string)) {
+      if (!o || typeof o !== 'object' || !RECONCILE_MODES.includes(o.mode)) {
         throw new Error(`reconcile spec's \`opts.mode\` must be one of: ${RECONCILE_MODES.join(', ')}`)
       }
       if (o.mode === 'field-merge') {
