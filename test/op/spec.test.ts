@@ -121,8 +121,29 @@ test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })
 
-test('buildOp rejects an unsupported tag (e.g. ask, which needs a host Ask capability)', () => {
-  expect(() => buildOp({ tag: 'ask' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "ask"/)
+test('buildOp rejects an unsupported tag', () => {
+  expect(() => buildOp({ tag: 'nope' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "nope"/)
+})
+
+test('buildOp builds an ask node that degrades gracefully with no Ask capability, honoring onTimeout: proceed', async () => {
+  const { store, ...rest } = caps()
+  const spec: OpSpec = { tag: 'ask', prompt: 'ok?', timeout: '5m', onTimeout: 'proceed' }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, 'piped-value', { store, ...rest })
+  expect(result).toBe('piped-value')
+})
+
+test('buildOp builds an ask node whose onTimeout: fail throws with no Ask capability supplied', async () => {
+  const { store, ...rest } = caps()
+  const spec: OpSpec = { tag: 'ask', prompt: 'ok?', timeout: '5m', onTimeout: 'fail' }
+  const tree = buildOp(spec)
+  await expect(runInline(tree, 'piped-value', { store, ...rest })).rejects.toThrow(/ok\?/)
+})
+
+test('buildOp rejects an ask spec missing prompt/timeout, or with a bad onTimeout', () => {
+  expect(() => buildOp({ tag: 'ask', prompt: '', timeout: '5m', onTimeout: 'proceed' } as OpSpec)).toThrow(/prompt/)
+  expect(() => buildOp({ tag: 'ask', prompt: 'ok?', timeout: '', onTimeout: 'proceed' } as OpSpec)).toThrow(/timeout/)
+  expect(() => buildOp({ tag: 'ask', prompt: 'ok?', timeout: '5m', onTimeout: 'nope' as any })).toThrow(/onTimeout/)
 })
 
 test('buildOp builds a reconcile node that merges Handles via caps.store, no extra host capability needed', async () => {

@@ -1,6 +1,6 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, mapField, sink, reconcile } from './combinators.js'
+import { op, pipe, map, mapField, sink, reconcile, ask } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
@@ -12,6 +12,7 @@ export type OpSpec =
   | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: number; renameTo?: string }
   | { tag: 'sink'; targets: string[] }
   | { tag: 'reconcile'; opts: ReconcileOpts }
+  | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
 
 const FIELD_POLICIES: FieldPolicy[] = ['last-write-wins', 'union', 'keep-first']
 const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge']
@@ -122,9 +123,11 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * reshapes/renames the array's own field. `reconcile` only needs
  * `caps.store` (already supplied by every adapter call, see runInline's
  * `case 'reconcile'`), so it's expressible directly as an OpSpec variant.
- * `ask` still depends on a live Ask capability a stateless adapter call has
- * no way to supply, so composing that still requires building an Op tree
- * in-process.
+ * `ask` (#181) degrades gracefully with no `Ask` capability supplied
+ * (runInline's `case 'ask'` honors `onTimeout` itself), so it's a
+ * straight pass-through to the `ask()` combinator -- a host with a real
+ * `Ask` implementation supplies it via OpRunOpts.ask (../adapters/op-run.ts)
+ * the same way `llm`/`store`/`cache` are threaded through.
  *
  * `extraLeaves`, when supplied, merges host-registered leaves onto
  * LEAF_REGISTRY (mergeLeaves, ./registry.ts) once per top-level buildOp call
@@ -237,7 +240,13 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       return reconcile(o)
     }
+    case 'ask': {
+      if (typeof spec.prompt !== 'string' || !spec.prompt) throw new Error('ask spec requires a non-empty `prompt`')
+      if (typeof spec.timeout !== 'string' || !spec.timeout) throw new Error('ask spec requires a non-empty `timeout`')
+      if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') throw new Error('ask spec\'s `onTimeout` must be "proceed" or "fail"')
+      return ask(spec.prompt, { timeout: spec.timeout, onTimeout: spec.onTimeout })
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, ask)`)
   }
 }

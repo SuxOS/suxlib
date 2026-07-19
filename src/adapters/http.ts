@@ -12,7 +12,7 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import type { OpSpec } from '../op/spec.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
-import type { Cache, Store, Llm } from '../effects/types.js'
+import type { Cache, Store, Llm, Ask } from '../effects/types.js'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
@@ -52,7 +52,11 @@ function errorResponse(e: unknown, status = 400): Response {
 // opRunLeaves: host-registered LeafFns merged onto LEAF_REGISTRY (see
 // op-run.ts's OpRunOpts doc), so a spec's `leaf.name` can resolve against
 // logic this library never shipped.
-export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn> }
+//
+// opRunAsk: a host-supplied Ask implementation (see op-run.ts's OpRunOpts
+// doc), so a spec's `ask` step (#181) can actually pause for a human answer
+// instead of just honoring its own `onTimeout` immediately.
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn>; opRunAsk?: Ask }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -219,7 +223,7 @@ const routes: Route[] = [
     handle: async (rawBody, env) => {
       const body = rawBody as { spec?: unknown; input?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves })
+      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, ask: env.opRunAsk })
       return json({ result })
     },
   },

@@ -13,7 +13,7 @@
 // it finds back into base64 -- the caller never sees or invents a Store key
 // itself.
 
-import type { Handle, Llm, Cache, Store } from '../effects/types.js'
+import type { Handle, Llm, Cache, Store, Ask } from '../effects/types.js'
 import { MemoryStore } from '../effects/types.js'
 import type { Caps, Governor, SinkTarget, LeafFn } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
@@ -130,8 +130,14 @@ export type OpRunRequest = { spec: OpSpec; input: unknown }
  * resolve against logic this library never shipped -- a host embedding
  * suxlib (e.g. `sux`) registering its own leaf. Omitted entirely still
  * resolves every built-in registry leaf as before.
+ *
+ * `ask`: a host-supplied Ask implementation (src/effects/types.ts), threaded
+ * through to an `ask` OpSpec step (#181) the same way `llm`/`store`/`cache`
+ * are. Omitted entirely, `caps.ask` stays undefined and runInline's `case
+ * 'ask'` honors the step's own `onTimeout` itself -- no durable pause/resume
+ * is implied here, per CLAUDE.md's "Ask convention".
  */
-export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn> }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn>; ask?: Ask }
 
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
@@ -147,7 +153,7 @@ export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; s
 export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
   const store = opts.store ?? new MemoryStore()
   const sinks = Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks) as Record<string, SinkTarget>
-  const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache }
+  const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache, ask: opts.ask }
   const tree = buildOp(spec, opts.leaves)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
   const result = await runInline(tree, hydrated, caps)

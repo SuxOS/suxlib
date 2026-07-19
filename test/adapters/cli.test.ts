@@ -79,6 +79,22 @@ describe('extractArchiveTo (CLI filesystem extract path)', () => {
   })
 })
 
+describe('archive extract CLI (no -o: list entries as JSON, no filesystem writes)', () => {
+  it('prints entry metadata to stdout and writes nothing when -o is omitted', async () => {
+    const work = tmpDir()
+    const archivePath = join(work, 'in.zip')
+    const { writeFileSync } = await import('node:fs')
+    const packed = archiveCreate('zip', [{ name: 'a.txt', data: new TextEncoder().encode('hello') }])
+    writeFileSync(archivePath, packed)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'archive', 'extract', archivePath])
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string)
+    logSpy.mockRestore()
+    expect(printed.entries).toEqual([{ name: 'a.txt', bytes: 5, mtime: expect.any(Number) }])
+    expect(existsSync(join(work, 'a.txt'))).toBe(false)
+  })
+})
+
 describe('cli `sanitize text` (real CLI entry point)', () => {
   it('rejects an invalid --types value instead of silently redacting nothing', async () => {
     const work = tmpDir()

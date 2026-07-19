@@ -163,3 +163,16 @@ test('runOpSpec: an unknown leaf name still surfaces a clear error when opts.lea
   const spec: OpSpec = { tag: 'leaf', name: 'nope' }
   await expect(runOpSpec({ spec, input: null }, { leaves: { shout: async (input) => input } })).rejects.toThrow(/unknown leaf "nope"/)
 })
+
+test('runOpSpec: an ask spec degrades gracefully (onTimeout: proceed) with no opts.ask supplied', async () => {
+  const spec: OpSpec = { tag: 'ask', prompt: 'ok?', timeout: '5m', onTimeout: 'proceed' }
+  const result = await runOpSpec({ spec, input: { a: 1 } })
+  expect(result).toEqual({ a: 1 })
+})
+
+test('runOpSpec: opts.ask lets a host answer an ask step for real', async () => {
+  const spec: OpSpec = { tag: 'ask', prompt: 'pick one', timeout: '5m', onTimeout: 'fail' }
+  const ask = { request: async () => ({ answered: true, value: { chosen: 'b' } }) }
+  const result = await runOpSpec({ spec, input: { a: 1 } }, { ask })
+  expect(result).toEqual({ chosen: 'b' })
+})

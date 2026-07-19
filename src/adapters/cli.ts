@@ -56,13 +56,21 @@ archiveCmd
 
 archiveCmd
   .command('extract')
-  .description("Extract an archive's entries to a directory")
+  .description("Extract an archive's entries to a directory, or list them as JSON when -o is omitted")
   .argument('<archive>', 'archive file to extract')
-  .requiredOption('-o, --output <dir>', 'output directory')
+  .option('-o, --output <dir>', 'output directory (omit to list entry metadata as JSON instead of writing files)')
   .option('-f, --format <format>', 'zip | tar | gzip (default: inferred from extension)')
-  .action((archivePath: string, opts: { output: string; format?: string }) => {
+  .action((archivePath: string, opts: { output?: string; format?: string }) => {
     const format = (opts.format as ArchiveFormat) ?? inferArchiveFormat(archivePath)
     const bytes = new Uint8Array(readFileSync(archivePath))
+    if (!opts.output) {
+      const { entries, skipped } = archiveExtract(format, bytes)
+      console.log(JSON.stringify({
+        entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, mtime: e.mtime })),
+        ...(skipped ? { skipped } : {}),
+      }, null, 2))
+      return
+    }
     const { written, skipped } = extractArchiveTo(format, bytes, opts.output)
     console.log(`extracted ${written} entr${written === 1 ? 'y' : 'ies'} to ${opts.output}`)
     if (skipped.length) {

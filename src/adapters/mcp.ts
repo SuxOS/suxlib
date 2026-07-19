@@ -15,7 +15,7 @@ import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import type { OpSpec } from '../op/spec.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
-import type { Cache, Store, Llm } from '../effects/types.js'
+import type { Cache, Store, Llm, Ask } from '../effects/types.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
@@ -62,6 +62,7 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   }),
   z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1) }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
+  z.object({ tag: z.literal('ask'), prompt: z.string(), timeout: z.string(), onTimeout: z.enum(['proceed', 'fail']) }),
 ]))
 
 export type RegisterFileopsToolsOptions = {
@@ -114,6 +115,14 @@ export type RegisterFileopsToolsOptions = {
    * leaf as before.
    */
   opRunLeaves?: Record<string, LeafFn>
+  /**
+   * A host-supplied Ask implementation (src/effects/types.ts), so a
+   * `run_pipeline` spec's `ask` step (#181) can actually pause for a human
+   * answer instead of just honoring its own `onTimeout` immediately.
+   * Omitted entirely still works — runInline's `case 'ask'` degrades
+   * gracefully with no `Ask` capability, same as every other opt here.
+   */
+  opRunAsk?: Ask
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -263,7 +272,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
       'run_pipeline',
       {
         description:
-          `Run a JSON-described op-tree pipeline (leaf/pipe/map/mapField/sink) over the op engine's registered leaves ` +
+          `Run a JSON-described op-tree pipeline (leaf/pipe/map/mapField/sink/reconcile/ask) over the op engine's registered leaves ` +
           `(${leafNames.join(', ')}) and sink targets (${sinkNames.join(', ')}), ` +
           `instead of calling one tool per step. ` +
           `Handle-shaped values in \`input\`/the result are marshalled as { $handle: true, base64, type } / { base64, type, size }.`,
@@ -272,7 +281,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           input: z.unknown(),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves })),
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, ask: opts.opRunAsk })),
     )
   }
 }
