@@ -55,7 +55,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         // item throws, and Promise.all would resolve/reject before that
         // slower item's node-exit trace has landed.
         const results = await Promise.allSettled(items.map(async (it, i) => {
-          await node.concurrency.acquire()
+          await node.concurrency.acquire(gOpts?.signal)
           try { out[i] = await runInline(node.op, it, caps, gOpts, childPath(path, i)); node.concurrency.release(true) }
           catch (e) { node.concurrency.release(false); throw e }
         }))
@@ -69,7 +69,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         const items = obj[node.arrayField] as any[]
         const out = new Array(items.length)
         const results = await Promise.allSettled(items.map(async (it, i) => {
-          await node.concurrency.acquire()
+          await node.concurrency.acquire(gOpts?.signal)
           try {
             const value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts, childPath(path, i))
             out[i] = { ...(it as Record<string, unknown>), [node.elementField]: value }
