@@ -13,7 +13,7 @@ import { runOpSpec } from './op-run.js'
 import { validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
-import type { Cache, Store, Llm } from '../effects/types.js'
+import type { Cache, Store, Llm, Ask } from '../effects/types.js'
 import type { RunGovernedOpts } from '../control/governor.js'
 
 function json(data: unknown, status = 200): Response {
@@ -60,11 +60,16 @@ function errorResponse(e: unknown, status = 400): Response {
 // to observe retry-attempt/memo-hit/memo-miss GovernorEvents (see op-run.ts's
 // OpRunOpts doc). Omitted entirely, runInline's own defaults apply.
 //
+// opRunAsk: a host-supplied Ask implementation, threaded to runOpSpec's
+// `ask` opt so `POST /op/run` can resolve a spec's `ask` step against a real
+// human-in-the-loop capability instead of only ever hitting runInline's
+// no-capability fallback (see op-run.ts's OpRunOpts doc).
+//
 // allowRoutes: restrict routing to these paths (e.g. "/transform",
 // "/sanitize/text") — every route is reachable when omitted. Mirrors
 // mcp.ts's `RegisterFileopsToolsOptions.allow`, so a host embedding this
 // Worker can expose a chosen subset without forking the route table.
-export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn>; opRunGOpts?: RunGovernedOpts; allowRoutes?: string[] }
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn>; opRunGOpts?: RunGovernedOpts; opRunAsk?: Ask; allowRoutes?: string[] }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -231,7 +236,7 @@ const routes: Route[] = [
     handle: async (rawBody, env) => {
       const body = rawBody as { spec?: unknown; input?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts: env.opRunGOpts })
+      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts: env.opRunGOpts, ask: env.opRunAsk })
       return json({ result })
     },
   },
