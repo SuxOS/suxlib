@@ -42,3 +42,17 @@ test('aimd clamps min <= 0 to 1 instead of decaying to 0 and deadlocking forever
   await c.acquire() // must still be admitted, not queued forever
   c.release(true)
 })
+
+test('aimd clamps max <= 0 to min instead of deadlocking forever', async () => {
+  const c = aimd({ start: 4, min: 1, max: 0 })
+  expect(c.limit).toBeGreaterThanOrEqual(1)
+  await c.acquire() // must still be admitted, not queued forever
+  c.release(true)
+})
+
+test('aimd clamps max to be at least min so a decrease can never exceed the declared ceiling', async () => {
+  const c = aimd({ start: 4, min: 100, max: 64 })
+  expect(c.limit).toBe(100) // start is bounded up to min, and max was raised to match
+  await c.acquire(); c.release(false) // failure -> decrease path must not exceed max
+  expect(c.limit).toBeLessThanOrEqual(100)
+})

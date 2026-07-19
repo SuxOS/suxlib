@@ -557,6 +557,7 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
     const prefix = isPosixUstar ? readCString(header.subarray(345, 500)) : ''
     const name = prefix ? `${prefix}/${readCString(header.subarray(0, 100))}` : readCString(header.subarray(0, 100))
     const size = readOctal(header.subarray(124, 136))
+    if (size < 0) throw new Error(`malformed tar: entry declares a negative size (${size}).`)
     const mtime = readOctal(header.subarray(136, 148)) * 1000 // header stores Unix seconds; ArchiveFile.mtime is ms
     const typeflag = String.fromCharCode(header[156] || 0)
     off += BLOCK
