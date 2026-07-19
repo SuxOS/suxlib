@@ -1,9 +1,9 @@
 # @suxos/lib
 
 SuxOS's shared, dependency-light **pure core + adapters** library — the home of the
-**op engine** (`op`/`map`/`reconcile`/`pipe`/`sink`/`ask`, the `runInline` graduated
-runtime) and of `sux-fileops`'s absorbed domain logic (archive/pdf/sanitize/transform),
-exposed identically over CLI, HTTP, and MCP.
+**op engine** (`op`/`map`/`mapField`/`reconcile`/`pipe`/`sink`/`ask`/`catch`, the
+`runInline` graduated runtime) and of `sux-fileops`'s absorbed domain logic
+(archive/pdf/sanitize/transform), exposed identically over CLI, HTTP, and MCP.
 
 ## Install
 
@@ -77,8 +77,9 @@ on) and only differs in how it reads input and shapes output:
 
 Beyond one-shot single-leaf calls, all three adapters also expose the op engine
 itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask', ... }`
-spec (`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`
-(`pack`/`unpack`/`shrink`/`redact`/`scrub`/`convert`/`unzip`), which gets built into a
+spec (`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`'s
+`LEAF_REGISTRY` (`pack`/`unpack`/`unzip`/`shrink`/`pageCount`/`redact`/`scrub`/
+`convert`/`extract`/`summarize`/`wrapHandle`/`unwrapHandle`/`stamp`), which gets built into a
 real `Op` tree and run via `runInline` — a multi-step job (e.g. unzip a bundle,
 transform each entry) runs as one call instead of several round trips. A `mapField`
 step runs an inner op over one named field of each element of a named array field,

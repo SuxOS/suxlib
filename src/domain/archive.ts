@@ -572,7 +572,7 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
       continue
     }
     if (typeflag === 'g') {
-      globalPax = parsePaxHeader(data)
+      globalPax = { ...globalPax, ...parsePaxHeader(data) }
       continue
     }
     if (typeflag === 'x') {
