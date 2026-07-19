@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
-import { op, pipe, map, mapField, reconcile, sink } from '../../src/op/combinators.js'
+import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
 import { fixed } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
@@ -30,4 +30,35 @@ test('runInline runs mapField over one named field of each array element, passin
   const tree = mapField('entries', 'handle', op('double', async (n: number) => n * 2, { kind: 'pure' }), { concurrency: fixed(2), renameTo: 'files' })
   const result = await runInline(tree, { entries: [{ name: 'a', handle: 1 }, { name: 'b', handle: 2 }], skipped: ['x'] }, caps)
   expect(result).toEqual({ skipped: ['x'], files: [{ name: 'a', handle: 2 }, { name: 'b', handle: 4 }] })
+})
+
+test('runInline runs the catch branch against the original input when the try branch throws', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = catchOp(
+    op('boom', async () => { throw new Error('primary failed') }, { kind: 'pure' }),
+    op('fallback', async (n: number) => n * 10, { kind: 'pure' }),
+  )
+  const result = await runInline(tree, 5, caps)
+  expect(result).toBe(50)
+})
+
+test('runInline skips the catch branch entirely when the try branch succeeds', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let fallbackRan = false
+  const tree = catchOp(
+    op('ok', async (n: number) => n + 1, { kind: 'pure' }),
+    op('fallback', async () => { fallbackRan = true; return -1 }, { kind: 'pure' }),
+  )
+  const result = await runInline(tree, 5, caps)
+  expect(result).toBe(6)
+  expect(fallbackRan).toBe(false)
+})
+
+test('runInline propagates the catch branch\'s own error when the fallback also fails', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = catchOp(
+    op('boom', async () => { throw new Error('primary failed') }, { kind: 'pure' }),
+    op('boom2', async () => { throw new Error('fallback failed too') }, { kind: 'pure' }),
+  )
+  await expect(runInline(tree, 5, caps)).rejects.toThrow('fallback failed too')
 })

@@ -16,3 +16,4 @@ export type Op =
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'sink'; targets: string[] }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
+  | { tag: 'catch'; try: Op; catch: Op }

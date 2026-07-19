@@ -17,3 +17,8 @@ export const sink = Object.assign(
 )
 export const ask = (prompt: string, o: { timeout: string; onTimeout: 'proceed' | 'fail' }): Op =>
   ({ tag: 'ask', prompt, timeout: o.timeout, onTimeout: o.onTimeout })
+// Runs `tryOp`; on any rejection (retries exhausted, CircuitOpenError, AskTimeoutError, or a
+// plain leaf throw), re-runs `fallbackOp` against the *original* input instead of aborting the
+// whole pipe -- closes #183. Named `catchOp`, not `catch`, since `catch` is a reserved word and
+// can't be a const binding -- the Op tag itself is still 'catch'.
+export const catchOp = (tryOp: Op, fallbackOp: Op): Op => ({ tag: 'catch', try: tryOp, catch: fallbackOp })

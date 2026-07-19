@@ -209,6 +209,19 @@ describe('mcp adapter', () => {
     const body = parseResult(result) as { base64: string }
     expect(JSON.parse(atob(body.base64))).toEqual({ x: 2, y: 3 })
   })
+
+  it('run_pipeline: a catch spec reaches buildOp through the MCP tool schema (not silently stripped), falling back to a secondary sink when the try branch\'s leaf throws at run time (#183)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        // unwrapHandle throws on a plain object with no `handle` field, exercising the catch fallback
+        spec: { tag: 'catch', try: { tag: 'leaf', name: 'unwrapHandle' }, catch: { tag: 'sink', targets: ['store'] } },
+        input: { a: 1 },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ a: 1 })
+  })
 })
 
 describe('mcp adapter: allow-listed registration', () => {
