@@ -302,13 +302,33 @@ export function gzipCreate(data: Uint8Array, mtime = 0): Uint8Array {
   return gzipSync(data, { level: 6, mtime })
 }
 
+// Gzip's FLG byte (RFC 1952 §2.3.1, offset 3) has an FNAME bit (0x08) that,
+// when set, embeds the original filename as a null-terminated string right
+// after the fixed 10-byte header (and after FEXTRA, if FLG's 0x04 bit is also
+// set). Returns undefined when FNAME isn't set, the header is truncated, or
+// no null terminator is found, so callers can fall back to a default name.
+function readGzipName(bytes: Uint8Array): string | undefined {
+  if (bytes.length < 10) return undefined
+  const flg = bytes[3]
+  let off = 10
+  if (flg & 0x04) {
+    if (off + 2 > bytes.length) return undefined
+    off += 2 + readU16(bytes, off)
+  }
+  if (!(flg & 0x08) || off >= bytes.length) return undefined
+  let end = off
+  while (end < bytes.length && bytes[end] !== 0) end++
+  if (end >= bytes.length) return undefined
+  return strFromU8(bytes.subarray(off, end))
+}
+
 export function gzipExtract(bytes: Uint8Array): UnpackedEntry {
   const data = gunzipCapped(bytes)
   // Gzip's header MTIME (RFC 1952 §2.3.1) is a 4-byte LE Unix-seconds field at
   // offset 4; gzipCreate's mtime:0 default means "omitted" (see its comment),
   // so a zero field surfaces as no mtime rather than the epoch.
   const mtimeSecs = bytes.length >= 8 ? readU32(bytes, 4) : 0
-  return decodeEntry('data', data, mtimeSecs > 0 ? mtimeSecs * 1000 : undefined)
+  return decodeEntry(readGzipName(bytes) ?? 'data', data, mtimeSecs > 0 ? mtimeSecs * 1000 : undefined)
 }
 
 // ---------- tar (USTAR, uncompressed) ----------
