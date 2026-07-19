@@ -140,9 +140,17 @@ test('gzipExtract surfaces the FNAME embedded by a real gzip-compatible tool ins
   expect(out.text).toBe('hello')
 })
 
-test('gzipExtract falls back to "data" when the gzip header has no FNAME (e.g. gzipCreate output)', () => {
+test('gzipExtract falls back to "data" when the gzip header has no FNAME (e.g. gzipCreate output with no filename passed)', () => {
   const packed = gzipCreate(strToU8('hi'))
   expect(gzipExtract(packed).name).toBe('data')
+})
+
+test('gzipCreate embeds an explicit filename, and archiveCreate/archiveExtract round-trips it through the gzip format', () => {
+  const direct = gzipCreate(strToU8('hi'), 0, 'greeting.txt')
+  expect(gzipExtract(direct).name).toBe('greeting.txt')
+
+  const packed = archiveCreate('gzip', [{ name: 'a.txt', data: strToU8('AAA') }])
+  expect(archiveExtract('gzip', packed).entries[0].name).toBe('a.txt')
 })
 
 test('gzipCreate is deterministic — two calls with identical input produce byte-identical output, including gzipCreate(tarCreate(...))', async () => {
@@ -162,9 +170,9 @@ test('gzipCreate is deterministic — two calls with identical input produce byt
 test('archiveCreate honors an explicit per-file mtime for the gzip format instead of always defaulting to epoch 0', () => {
   const data = strToU8('AAA')
   const viaArchiveCreate = archiveCreate('gzip', [{ name: 'a.txt', data, mtime: 12345 }])
-  const viaGzipCreate = gzipCreate(data, 12345)
+  const viaGzipCreate = gzipCreate(data, 12345, 'a.txt')
   expect(viaArchiveCreate).toEqual(viaGzipCreate)
-  expect(viaArchiveCreate).not.toEqual(gzipCreate(data, 0))
+  expect(viaArchiveCreate).not.toEqual(gzipCreate(data, 0, 'a.txt'))
 })
 
 test('tarCreate/tarExtract round-trips multiple files and reports skipped non-regular entries', () => {
@@ -313,7 +321,7 @@ test('pack honors an explicit per-file mtime for the gzip format (threaded throu
   const h = await putBytes(store, strToU8('AAA'), 'text/plain')
   const archiveHandle = await pack({ format: 'gzip', files: [{ name: 'a.txt', handle: h, mtime: 12345 }] }, { store } as any)
   const bytes = await resolve(store, archiveHandle)
-  expect(bytes).toEqual(gzipCreate(strToU8('AAA'), 12345))
+  expect(bytes).toEqual(gzipCreate(strToU8('AAA'), 12345, 'a.txt'))
 })
 
 test('archiveCreate/archiveExtract dispatch by format, and ARCHIVE_MIME covers every format', () => {

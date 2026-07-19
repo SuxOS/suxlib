@@ -294,12 +294,12 @@ export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {
 
 // ---------- gzip ----------
 
-export function gzipCreate(data: Uint8Array, mtime = 0): Uint8Array {
+export function gzipCreate(data: Uint8Array, mtime = 0, filename?: string): Uint8Array {
   if (data.length > MAX_UNPACK_BYTES) throw new Error(`archive input totals more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
   // fflate only omits the header's wall-clock MTIME when mtime is exactly 0
   // (any other value, including undefined, embeds Date.now()) — default to 0
   // so gzipCreate(tarCreate(files)) stays fully deterministic end to end.
-  return gzipSync(data, { level: 6, mtime })
+  return gzipSync(data, filename ? { level: 6, mtime, filename } : { level: 6, mtime })
 }
 
 // Gzip's FLG byte (RFC 1952 §2.3.1, offset 3) has an FNAME bit (0x08) that,
@@ -491,7 +491,7 @@ export function archiveCreate(format: ArchiveFormat, files: ArchiveFile[]): Uint
       return gzipCreate(tarCreate(files))
     case 'gzip':
       if (files.length !== 1) throw new Error(`gzip packs exactly one file — got ${files.length}. Use format='zip' or 'tar' for multiple.`)
-      return gzipCreate(files[0].data, files[0].mtime ?? 0)
+      return gzipCreate(files[0].data, files[0].mtime ?? 0, files[0].name)
   }
 }
 
