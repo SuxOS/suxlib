@@ -13,10 +13,11 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import { FIELD_POLICIES, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, validateOpSpec, type OpSpec } from '../op/spec.js'
+import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm } from '../effects/types.js'
+import type { RunGovernedOpts } from '../control/governor.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
@@ -120,6 +121,14 @@ export type RegisterFileopsToolsOptions = {
    * leaf as before.
    */
   opRunLeaves?: Record<string, LeafFn>
+  /**
+   * A host-supplied RunGovernedOpts (onEvent, custom backoff/sleep/rand),
+   * passed through unchanged to runInline's 4th argument for every
+   * `run_pipeline` call — the only way to observe retry-attempt/memo-hit/
+   * memo-miss GovernorEvents (see op-run.ts's OpRunOpts doc). Omitted
+   * entirely, runInline's own defaults apply.
+   */
+  opRunGOpts?: RunGovernedOpts
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -269,7 +278,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
       'run_pipeline',
       {
         description:
-          `Run a JSON-described op-tree pipeline (leaf/pipe/map/mapField/sink/catch) over the op engine's registered leaves ` +
+          `Run a JSON-described op-tree pipeline (${OP_SPEC_TAGS.join('/')}) over the op engine's registered leaves ` +
           `(${leafNames.join(', ')}) and sink targets (${sinkNames.join(', ')}), ` +
           `instead of calling one tool per step. ` +
           `Handle-shaped values in \`input\`/the result are marshalled as { $handle: true, base64, type } / { base64, type, size }.`,
@@ -278,7 +287,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           input: z.unknown(),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves })),
+      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, gOpts: opts.opRunGOpts })),
     )
   }
 
