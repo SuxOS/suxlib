@@ -387,6 +387,52 @@ test('archiveExtract omits `skipped` entirely for zip/gzip and for a fully-regul
   expect(archiveExtract('zip', zipped).skipped).toBeUndefined()
 })
 
+function octalField(value: number, length: number): Uint8Array {
+  return strToU8(value.toString(8).padStart(length - 1, '0') + '\0')
+}
+
+/** Build a single-entry USTAR tar whose header sets `magic`/`prefix` fields directly (bypassing tarCreate, which never emits a prefix). */
+function buildUstarEntry(name: string, data: Uint8Array, magic: string, prefix: string): Uint8Array {
+  const header = new Uint8Array(BLOCK)
+  header.set(strToU8(name.slice(0, 100)), 0)
+  header.set(octalField(data.length, 12), 124)
+  header[156] = '0'.charCodeAt(0) // typeflag: regular file
+  header.set(strToU8(magic), 257)
+  header.set(strToU8(prefix.slice(0, 155)), 345)
+  header.set(strToU8('        '), 148) // checksum placeholder
+  let checksum = 0
+  for (let i = 0; i < BLOCK; i++) checksum += header[i]
+  header.set(octalField(checksum, 8), 148)
+
+  const paddedSize = Math.ceil(data.length / BLOCK) * BLOCK
+  const body = new Uint8Array(paddedSize)
+  body.set(data, 0)
+  const footer = new Uint8Array(BLOCK * 2)
+  const out = new Uint8Array(header.length + body.length + footer.length)
+  out.set(header, 0)
+  out.set(body, header.length)
+  out.set(footer, header.length + body.length)
+  return out
+}
+
+test('tarExtract joins the USTAR prefix field (offset 345) with name for long paths from POSIX ustar archives', () => {
+  const prefix = 'a/'.repeat(60) + 'deep' // 124 bytes, fits the 155-byte prefix field
+  const name = 'file.txt'
+  const data = strToU8('hello from a long path')
+  const packed = buildUstarEntry(name, data, 'ustar\0', prefix)
+  const { entries } = tarExtract(packed)
+  expect(entries.length).toBe(1)
+  expect(entries[0].name).toBe(`${prefix}/${name}`)
+})
+
+test('tarExtract ignores the prefix-field byte range on non-POSIX-ustar magic (e.g. GNU tar)', () => {
+  const name = 'file.txt'
+  const data = strToU8('AAA')
+  const packed = buildUstarEntry(name, data, 'ustar ', 'should-not-appear')
+  const { entries } = tarExtract(packed)
+  expect(entries[0].name).toBe(name)
+})
+
 test('archiveCreate rejects gzip with more than one file', () => {
   expect(() => archiveCreate('gzip', [{ name: 'a', data: strToU8('1') }, { name: 'b', data: strToU8('2') }])).toThrow(/exactly one file/)
 })

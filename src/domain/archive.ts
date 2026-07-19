@@ -352,6 +352,11 @@ function readOctal(bytes: Uint8Array): number {
   return s ? parseInt(s, 8) || 0 : 0
 }
 
+function readCString(bytes: Uint8Array): string {
+  const end = bytes.indexOf(0)
+  return strFromU8(end === -1 ? bytes : bytes.subarray(0, end))
+}
+
 /**
  * Validate a USTAR header block's checksum (offset 148-155): every valid tar
  * header stores the unsigned byte-sum of the whole 512-byte block, computed
@@ -443,9 +448,15 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
     // Two consecutive zero blocks (or a header of all zero bytes) mark the end.
     if (header.every((b) => b === 0)) break
     if (!headerChecksumValid(header)) throw new Error(`malformed/not a tar archive: invalid header checksum at offset ${off}.`)
-    const nameBytes = header.subarray(0, 100)
-    const nameEnd = nameBytes.indexOf(0)
-    const name = strFromU8(nameEnd === -1 ? nameBytes : nameBytes.subarray(0, nameEnd))
+    // POSIX USTAR splits names over 100 bytes across `prefix` (offset 345,
+    // length 155) + '/' + `name`, so a long-path archive from GNU tar/bsdtar/
+    // Python's tarfile/npm pack round-trips correctly instead of silently
+    // truncating to just the `name` field. Only trust `prefix` when the
+    // magic at offset 257 is the POSIX "ustar\0" this reader/tarCreate both
+    // use -- pre-POSIX/GNU headers reuse that offset range for other fields.
+    const isPosixUstar = strFromU8(header.subarray(257, 262)) === 'ustar' && header[262] === 0
+    const prefix = isPosixUstar ? readCString(header.subarray(345, 500)) : ''
+    const name = prefix ? `${prefix}/${readCString(header.subarray(0, 100))}` : readCString(header.subarray(0, 100))
     const size = readOctal(header.subarray(124, 136))
     const mtime = readOctal(header.subarray(136, 148)) * 1000 // header stores Unix seconds; ArchiveFile.mtime is ms
     const typeflag = String.fromCharCode(header[156] || 0)
