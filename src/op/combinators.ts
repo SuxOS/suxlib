@@ -1,5 +1,6 @@
 import type { Op, LeafFn, LeafOpts, Concurrency } from './types.js'
 import type { ReconcileOpts } from './reconcile.js'
+import type { CondPredicate } from './predicate.js'
 export const op = (name: string, fn: LeafFn, opts: LeafOpts): Op => ({ tag: 'leaf', name, fn, opts })
 export const pipe = (...steps: Op[]): Op => ({ tag: 'pipe', steps })
 export const map = (inner: Op, o: { concurrency: Concurrency }): Op => ({ tag: 'map', op: inner, concurrency: o.concurrency })
@@ -22,3 +23,8 @@ export const ask = (prompt: string, o: { timeout: string; onTimeout: 'proceed' |
 // whole pipe -- closes #183. Named `catchOp`, not `catch`, since `catch` is a reserved word and
 // can't be a const binding -- the Op tag itself is still 'catch'.
 export const catchOp = (tryOp: Op, fallbackOp: Op): Op => ({ tag: 'catch', try: tryOp, catch: fallbackOp })
+// Data-driven success-path routing, complementing catchOp's error-path routing (#196):
+// runs the first branch whose `when` predicate matches the piped value, or `defaultOp`
+// if none match (throws if neither matches and no default is given, see runInline).
+export const cond = (branches: Array<{ when: CondPredicate; op: Op }>, defaultOp?: Op): Op =>
+  ({ tag: 'cond', branches, default: defaultOp })

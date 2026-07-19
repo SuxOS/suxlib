@@ -33,6 +33,21 @@ const opSpecLeafOptsSchema = z.object({
 
 const fieldPolicySchema = z.enum(['last-write-wins', 'union', 'keep-first'])
 
+// Mirrors OpSpecConcurrency (src/op/spec.ts): a plain integer is `fixed(n)`
+// shorthand, or an object opts into adaptive `aimd()` concurrency (#195).
+const concurrencySchema = z.union([
+  z.number().int().min(1).max(32),
+  z.object({ kind: z.literal('aimd'), start: z.number().int().min(1).max(32).optional(), min: z.number().int().min(1).max(32).optional(), max: z.number().int().min(1).max(32).optional() }),
+])
+
+// Mirrors CondPredicate (src/op/predicate.ts); buildOp re-validates kind/field/values
+// itself, so this schema only needs to stop an unknown shape being silently stripped.
+const condPredicateSchema = z.union([
+  z.object({ kind: z.literal('eq'), field: z.string(), value: z.unknown() }),
+  z.object({ kind: z.literal('in'), field: z.string(), values: z.array(z.unknown()) }),
+  z.object({ kind: z.literal('exists'), field: z.string() }),
+])
+
 // Mirrors src/op/reconcile.ts's ReconcileOpts discriminated union; buildOp
 // (src/op/spec.ts) re-validates mode/defaultPolicy/policy itself, so this
 // schema only needs to stop unknown shapes being silently stripped before it
@@ -51,19 +66,24 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   // stop this key from being silently stripped before it reaches buildOp.
   z.object({ tag: z.literal('leaf'), name: z.string(), opts: opSpecLeafOptsSchema, params: z.record(z.string(), z.unknown()).optional() }),
   z.object({ tag: z.literal('pipe'), steps: z.array(opSpecSchema).min(1) }),
-  z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(32) }),
+  z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: concurrencySchema }),
   z.object({
     tag: z.literal('mapField'),
     arrayField: z.string(),
     elementField: z.string(),
     op: opSpecSchema,
-    concurrency: z.number().int().min(1).max(32),
+    concurrency: concurrencySchema,
     renameTo: z.string().optional(),
   }),
   z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1) }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
   z.object({ tag: z.literal('catch'), try: opSpecSchema, catch: opSpecSchema }),
   z.object({ tag: z.literal('ask'), prompt: z.string(), timeout: z.string(), onTimeout: z.enum(['proceed', 'fail']) }),
+  z.object({
+    tag: z.literal('cond'),
+    branches: z.array(z.object({ when: condPredicateSchema, op: opSpecSchema })).min(1),
+    default: opSpecSchema.optional(),
+  }),
 ]))
 
 export type RegisterFileopsToolsOptions = {

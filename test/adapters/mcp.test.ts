@@ -223,6 +223,34 @@ describe('mcp adapter', () => {
     expect(parseResult(result)).toEqual({ a: 1 })
   })
 
+  it('run_pipeline: a map spec\'s `aimd` concurrency reaches buildOp through the MCP tool schema, not just the plain-number shorthand (#195)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: { tag: 'map', op: { tag: 'leaf', name: 'stamp' }, concurrency: { kind: 'aimd', start: 2, min: 1, max: 4 } },
+        input: [{ $handle: true, base64: b64('{"a":1}'), type: 'application/json' }],
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(Array.isArray(parseResult(result))).toBe(true)
+  })
+
+  it('run_pipeline: a cond spec reaches buildOp through the MCP tool schema (not silently stripped), routing on the piped value (#196)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: {
+          tag: 'cond',
+          branches: [{ when: { kind: 'eq', field: 'kind', value: 'b' }, op: { tag: 'sink', targets: ['store'] } }],
+          default: { tag: 'catch', try: { tag: 'leaf', name: 'unwrapHandle' }, catch: { tag: 'sink', targets: ['store'] } },
+        },
+        input: { kind: 'b', a: 1 },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ kind: 'b', a: 1 })
+  })
+
   it('run_pipeline: an ask spec reaches buildOp through the MCP tool schema (not silently stripped), degrading gracefully with no Ask capability wired (#181)', async () => {
     const result = await client.callTool({
       name: 'run_pipeline',

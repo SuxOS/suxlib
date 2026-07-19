@@ -76,11 +76,14 @@ on) and only differs in how it reads input and shapes output:
 ### Composable pipelines: `POST /op/run` and the `run_pipeline` MCP tool
 
 Beyond one-shot single-leaf calls, all three adapters also expose the op engine
-itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch', ... }`
+itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'cond' | 'ask', ... }`
 spec (`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`
 (`pack`/`unpack`/`shrink`/`redact`/`scrub`/`convert`/`unzip`), which gets built into a
 real `Op` tree and run via `runInline` — a multi-step job (e.g. unzip a bundle,
-transform each entry) runs as one call instead of several round trips. A `mapField`
+transform each entry) runs as one call instead of several round trips. A `map`/
+`mapField` step's `concurrency` is either a plain integer (`fixed(n)` shorthand) or
+`{ kind: 'aimd', start?, min?, max? }` for adaptive concurrency that grows/shrinks
+with success/failure instead of a static cap. A `mapField`
 step runs an inner op over one named field of each element of a named array field,
 reattaching the rest of each element untouched and optionally renaming the array field
 itself — e.g. `unpack -> mapField(arrayField: 'entries', elementField: 'handle',
@@ -90,11 +93,16 @@ can't do since it only replaces a whole array element. A `sink` step names its
 target(s) by string, resolved against `Caps.sinks`/`OpRunOpts.sinks` at run time, and a
 `reconcile` step needs only `caps.store`, which every adapter call already supplies —
 neither needs a live capability inside the spec itself, so both are spec-expressible.
-`ask` is the sole exception still not accepted from a spec, since it needs a
-host-supplied `Ask` implementation a stateless call has no way to provide. A
+`ask` is a straight pass-through to a host-supplied `Ask` implementation, degrading
+gracefully (honoring `onTimeout`) when none is wired. A
 `catch` step runs its `try` branch and, on any thrown error, re-runs its
 `catch` branch against the original input instead of aborting the whole
-pipe — e.g. `{ tag: 'catch', try: <primary sink>, catch: <fallback sink> }`.
+pipe — e.g. `{ tag: 'catch', try: <primary sink>, catch: <fallback sink> }`. A `cond`
+step is `catch`'s success-path counterpart: it runs the first branch whose
+declarative `when` predicate (`{ kind: 'eq' | 'in' | 'exists', field, value?/values? }`,
+checked against the piped value's top-level fields — never arbitrary code) matches,
+or `default` if none match — e.g. `{ tag: 'cond', branches: [{ when: { kind: 'eq',
+field: 'format', value: 'zip' }, op: <zip branch> }], default: <fallback branch> }`.
 Handle-shaped values thread
 through as `{ $handle: true, base64, type? }` on the way in and `{ base64, type, size }`
 on the way out. `POST /op/run` and the `run_pipeline` MCP tool take this JSON directly;

@@ -1,28 +1,81 @@
-import type { Op, LeafFn, LeafOpts } from './types.js'
+import type { Op, LeafFn, LeafOpts, Concurrency } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, mapField, sink, reconcile, catchOp, ask } from './combinators.js'
+import type { CondPredicate } from './predicate.js'
+import { op, pipe, map, mapField, sink, reconcile, catchOp, ask, cond } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
-import { fixed } from '../control/aimd.js'
+import { fixed, aimd } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
+// A plain number is shorthand for `{ kind: 'fixed', n }`; the `aimd` variant
+// mirrors governor.ts's ConcurrencySpec so a JSON-described map/mapField fan-out
+// can opt into adaptive backpressure the same way an in-process caller already
+// can by passing aimd() directly (#195).
+export type OpSpecConcurrency = number | { kind: 'aimd'; start?: number; min?: number; max?: number }
 export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
-  | { tag: 'map'; op: OpSpec; concurrency: number }
-  | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: number; renameTo?: string }
+  | { tag: 'map'; op: OpSpec; concurrency: OpSpecConcurrency }
+  | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: OpSpecConcurrency; renameTo?: string }
   | { tag: 'sink'; targets: string[] }
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
+  | { tag: 'cond'; branches: Array<{ when: CondPredicate; op: OpSpec }>; default?: OpSpec }
 
 const FIELD_POLICIES: FieldPolicy[] = ['last-write-wins', 'union', 'keep-first']
 const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge']
+const PREDICATE_KINDS = ['eq', 'in', 'exists']
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
 // into an unbounded retry storm or a huge fan-out.
 const MAX_LEAF_RETRIES = 5
 const MAX_MAP_CONCURRENCY = 32
+
+/**
+ * Builds the live `Concurrency` a map/mapField spec asks for: a plain integer
+ * (existing shorthand) becomes `fixed(n)`; `{ kind: 'aimd', ... }` becomes an
+ * adaptive `aimd()` bounded by the same MAX_MAP_CONCURRENCY cap other spec
+ * fan-out uses, so a JSON pipeline can request backpressure that grows/shrinks
+ * with success/failure instead of only ever a static pre-chosen cap (#195).
+ */
+function resolveConcurrency(c: OpSpecConcurrency, label: string): Concurrency {
+  if (typeof c === 'number') {
+    if (!Number.isInteger(c) || c < 1 || c > MAX_MAP_CONCURRENCY) {
+      throw new Error(`${label} spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
+    }
+    return fixed(c)
+  }
+  if (!c || typeof c !== 'object' || c.kind !== 'aimd') {
+    throw new Error(`${label} spec's \`concurrency\` must be an integer, or an object shaped { kind: 'aimd', start?, min?, max? }`)
+  }
+  for (const [k, v] of Object.entries({ start: c.start, min: c.min, max: c.max })) {
+    if (v !== undefined && (!Number.isInteger(v) || v < 1 || v > MAX_MAP_CONCURRENCY)) {
+      throw new Error(`${label} spec's \`concurrency.${k}\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
+    }
+  }
+  return aimd({ start: c.start, min: c.min, max: c.max })
+}
+
+/**
+ * Validates a cond branch's `when` against CondPredicate's shape (src/op/predicate.ts)
+ * -- `kind` picks the check, `field` names the top-level input field it reads, and
+ * `in`'s `values` must be an array. `eq`'s `value` and `exists` need no further shape
+ * check beyond `field` since they accept anything JSON-shaped.
+ */
+function validatePredicate(w: unknown, branchIndex: number): asserts w is CondPredicate {
+  if (!w || typeof w !== 'object') throw new Error(`cond spec's branch ${branchIndex} \`when\` must be an object`)
+  const p = w as Record<string, unknown>
+  if (!PREDICATE_KINDS.includes(p.kind as string)) {
+    throw new Error(`cond spec's branch ${branchIndex} \`when.kind\` must be one of: ${PREDICATE_KINDS.join(', ')}`)
+  }
+  if (typeof p.field !== 'string' || !p.field) {
+    throw new Error(`cond spec's branch ${branchIndex} \`when.field\` must be a non-empty string`)
+  }
+  if (p.kind === 'in' && !Array.isArray(p.values)) {
+    throw new Error(`cond spec's branch ${branchIndex} \`when.values\` must be an array (kind: "in")`)
+  }
+}
 
 function shapeLabel(s: LeafShape): string {
   if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
@@ -77,6 +130,10 @@ function shapesEqual(a: LeafShape, b: LeafShape): boolean {
  * branch could run at runtime, a mismatched pair collapses to 'unknown'
  * rather than guessing which branch a downstream step should be checked
  * against, same permissive fallback as an unrepresentable map/mapField case.
+ * A `cond` step's own boundary follows the same rule one step further: only
+ * representable when every branch's `op` (and `default`, if given) agree on
+ * a shape -- any disagreement collapses to 'unknown', since at runtime only
+ * whichever branch matches actually runs.
  */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (!s || typeof s !== 'object') return 'unknown'
@@ -90,6 +147,10 @@ function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (s.tag === 'catch') {
     const tryShape = stepShape(s.try, side); const catchShape = stepShape(s.catch, side)
     return shapesEqual(tryShape, catchShape) ? tryShape : 'unknown'
+  }
+  if (s.tag === 'cond') {
+    const shapes = s.branches.map((b) => stepShape(b.op, side)).concat(s.default ? [stepShape(s.default, side)] : [])
+    return shapes.every((sh) => shapesEqual(sh, shapes[0])) ? shapes[0] : 'unknown'
   }
   return 'unknown'
 }
@@ -144,7 +205,13 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
  * (retries exhausted, `CircuitOpenError`, `AskTimeoutError`, or a plain leaf
  * throw), re-runs its `catch` branch against the *original* input instead of
  * aborting the whole pipe -- e.g. "try the primary `sink`, fall back to a
- * secondary one".
+ * secondary one". `cond` (#196) is `catch`'s success-path counterpart:
+ * it runs the first branch whose declarative `when` predicate
+ * (CondPredicate, ./predicate.ts -- field-equals/field-in/exists checks
+ * only, never arbitrary code) matches the piped value, or `default` if none
+ * match (and throws if neither matches and no `default` was given) --
+ * letting a JSON pipeline route itself on the input's shape/content instead
+ * of the caller pre-deciding which branch to send.
  *
  * `extraLeaves`, when supplied, merges host-registered leaves onto
  * LEAF_REGISTRY (mergeLeaves, ./registry.ts) once per top-level buildOp call
@@ -208,10 +275,7 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
     }
     case 'map': {
       if (!spec.op) throw new Error('map spec requires an `op`')
-      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
-        throw new Error(`map spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
-      }
-      return map(buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency) })
+      return map(buildOpNode(spec.op, leaves), { concurrency: resolveConcurrency(spec.concurrency, 'map') })
     }
     case 'mapField': {
       if (!spec.op) throw new Error('mapField spec requires an `op`')
@@ -225,10 +289,7 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       if (spec.renameTo !== undefined && isBadFieldName(spec.renameTo)) {
         throw new Error('mapField spec\'s `renameTo`, if present, must be a non-empty string (not `__proto__`/`constructor`/`prototype`)')
       }
-      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
-        throw new Error(`mapField spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
-      }
-      return mapField(spec.arrayField, spec.elementField, buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency), renameTo: spec.renameTo })
+      return mapField(spec.arrayField, spec.elementField, buildOpNode(spec.op, leaves), { concurrency: resolveConcurrency(spec.concurrency, 'mapField'), renameTo: spec.renameTo })
     }
     case 'sink': {
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
@@ -268,7 +329,19 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') throw new Error('ask spec\'s `onTimeout` must be "proceed" or "fail"')
       return ask(spec.prompt, { timeout: spec.timeout, onTimeout: spec.onTimeout })
     }
+    case 'cond': {
+      if (!Array.isArray(spec.branches) || !spec.branches.length) {
+        throw new Error('cond spec requires a non-empty `branches` array')
+      }
+      const branches = spec.branches.map((b, i) => {
+        if (!b || typeof b !== 'object') throw new Error(`cond spec's branch ${i} must be an object`)
+        validatePredicate(b.when, i)
+        if (!b.op) throw new Error(`cond spec's branch ${i} requires an \`op\``)
+        return { when: b.when, op: buildOpNode(b.op, leaves) }
+      })
+      return cond(branches, spec.default ? buildOpNode(spec.default, leaves) : undefined)
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask, cond)`)
   }
 }

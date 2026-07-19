@@ -1,5 +1,6 @@
 import type { Store, Llm, Clock, Ask, Cache } from '../effects/types.js'
 import type { ReconcileOpts } from './reconcile.js'
+import type { CondPredicate } from './predicate.js'
 import type { TokenBucket } from '../control/token-bucket.js'
 import type { CircuitBreaker } from '../control/circuit-breaker.js'
 export interface SinkTarget { name: string; write(input: any, caps: Caps): Promise<any> }
@@ -17,3 +18,4 @@ export type Op =
   | { tag: 'sink'; targets: string[] }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
   | { tag: 'catch'; try: Op; catch: Op }
+  | { tag: 'cond'; branches: Array<{ when: CondPredicate; op: Op }>; default?: Op }

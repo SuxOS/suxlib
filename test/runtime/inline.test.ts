@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
-import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
+import { op, pipe, map, mapField, reconcile, sink, catchOp, cond } from '../../src/op/combinators.js'
 import { fixed } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
@@ -61,4 +61,21 @@ test('runInline propagates the catch branch\'s own error when the fallback also 
     op('boom2', async () => { throw new Error('fallback failed too') }, { kind: 'pure' }),
   )
   await expect(runInline(tree, 5, caps)).rejects.toThrow('fallback failed too')
+})
+
+test('runInline runs the first cond branch whose predicate matches the piped value (#196)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = cond([
+    { when: { kind: 'eq', field: 'kind', value: 'a' }, op: op('a', async (v: any) => `a:${v.kind}`, { kind: 'pure' }) },
+    { when: { kind: 'in', field: 'kind', values: ['b', 'c'] }, op: op('bc', async (v: any) => `bc:${v.kind}`, { kind: 'pure' }) },
+  ], op('fallback', async (v: any) => `fallback:${v.kind}`, { kind: 'pure' }))
+  expect(await runInline(tree, { kind: 'a' }, caps)).toBe('a:a')
+  expect(await runInline(tree, { kind: 'c' }, caps)).toBe('bc:c')
+  expect(await runInline(tree, { kind: 'z' }, caps)).toBe('fallback:z')
+})
+
+test('runInline throws a clear error when no cond branch matches and no default was given', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = cond([{ when: { kind: 'exists', field: 'missing' }, op: op('never', async (v: any) => v, { kind: 'pure' }) }])
+  await expect(runInline(tree, { a: 1 }, caps)).rejects.toThrow(/no branch matched/)
 })

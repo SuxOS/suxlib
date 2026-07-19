@@ -175,6 +175,32 @@ test('buildOp rejects an out-of-range map concurrency', () => {
   expect(() => buildOp({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 33 })).toThrow(/concurrency/)
 })
 
+test('buildOp builds a map/mapField tree with adaptive `aimd` concurrency instead of a fixed cap (#195)', async () => {
+  const { store, ...rest } = caps()
+  const mapSpec: OpSpec = {
+    tag: 'map',
+    op: { tag: 'leaf', name: 'stamp' },
+    concurrency: { kind: 'aimd', start: 2, min: 1, max: 4 },
+  }
+  const mapResult = await runInline(buildOp(mapSpec), [1, 2, 3], { store, ...rest }) as unknown[]
+  expect(mapResult.length).toBe(3)
+
+  const mapFieldSpec: OpSpec = {
+    tag: 'mapField',
+    arrayField: 'entries',
+    elementField: 'handle',
+    op: { tag: 'leaf', name: 'stamp' },
+    concurrency: { kind: 'aimd' },
+  }
+  const mapFieldResult = await runInline(buildOp(mapFieldSpec), { entries: [{ name: 'a', handle: 1 }] }, { store, ...rest }) as { entries: unknown[] }
+  expect(mapFieldResult.entries.length).toBe(1)
+})
+
+test('buildOp rejects a malformed `aimd` concurrency spec', () => {
+  expect(() => buildOp({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'bogus' } as any })).toThrow(/concurrency/)
+  expect(() => buildOp({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'aimd', max: 33 } })).toThrow(/concurrency\.max/)
+})
+
 test('buildOp rejects an out-of-range leaf retries', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { retries: 6 } })).toThrow(/retries/)
 })
@@ -442,4 +468,77 @@ test('buildOp rejects an ask spec missing `prompt`/`timeout` or with a bad `onTi
   expect(() => buildOp({ tag: 'ask', timeout: '5m', onTimeout: 'proceed' } as unknown as OpSpec)).toThrow(/prompt/)
   expect(() => buildOp({ tag: 'ask', prompt: 'x', onTimeout: 'proceed' } as unknown as OpSpec)).toThrow(/timeout/)
   expect(() => buildOp({ tag: 'ask', prompt: 'x', timeout: '5m', onTimeout: 'nope' } as unknown as OpSpec)).toThrow(/onTimeout/)
+})
+
+test('buildOp builds a cond node that routes to the first matching branch, in order (#196)', async () => {
+  const { store } = caps()
+  const written: string[] = []
+  const spec: OpSpec = {
+    tag: 'cond',
+    branches: [
+      { when: { kind: 'eq', field: 'type', value: 'a' }, op: { tag: 'sink', targets: ['a-sink'] } },
+      { when: { kind: 'in', field: 'type', values: ['b', 'c'] }, op: { tag: 'sink', targets: ['bc-sink'] } },
+    ],
+    default: { tag: 'sink', targets: ['default-sink'] },
+  }
+  const sinks = {
+    'a-sink': { name: 'a-sink', write: async (v: any) => { written.push(`a:${v.type}`); return v } },
+    'bc-sink': { name: 'bc-sink', write: async (v: any) => { written.push(`bc:${v.type}`); return v } },
+    'default-sink': { name: 'default-sink', write: async (v: any) => { written.push(`default:${v.type}`); return v } },
+  }
+  const runCaps = { store, llm: {} as any, clock: { now: () => 0 }, sinks }
+  const tree = buildOp(spec)
+  await runInline(tree, { type: 'a' }, runCaps)
+  await runInline(tree, { type: 'c' }, runCaps)
+  await runInline(tree, { type: 'z' }, runCaps)
+  expect(written).toEqual(['a:a', 'bc:c', 'default:z'])
+})
+
+test('buildOp\'s cond node throws when no branch matches and no `default` was given', async () => {
+  const { store } = caps()
+  const spec: OpSpec = {
+    tag: 'cond',
+    branches: [{ when: { kind: 'exists', field: 'missing' }, op: { tag: 'sink', targets: ['out'] } }],
+  }
+  const tree = buildOp(spec)
+  await expect(runInline(tree, { a: 1 }, { store, llm: {} as any, clock: { now: () => 0 }, sinks: { out: { name: 'out', write: async (v: any) => v } } }))
+    .rejects.toThrow(/no branch matched/)
+})
+
+test('buildOp rejects a cond spec with empty `branches`, a malformed `when`, or a branch missing `op`', () => {
+  expect(() => buildOp({ tag: 'cond', branches: [] } as unknown as OpSpec)).toThrow(/non-empty `branches`/)
+  expect(() => buildOp({ tag: 'cond', branches: [{ when: { kind: 'bogus', field: 'x' }, op: { tag: 'sink', targets: ['out'] } }] } as unknown as OpSpec)).toThrow(/when\.kind/)
+  expect(() => buildOp({ tag: 'cond', branches: [{ when: { kind: 'eq', field: '' }, op: { tag: 'sink', targets: ['out'] } }] } as unknown as OpSpec)).toThrow(/when\.field/)
+  expect(() => buildOp({ tag: 'cond', branches: [{ when: { kind: 'in', field: 'x' } as any, op: { tag: 'sink', targets: ['out'] } }] } as unknown as OpSpec)).toThrow(/when\.values/)
+  expect(() => buildOp({ tag: 'cond', branches: [{ when: { kind: 'eq', field: 'x', value: 1 } }] } as unknown as OpSpec)).toThrow(/requires an `op`/)
+})
+
+test('buildOp\'s shape check treats a cond node\'s boundary as \'unknown\' when its branches disagree, so it never blocks a downstream pipe step', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      {
+        tag: 'cond',
+        branches: [{ when: { kind: 'eq', field: 'type', value: 'a' }, op: { tag: 'leaf', name: 'unzip' } }],
+        default: { tag: 'leaf', name: 'scrub' },
+      },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp\'s shape check catches a downstream mismatch when a cond node\'s branches agree on a bare-`handle` output', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      {
+        tag: 'cond',
+        branches: [{ when: { kind: 'eq', field: 'type', value: 'a' }, op: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } } }],
+        default: { tag: 'leaf', name: 'extract' },
+      },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("cond"\) produces handle/)
 })

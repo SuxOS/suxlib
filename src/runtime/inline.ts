@@ -1,5 +1,6 @@
 import type { Op, Caps } from '../op/types.js'
 import { runReconcile } from '../op/reconcile.js'
+import { matchPredicate } from '../op/predicate.js'
 import { runGoverned, type RunGovernedOpts } from '../control/governor.js'
 
 export class AskTimeoutError extends Error {
@@ -62,6 +63,12 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
     case 'catch': {
       try { return await runInline(node.try, input, caps, gOpts) }
       catch { return runInline(node.catch, input, caps, gOpts) }
+    }
+    case 'cond': {
+      const branch = node.branches.find((b) => matchPredicate(b.when, input))
+      if (branch) return runInline(branch.op, input, caps, gOpts)
+      if (node.default) return runInline(node.default, input, caps, gOpts)
+      throw new Error('cond: no branch matched and no `default` was given')
     }
   }
 }
