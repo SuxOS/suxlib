@@ -410,7 +410,24 @@ There is no linter in this repo. Run both locally before pushing.
   names its own need for a design pass before implementation, and #326
   requires a coordinated change in the `sux` repo, which isn't reachable
   from a suxlib-only session — neither is a fit for a low-priority batch
-  regardless of turn/time budget available.
+  regardless of turn/time budget available. Update (2026-07-20, this batch):
+  #242/#309 re-checked once more via `gh pr checks 241`/`308` — both
+  prerequisite PRs (#241 for #234, #308 for #303) are still open and still
+  fail `security-review` on the identical #320 missing-script error, and
+  `grep -rn "snapshotValue\|traceSnapshots\|releaseCancelled" src/` still
+  comes up empty on `origin/main`, so both stay dropped, unbuilt, not
+  superseded. #324/#326 hit their *sixth* consecutive drop this round, each
+  for the same structural reason every prior batch found (#324 needs a
+  design pass a low-tier batch can't do; #326 needs the `sux` repo, which
+  is never checked out in this session — confirmed again via `find /
+  -maxdepth 3 -iname sux`, nothing). That clears the same "repeated
+  independent confirmation" bar #320/#337 were labeled `needs-human` under,
+  and #314 (filed after #313 hit the identical dispatcher-reselects-a-
+  permanently-blocked-issue pattern for #264) confirms directly: labelling
+  the offending issue `hold`/`needs-human` is the actual fix, since both
+  labels are already an EXPAND exclusion signal this task's own instructions
+  honor, so the low-tier dispatcher almost certainly does too. Labelled
+  both `needs-human` this batch rather than dropping a seventh time.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
