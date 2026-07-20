@@ -382,7 +382,35 @@ There is no linter in this repo. Run both locally before pushing.
   consecutive daily batches independently rediscovered it as unfixable from
   suxlib (the script and its home repo, SuxOS/.github, aren't reachable from
   here at all) — nothing left for a builder to do on it short of that label,
-  so stop requeuing it until a human restores the upstream script.
+  so stop requeuing it until a human restores the upstream script. Update
+  (2026-07-20, later batch): #309/#242 re-checked again via `gh pr checks
+  308`/`241` — both still fail `security-review` on the same missing-script
+  error, so both stayed dropped, unbuilt. Gotcha that nearly caused a bad
+  build this round: `git log origin/main --oneline --all | grep <name>` can
+  match a commit that only exists on an unmerged PR's remote-tracking ref
+  (`--all` walks every ref, not just `main`) — `git show <sha>` on that
+  commit then looks exactly like real, landed code (full diff, real file
+  contents), with nothing in the output itself flagging it as unmerged. This
+  is exactly how a prior run first mis-confirmed #303's `releaseCancelled()`
+  naming (correctly, since that stale branch was later confirmed against
+  main) but a *different* run could just as easily use the same command to
+  wrongly conclude a still-open PR's commit is already on `main` — always
+  cross-check with `git merge-base HEAD origin/main` (or `git log
+  origin/main` without `--all`) before trusting a symbol/commit found via
+  `--all` actually exists on `main`, not just on some branch. #337 (the
+  second, distinct security-review failure mode — shallow checkout / no
+  merge-base — filed to track the gap left after #320's fix) was dropped a
+  second time this round for the same reason #320 was: the root cause lives
+  entirely inside `SuxOS/.github`'s reusable `security-review.yml`, which
+  this repo's own `.github/workflows/security-review.yml` only ever
+  `uses:` with no fetch-depth override available to it — labeled
+  `needs-human` on this, its second independent confirmation, same
+  two-strikes precedent as #320. #324 (streaming/chunked domain+Store path)
+  and #326 (TS/tsconfig convergence with `sux`) were dropped again too: #324
+  names its own need for a design pass before implementation, and #326
+  requires a coordinated change in the `sux` repo, which isn't reachable
+  from a suxlib-only session — neither is a fit for a low-priority batch
+  regardless of turn/time budget available.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
