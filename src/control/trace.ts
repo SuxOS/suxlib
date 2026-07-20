@@ -32,9 +32,20 @@
  * answers "why did the fallback fire" -- the thrown error's `.message` is
  * attached there before `runInline`'s `catch` case swallows it to run the
  * fallback, rather than inventing a separate event kind for the same fact.
+ *
+ * `callId` (#366) disambiguates two *concurrent* nodes that share the exact
+ * same `tag`/`name`/`path`/`runId` -- e.g. `sink.fanout(['a', 'a'])`, which
+ * reaches `childPath(path, 'a')` twice at once. `path` alone only identifies
+ * a *position* in the tree, not a specific physical async call, so a
+ * consumer matching node-exit back to node-enter by position alone (e.g. by
+ * always popping the topmost open entry for that path) can pair the wrong
+ * exit with the wrong enter when two such calls finish out of push order.
+ * `traced()` (src/runtime/inline.ts) mints one `callId` per invocation and
+ * stamps it on both its node-enter and its node-exit, so a consumer can
+ * match the specific pair by `callId` instead of by stack position.
  */
 export type TraceEvent =
-  | { kind: 'node-enter'; tag: string; name?: string; path: string; runId: string }
-  | { kind: 'node-exit'; tag: string; name?: string; path: string; runId: string; durationMs: number; ok: boolean; error?: string }
+  | { kind: 'node-enter'; tag: string; name?: string; path: string; runId: string; callId: string }
+  | { kind: 'node-exit'; tag: string; name?: string; path: string; runId: string; callId: string; durationMs: number; ok: boolean; error?: string }
 
 export type TraceEventHandler = (e: TraceEvent) => void

@@ -99,11 +99,11 @@ describe('otel exporter', () => {
     // name" by the pre-#348 name-only fallback. A retry-attempt tagged with
     // run-A's own runId must still land on run-A's span, not run-B's, even
     // though run-B's span is the one still open more recently.
-    exporter.onTrace({ kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: 'run-A' })
-    exporter.onTrace({ kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: 'run-B' })
+    exporter.onTrace({ kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: 'run-A', callId: 'call-A' })
+    exporter.onTrace({ kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: 'run-B', callId: 'call-B' })
     exporter.onEvent({ kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: 5, runId: 'run-A' })
-    exporter.onTrace({ kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: 'run-A', durationMs: 1, ok: true })
-    exporter.onTrace({ kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: 'run-B', durationMs: 1, ok: true })
+    exporter.onTrace({ kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: 'run-A', callId: 'call-A', durationMs: 1, ok: true })
+    exporter.onTrace({ kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: 'run-B', callId: 'call-B', durationMs: 1, ok: true })
     await exporter.flush()
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
@@ -156,6 +156,36 @@ describe('otel exporter', () => {
       // the other concurrent run's -- the exact misattribution #346 flags.
       expect(children.every((c: any) => c.traceId === pipeSpan.traceId)).toBe(true)
     }
+  })
+
+  it('attributes each duplicate-named concurrent span\'s own timing/status by callId, not by exit order (#366)', async () => {
+    const exporter = createOtelExporter({ endpoint: 'https://x' })
+    // Two spans open at the identical path/runId/name (e.g. sink.fanout(['a',
+    // 'a'])): entry1 pushed first, entry2 pushed second. The *second* real
+    // call (callId '2') is the one that exits FIRST here -- if the exporter
+    // blindly popped topmost-of-stack, it would wrongly attribute callId-2's
+    // exit data to entry1 and vice versa.
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1' })
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '2' })
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '2', durationMs: 1, ok: true })
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1', durationMs: 999, ok: false, error: 'target0-failed' })
+    expect(exporter.pendingCount()).toBe(2)
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      const spans = JSON.parse(req.body).resourceSpans[0].scopeSpans[0].spans
+      expect(spans).toHaveLength(2)
+      const okSpan = spans.find((s: any) => s.status.code === 1)
+      const errSpan = spans.find((s: any) => s.status.code === 2)
+      expect(okSpan.endTimeUnixNano).not.toBe(errSpan.endTimeUnixNano)
+      expect(errSpan.status.message).toBe('target0-failed')
+      return new Response(null, { status: 200 })
+    })
+    const flushExporter = createOtelExporter({ endpoint: 'https://x', fetchFn })
+    flushExporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1' })
+    flushExporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '2' })
+    flushExporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '2', durationMs: 1, ok: true })
+    flushExporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1', durationMs: 999, ok: false, error: 'target0-failed' })
+    await flushExporter.flush()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
   it('drops the oldest buffered span once maxBufferedSpans is exceeded', async () => {

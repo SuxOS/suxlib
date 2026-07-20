@@ -660,7 +660,25 @@ There is no linter in this repo. Run both locally before pushing.
   `GovernorEvent` needs to accept and stamp this same per-call `runId`
   argument to stay attributable — don't reach for `createGovernor`'s
   construction-time tagging for it, that pattern only fits values that are
-  stable for a primitive's whole lifetime.
+  stable for a primitive's whole lifetime. Update (#366): the "same-path-
+  twice-in-one-run" gap this note flagged above (`sink.fanout(['a', 'a'])`)
+  is now closed for the `TraceEvent`/span side too — `TraceEvent` carries a
+  `callId` (`src/control/trace.ts`), minted fresh per `traced()` invocation
+  (`src/runtime/inline.ts`, a simple module-level counter, not
+  `crypto.randomUUID()` — it only needs to be unique among calls
+  concurrently sharing one `tag`/`name`/`path`/`runId`) and stamped on both
+  a call's node-enter and its matching node-exit. `createOtelExporter`'s
+  node-exit handler now finds and removes the specific stack entry whose
+  `callId` matches, instead of unconditionally popping topmost — two
+  duplicate-named concurrent spans can now exit in either order without
+  cross-wiring one's timing/status onto the other. Any hand-crafted
+  `TraceEvent` literal in a test (as opposed to one produced by actually
+  running `traced()`) needs its own `callId` now too; `toEqual`-style exact
+  object-literal assertions against `TraceEvent` arrays are brittle to this
+  kind of field addition — check `test/runtime/inline-trace.test.ts`,
+  `test/adapters/otel.test.ts`, and `test/adapters/op-run.test.ts` (the three
+  files with literal `TraceEvent` shapes) whenever `TraceEvent`'s shape
+  changes again.
 - `src/op/plan.ts`'s `planOpSpec` (#361) is a third non-executing structural
   sibling to `validateOpSpec`/`describePipelineSchema` (`src/op/spec.ts`,
   `src/op/introspect.ts`) — its `maxRetryMultiplier` (Σ(retries+1)) sums over

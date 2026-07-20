@@ -149,7 +149,7 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
   // sharing this exporter instance never share a path-map, even when their
   // windows overlap without nesting and they visit the exact same relative
   // path.
-  type OpenEntry = { spanId: string; startNano: bigint; tag: string; name?: string }
+  type OpenEntry = { spanId: string; startNano: bigint; tag: string; name?: string; callId: string }
   const open = new Map<string, Map<string, OpenEntry[]>>()
   // Keyed by leaf name to a stack of {path, runId} -- runId (#348) lets
   // onEvent below prefer the span that's actually in the same run as the
@@ -182,7 +182,7 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
       const pathMap = open.get(e.runId) ?? new Map<string, OpenEntry[]>()
       open.set(e.runId, pathMap)
       const stack = pathMap.get(e.path) ?? []
-      stack.push({ spanId: randomHex(8), startNano: BigInt(Date.now()) * 1_000_000n, tag: e.tag, name: e.name })
+      stack.push({ spanId: randomHex(8), startNano: BigInt(Date.now()) * 1_000_000n, tag: e.tag, name: e.name, callId: e.callId })
       pathMap.set(e.path, stack)
       if (e.name) {
         const nameStack = openByName.get(e.name) ?? []
@@ -191,10 +191,16 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
       }
       return
     }
-    // node-exit
+    // node-exit -- find and remove the specific entry this call's node-enter
+    // pushed (matched by callId), not just whatever's topmost. Two
+    // concurrent calls sharing this exact path (e.g. sink.fanout(['a',
+    // 'a'])) can exit in either order, and popping topmost unconditionally
+    // would attribute this exit's durationMs/ok/error to whichever entry
+    // happens to still be on top, regardless of which one actually finished.
     const pathMap = open.get(e.runId)
     const stack = pathMap?.get(e.path)
-    const entry = stack?.pop()
+    const idx = stack?.findIndex((entry) => entry.callId === e.callId) ?? -1
+    const entry = idx === -1 || !stack ? undefined : stack.splice(idx, 1)[0]
     if (!pathMap || !entry) return // defensive: an exit with no matching enter should not happen
     if (stack && stack.length === 0) pathMap.delete(e.path)
     if (e.name) {
