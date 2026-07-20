@@ -5,7 +5,7 @@ import { OpAbortError, sleepOrAbort } from './abort.js'
 
 export interface TokenBucket {
   tryTake(cost: number, nowMs: number): boolean
-  take(cost: number, clock: Clock, sleep?: (ms: number) => Promise<void>, signal?: AbortSignal, runId?: string): Promise<void>
+  take(cost: number, clock: Clock, sleep?: (ms: number) => Promise<void>, signal?: AbortSignal, runId?: string, callId?: string): Promise<void>
   readonly tokens: number
 }
 
@@ -30,7 +30,7 @@ export function tokenBucket(opts: { capacity: number; refillPerMs: number; clock
       tokens -= cost
       return true
     },
-    async take(cost, clock, sleep = defaultSleep, signal, runId) {
+    async take(cost, clock, sleep = defaultSleep, signal, runId, callId) {
       if (cost < 0) throw new Error(`tokenBucket.take: cost ${cost} must not be negative`)
       if (cost > opts.capacity) {
         throw new Error(`tokenBucket.take: requested cost ${cost} exceeds bucket capacity ${opts.capacity} and can never be satisfied`)
@@ -39,7 +39,7 @@ export function tokenBucket(opts: { capacity: number; refillPerMs: number; clock
       let attempt = 0
       while (!bucket.tryTake(cost, clock.now())) {
         const delayMs = Math.max(1, backoffFullJitter(attempt, { base: 5, cap: 200 }))
-        opts.onEvent?.({ kind: 'token-wait', attempt, delayMs, runId })
+        opts.onEvent?.({ kind: 'token-wait', attempt, delayMs, runId, callId })
         attempt++
         await sleepOrAbort(sleep, delayMs, signal)
       }

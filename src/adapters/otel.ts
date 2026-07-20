@@ -22,22 +22,20 @@
 // tests often fake) and adds durationMs on top for the end.
 //
 // GovernorEvents are keyed by leaf `name` first (#334's original scoping),
-// but now also disambiguated by `runId` when the event carries one (#348):
-// `openByName` tracks {path, runId} pairs per name, and `onEvent` prefers the
-// innermost still-open entry whose `runId` matches the event's own, only
-// falling back to "the innermost span sharing this name" (the old,
-// run-blind behavior) when the event has no `runId` at all -- a primitive
+// disambiguated by `runId` (#348) and, since #380, by `callId` too:
+// `openByName` tracks entries (each already carrying the `callId` its
+// TraceEvent node-enter minted, #366) per name, and `onEvent` prefers an
+// exact `callId` match, then the innermost still-open entry whose `runId`
+// matches, only falling back to "the innermost span sharing this name" (the
+// old, run-blind behavior) when the event carries neither -- a primitive
 // driven outside `runGoverned`/`runInline`. `runGoverned` (src/control/
-// governor.ts) threads the calling runInline's `runId` into every governor
-// primitive's gating method (allow/onSuccess/onFailure/take/release), and
-// each primitive stamps it onto the GovernorEvent it emits -- the same
-// call-scoped-id approach #346 used for TraceEvent, applied one layer
-// further in. This still isn't a mathematical guarantee (two concurrent runs
-// sharing one leaf name that also somehow share one runId -- not possible
-// with runInline's crypto.randomUUID() default, but a caller-supplied
-// gOpts/runId scheme could theoretically collide), but it closes the gap for
-// the realistic production shape #348 called out: two concurrent calls of
-// the same op-tree sharing one leaf name.
+// governor.ts) threads the calling runInline call's `runId` *and* the exact
+// node's `callId` into every governor primitive's gating method
+// (allow/onSuccess/onFailure/take/release), and each primitive stamps both
+// onto the GovernorEvent it emits. `callId` is what actually disambiguates
+// two duplicate-named leaves/sink-targets *within one run* (e.g.
+// sink.fanout(['a', 'a'])) sharing one `runId` -- `runId` alone can't tell
+// those apart, which #380 exists to close.
 //
 // onTrace/onEvent must never throw: src/runtime/inline.ts's traced() calls
 // onTrace directly inside its try, so a throw from here on the success path
@@ -106,7 +104,7 @@ function attrList(attrs: Record<string, AttrValue>): { key: string; value: Retur
 }
 
 function eventAttributes(e: GovernorEvent): Record<string, AttrValue> {
-  const { kind: _kind, name: _name, runId: _runId, ...rest } = e as GovernorEvent & { name?: string; runId?: string }
+  const { kind: _kind, name: _name, runId: _runId, callId: _callId, ...rest } = e as GovernorEvent & { name?: string; runId?: string; callId?: string }
   return rest as Record<string, AttrValue>
 }
 
@@ -247,14 +245,18 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     if (!name) return
     const stack = openByName.get(name)
     if (!stack || stack.length === 0) return
-    // Prefer the innermost open span that's also in the same run (#348) --
-    // only falling back to "the innermost span sharing this leaf name"
-    // regardless of run when the event carries no runId at all (a primitive
-    // driven outside runInline).
+    // Prefer an exact callId match (#380) -- the only way to tell apart two
+    // duplicate-named spans that also share one runId (e.g.
+    // sink.fanout(['a', 'a'])). Fall back to "the innermost open span also in
+    // the same run" (#348) when the event carries no callId (an older
+    // primitive call, or one driven outside runGoverned), and further to
+    // "the innermost span sharing this leaf name" when it carries no runId
+    // either (a primitive driven outside runInline entirely).
+    const callId = 'callId' in e ? e.callId : undefined
     const runId = 'runId' in e ? e.runId : undefined
-    const entry = runId
-      ? [...stack].reverse().find(s => s.runId === runId) ?? stack[stack.length - 1]
-      : stack[stack.length - 1]
+    const byCallId = callId ? [...stack].reverse().find(s => s.callId === callId) : undefined
+    const byRunId = runId ? [...stack].reverse().find(s => s.runId === runId) : undefined
+    const entry = byCallId ?? byRunId ?? stack[stack.length - 1]
     entry.events.push({ name: e.kind, timeUnixNano: (BigInt(Date.now()) * 1_000_000n).toString(), attributes: eventAttributes(e) })
   }
 
