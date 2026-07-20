@@ -395,7 +395,9 @@ function readTiffOrientation(tiff: Uint8Array): number | null {
     const entryOffset = ifdOffset + 2 + e * 12
     const tag = u16(entryOffset)
     if (tag === 0x0112) {
+      if (u16(entryOffset + 2) !== 3 || u32(entryOffset + 4) !== 1) return null // type must be SHORT, count 1
       const value = u16(entryOffset + 8)
+      if (value < 1 || value > 8) return null
       return value === 1 ? null : value
     }
   }

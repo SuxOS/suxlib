@@ -98,6 +98,32 @@ test('sanitizeImage preserves a PNG eXIf chunk carrying a non-default Orientatio
   expect(readOrientationLE(exif!)).toBe(6)
 })
 
+test('sanitizeImage drops a PNG eXIf chunk whose Orientation entry has an out-of-range value', () => {
+  const png = buildMinimalPng({ exifOrientation: 42 })
+  const result = sanitizeImage(png)
+  expect(findPngChunk(result.bytes, 'eXIf')).toBeNull()
+})
+
+test('sanitizeImage drops a PNG eXIf chunk whose Orientation entry has the wrong TIFF type', () => {
+  const payload = tiffOrientationPayload(6)
+  payload[12] = 0x04 // type LONG instead of SHORT(3)
+  const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const ihdr = chunk('IHDR', new Uint8Array(13))
+  const exif = chunk('eXIf', payload)
+  const idat = chunk('IDAT', new Uint8Array([0]))
+  const iend = chunk('IEND', new Uint8Array(0))
+  const parts = [sig, ihdr, exif, idat, iend]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const badPng = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    badPng.set(p, off)
+    off += p.length
+  }
+  const result = sanitizeImage(badPng)
+  expect(findPngChunk(result.bytes, 'eXIf')).toBeNull()
+})
+
 test('sanitizeImage rejects an image over MAX_IMAGE_INPUT_BYTES', () => {
   const big = new Uint8Array(MAX_IMAGE_INPUT_BYTES + 1)
   big.set([0x89, 0x50, 0x4e, 0x47])
