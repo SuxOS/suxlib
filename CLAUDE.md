@@ -209,7 +209,31 @@ There is no linter in this repo. Run both locally before pushing.
   bytes still round-trip into the output unless you *also*
   `context.delete(ref)` the object itself. Any future feature that means to
   drop PDF content (not just stop referencing it) needs both calls, the way
-  `pdfShrink`'s XMP-stripping fix does.
+  `pdfShrink`'s XMP-stripping fix does. Update (#359): #351's fix only
+  walked `doc.catalog` — but `/Metadata` streams also commonly hang off
+  individual page dicts and XObjects (embedded images/forms), each carrying
+  their own independent XMP packet. `pdfShrink` now walks *every* indirect
+  object (`doc.context.enumerateIndirectObjects()`, a snapshot array so
+  deleting mid-loop is safe) and applies the same delete-both-the-reference-
+  and-the-indirect-object treatment to any `PDFDict` (or `PDFStream`, via
+  its `.dict`) carrying a `/Metadata` key — not just the catalog. Any future
+  metadata-carrier this misses (e.g. inside a compressed object stream, not
+  its own top-level indirect object) would need the same walk extended
+  there.
+- `src/domain/sanitize.ts`'s `redactText` gotcha: `PATTERNS` runs each
+  pattern's *full* `text.replace()` pass before the next, reassigning the
+  same `text` variable each time — so by the time a later pattern's own
+  logic inspects `text` (e.g. the bare-SSN pattern's context-window check,
+  #358), it may already contain an *earlier* pattern's own
+  `[REDACTED:type]` placeholder. A naive context/lookahead check against
+  raw `text` can then mistake a prior redaction's placeholder for real
+  surrounding content (concretely: `[REDACTED:ssn]` left nearby by the
+  formatted-SSN pattern satisfies the bare-SSN pattern's own "is there an
+  'ssn' label nearby" check, redacting an unrelated bare number that has no
+  real label in the original input). Any future pattern whose match logic
+  depends on nearby text — not just its own regex — must strip
+  `[REDACTED:\w+]` placeholders from whatever window it inspects first
+  (see `REDACTED_PLACEHOLDER_RE`), not just search raw `text` directly.
 - `src/domain/transform.ts`'s `toXml`/`parseXml` marker-attribute scheme
   (`EMPTY_ARRAY_ATTR`/`SINGLE_ARRAY_ATTR`/`NULL_VALUE_ATTR`/`NESTED_ARRAY_ATTR`) has
   a gotcha of its own: `attach()`'s promote-on-repeat logic used to infer "this key
@@ -660,4 +684,22 @@ There is no linter in this repo. Run both locally before pushing.
   `GovernorEvent` needs to accept and stamp this same per-call `runId`
   argument to stay attributable — don't reach for `createGovernor`'s
   construction-time tagging for it, that pattern only fits values that are
-  stable for a primitive's whole lifetime.
+  stable for a primitive's whole lifetime. Update (#357): `openByName`'s
+  `{path, runId}` pairs (described above) had one more gap — two duplicate-
+  named concurrent entries (e.g. `sink.fanout(['a', 'a'])`) share not just
+  `name` but also `runId` *and* `path`, so a `GovernorEvent`'s destination
+  bucket (the old separate `pendingEvents` map, keyed by `${runId}::${path}`)
+  couldn't tell the two spans apart either — whichever span exited first
+  drained the whole shared bucket, stealing events that had accumulated
+  while the *other* span was still the only one open. Fixed by dropping
+  `pendingEvents` entirely and giving each `OpenEntry` its own `events`
+  array, with `openByName` now holding references to the actual `OpenEntry`
+  objects (not copies) so `onEvent` mutates the right instance directly.
+  This doesn't (and can't, from `GovernorEvent`'s own shape) perfectly
+  disambiguate *which* of two truly-identical duplicate spans a given event
+  belongs to — that heuristic is unchanged — but it stops one span's
+  already-attributed events from being reassigned to a sibling that opens
+  or exits later. Any future per-span accumulator keyed off `openByName`/
+  `open` should live on the entry object itself, not a side map keyed by
+  `(runId, path)` or `name` — those keys aren't unique across duplicate
+  concurrent opens, even though `runId` alone is unique across runs.
