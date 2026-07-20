@@ -331,7 +331,21 @@ There is no linter in this repo. Run both locally before pushing.
   `mapField` item-level `node.concurrency.acquire()` calls (`src/runtime/
   inline.ts:58,72`) — a different, unnamed limiter from `governor.ts`'s
   per-leaf one, out of #297's stated scope, so a map item queued behind a
-  full fan-out limiter still can't be cancelled early.
+  full fan-out limiter still can't be cancelled early. Update: #303 (still
+  unmerged as of this note — open PR #308, blocked on a security-review
+  failure) adds `Concurrency.releaseCancelled()`, an optional third release
+  outcome so a cooperative abort frees a slot without charging an `aimd()`
+  limiter's multiplicative-decrease the way `release(false)` would. Naming
+  gotcha: a since-filed follow-up issue (#309, proposing the analogous fix
+  for `runGoverned`'s own catch block in `governor.ts`) guessed the method
+  would be called `releaseNeutral()` before #303 actually landed with
+  `releaseCancelled()` instead — another instance of the "verify a follow-up
+  issue's cited names against current code, don't trust them verbatim"
+  lesson already documented above for #143/#145/#161, just surfacing here
+  via an unmerged-PR guess rather than a sibling-branch one. Don't add a
+  second, independent `releaseCancelled`-alike to `Concurrency` to unblock
+  #309 without checking whether #303/#308 has merged first — that would
+  duplicate the interface addition and conflict when it lands.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
