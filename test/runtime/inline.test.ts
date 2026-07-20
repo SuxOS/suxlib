@@ -72,6 +72,47 @@ test('runInline runs mapField over one named field of each array element, passin
   expect(result).toEqual({ skipped: ['x'], files: [{ name: 'a', handle: 2 }, { name: 'b', handle: 4 }] })
 })
 
+test('runInline rejects a mapField renameTo that collides with a pre-existing sibling field instead of silently overwriting it (#331)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = mapField('entries', 'handle', op('id', async (h: number) => h, { kind: 'pure' }), { concurrency: fixed(2), renameTo: 'name' })
+  await expect(runInline(tree, { entries: [{ handle: 1 }], name: 'important-data' }, caps)).rejects.toThrow(/renameTo "name" collides/)
+})
+
+test('runInline does not double-release a map item\'s concurrency slot when a post-success callback throws (#332)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const concurrency = fixed(2)
+  let onEventCalls = 0
+  const throwingConcurrency = {
+    acquire: (signal?: AbortSignal) => concurrency.acquire(signal),
+    release: (ok: boolean) => {
+      concurrency.release(ok)
+      if (ok) { onEventCalls++; throw new Error('onEvent boom') }
+    },
+  }
+  const tree = map(op('id', async (n: number) => n, { kind: 'pure' }), { concurrency: throwingConcurrency as any })
+  await expect(runInline(tree, [1], caps)).rejects.toThrow('onEvent boom')
+  expect(onEventCalls).toBe(1)
+})
+
+test('runInline aggregates every concurrent map item failure instead of surfacing only the first by index (#333)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = map(op('fail', async (n: number) => { throw new Error(`item ${n} failed`) }, { kind: 'pure' }), { concurrency: fixed(2) })
+  try {
+    await runInline(tree, [1, 2], caps)
+    expect.unreachable()
+  } catch (err) {
+    expect(err).toBeInstanceOf(AggregateError)
+    expect((err as AggregateError).errors).toHaveLength(2)
+    expect((err as AggregateError).errors.map((e: Error) => e.message).sort()).toEqual(['item 1 failed', 'item 2 failed'])
+  }
+})
+
+test('runInline still throws the bare single error (not an AggregateError) when only one map item fails (#333)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = map(op('maybeFail', async (n: number) => { if (n === 2) throw new Error('boom'); return n }, { kind: 'pure' }), { concurrency: fixed(2) })
+  await expect(runInline(tree, [1, 2], caps)).rejects.toThrow('boom')
+})
+
 test('runInline runs the catch branch against the original input when the try branch throws', async () => {
   const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
   const tree = catchOp(

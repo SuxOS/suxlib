@@ -220,6 +220,22 @@ test('zipCreate rejects an explicit mtime after 2099 with a clear error instead 
   expect(() => zipCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])).toThrow(/1980-2099/)
 })
 
+test('zipExtract leaves mtime absent for a central-directory record whose DOS date/time field is the all-zero sentinel instead of a bogus 1979-11-30 (#330)', () => {
+  const mtime = new Date(2022, 4, 17, 10, 30, 0).getTime()
+  const packed = zipCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])
+
+  const eocdOff = packed.length - 22
+  const centralDirOffset = (packed[eocdOff + 16] | (packed[eocdOff + 17] << 8) | (packed[eocdOff + 18] << 16) | (packed[eocdOff + 19] << 24)) >>> 0
+  const zeroed = packed.slice()
+  zeroed[centralDirOffset + 12] = 0 // modTime lo
+  zeroed[centralDirOffset + 13] = 0 // modTime hi
+  zeroed[centralDirOffset + 14] = 0 // modDate lo
+  zeroed[centralDirOffset + 15] = 0 // modDate hi
+
+  const entry = zipExtract(zeroed).find((e) => e.name === 'a.txt')!
+  expect(entry.mtime).toBeUndefined()
+})
+
 test('zipExtract recovers mtime from the zip64 end-of-central-directory record when the plain EOCD fields are the zip64 sentinel', () => {
   const mtime = new Date(2022, 4, 17, 10, 30, 0).getTime()
   const packed = zipCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])

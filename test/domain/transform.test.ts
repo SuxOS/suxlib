@@ -32,6 +32,14 @@ test('toYaml/parseYaml round-trip objects, arrays, and multiline strings', () =>
   expect(parseYaml(toYaml(obj))).toEqual(obj)
 })
 
+test('parseYaml strips a trailing comment without over-protecting a plain scalar containing an apostrophe (#329)', () => {
+  expect(parseYaml("note: it's great # trailing comment")).toEqual({ note: "it's great" })
+})
+
+test('parseYaml strips a trailing comment after a genuinely quoted scalar (#329)', () => {
+  expect(parseYaml("key: 'it''s a test' # comment")).toEqual({ key: "it's a test" })
+})
+
 test('parseYaml and parseXml guard against prototype pollution via __proto__ keys', () => {
   const y = parseYaml('__proto__:\n  polluted: true\nq: hi') as Record<string, unknown>
   expect(({} as Record<string, unknown>).polluted).toBeUndefined()
