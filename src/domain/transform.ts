@@ -132,12 +132,14 @@ function parseScalar(raw: string): unknown {
 // plain scalar containing a stray apostrophe like "it's great # comment" and
 // under-protected a genuinely quoted scalar followed by a real comment).
 // `expectValueStart` marks positions where a quote character actually opens
-// a quoted token (line start, right after "- ", right after "key: ") --
-// everywhere else a quote char is just a literal, e.g. the apostrophe in
-// "it's".
+// a quoted token (line start, right after "- ", right after "key: ", or
+// right after a flow-collection delimiter `[`/`{`/`,` while inside one --
+// #345) -- everywhere else a quote char is just a literal, e.g. the
+// apostrophe in "it's".
 function stripYamlComment(line: string): string {
   let inQuote: '"' | "'" | null = null
   let expectValueStart = true
+  let flowDepth = 0
   let i = 0
   while (i < line.length) {
     const c = line[i]
@@ -160,6 +162,9 @@ function stripYamlComment(line: string): string {
     if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i).replace(/\s+$/, '')
     if (c === ':' && (line[i + 1] === undefined || /\s/.test(line[i + 1]))) { expectValueStart = true; i++; continue }
     if (c === '-' && expectValueStart && (line[i + 1] === undefined || /\s/.test(line[i + 1]))) { i++; continue }
+    if (c === '[' || c === '{') { flowDepth++; expectValueStart = true; i++; continue }
+    if ((c === ']' || c === '}') && flowDepth > 0) { flowDepth--; expectValueStart = false; i++; continue }
+    if (c === ',' && flowDepth > 0) { expectValueStart = true; i++; continue }
     if (/\s/.test(c)) { i++; continue }
     expectValueStart = false
     i++

@@ -21,8 +21,8 @@ test('runInline traces a single leaf: node-enter then node-exit with ok:true and
   const result = await runInline(leaf, 1, clockCaps(), { onTrace: (e) => trace.push(e) })
   expect(result).toBe(2)
   expect(trace).toEqual([
-    { kind: 'node-enter', tag: 'leaf', name: 'id', path: '' },
-    { kind: 'node-exit', tag: 'leaf', name: 'id', path: '', durationMs: expect.any(Number), ok: true },
+    { kind: 'node-enter', tag: 'leaf', name: 'id', path: '', runId: expect.any(String) },
+    { kind: 'node-exit', tag: 'leaf', name: 'id', path: '', runId: expect.any(String), durationMs: expect.any(Number), ok: true },
   ])
 })
 
@@ -31,8 +31,8 @@ test('runInline traces a failing leaf: node-exit carries ok:false and the error 
   const trace: TraceEvent[] = []
   await expect(runInline(leaf, null, clockCaps(), { onTrace: (e) => trace.push(e) })).rejects.toThrow('kaboom')
   expect(trace).toEqual([
-    { kind: 'node-enter', tag: 'leaf', name: 'boom', path: '' },
-    { kind: 'node-exit', tag: 'leaf', name: 'boom', path: '', durationMs: expect.any(Number), ok: false, error: 'kaboom' },
+    { kind: 'node-enter', tag: 'leaf', name: 'boom', path: '', runId: expect.any(String) },
+    { kind: 'node-exit', tag: 'leaf', name: 'boom', path: '', runId: expect.any(String), durationMs: expect.any(Number), ok: false, error: 'kaboom' },
   ])
 })
 
@@ -138,6 +138,22 @@ test('runInline traces a sink fanout: each target gets its own node-enter/exit, 
   expect(exits.find((e) => e.tag === 'sink')).toMatchObject({ ok: false })
 })
 
+test('runInline stamps every TraceEvent of one call with the same runId, and two separate calls get different runIds (#346)', async () => {
+  const tree = pipe(
+    op('a', async (n: number) => n + 1, { kind: 'pure' }),
+    op('b', async (n: number) => n * 2, { kind: 'pure' }),
+  )
+  const traceA: TraceEvent[] = []
+  const traceB: TraceEvent[] = []
+  await runInline(tree, 1, clockCaps(), { onTrace: (e) => traceA.push(e) })
+  await runInline(tree, 1, clockCaps(), { onTrace: (e) => traceB.push(e) })
+  const runIdsA = new Set(traceA.map((e) => e.runId))
+  const runIdsB = new Set(traceB.map((e) => e.runId))
+  expect(runIdsA.size).toBe(1)
+  expect(runIdsB.size).toBe(1)
+  expect([...runIdsA][0]).not.toBe([...runIdsB][0])
+})
+
 test('runInline\'s onTrace and gOpts.onEvent are independent streams: supplying one does not add events to the other', async () => {
   let calls = 0
   const leaf = op('flaky', async () => { calls++; if (calls < 2) throw new Error('flaky'); return 'ok' }, { kind: 'effect', retries: 2 })
@@ -147,7 +163,7 @@ test('runInline\'s onTrace and gOpts.onEvent are independent streams: supplying 
   expect(result).toBe('ok')
   expect(events).toEqual([{ kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number) }])
   expect(trace).toEqual([
-    { kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '' },
-    { kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', durationMs: expect.any(Number), ok: true },
+    { kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String) },
+    { kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String), durationMs: expect.any(Number), ok: true },
   ])
 })

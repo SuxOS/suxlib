@@ -6,6 +6,16 @@
  * taken through the tree (e.g. a leaf named `scrub` reached via the second
  * step of a pipe, inside a map's fourth item, is `"1/3"`).
  *
+ * `path` alone is only unique *within* one runInline call -- every call's
+ * own root is `path === ''`, and two calls sharing the same op-tree shape
+ * produce identical relative paths throughout. `runId` (#346) disambiguates
+ * across calls: minted once per top-level runInline invocation and threaded
+ * unchanged through every recursive call/traced() node for that run, so a
+ * consumer sharing one onTrace sink across concurrent runInline calls (e.g.
+ * a long-lived otel.ts exporter) can always tell which call a given event
+ * belongs to, even when two calls' windows overlap without nesting and they
+ * happen to visit the exact same relative path.
+ *
  * Deliberately a separate stream from GovernorEvent/onEvent
  * (src/control/events.ts) rather than an extension of it: onEvent's existing
  * consumers (breaker/token-bucket/retry/memo observability) already assert
@@ -24,7 +34,7 @@
  * fallback, rather than inventing a separate event kind for the same fact.
  */
 export type TraceEvent =
-  | { kind: 'node-enter'; tag: string; name?: string; path: string }
-  | { kind: 'node-exit'; tag: string; name?: string; path: string; durationMs: number; ok: boolean; error?: string }
+  | { kind: 'node-enter'; tag: string; name?: string; path: string; runId: string }
+  | { kind: 'node-exit'; tag: string; name?: string; path: string; runId: string; durationMs: number; ok: boolean; error?: string }
 
 export type TraceEventHandler = (e: TraceEvent) => void

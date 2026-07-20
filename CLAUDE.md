@@ -599,4 +599,20 @@ There is no linter in this repo. Run both locally before pushing.
   `runInline`/`traced()` (`src/runtime/inline.ts`) into every `TraceEvent`,
   which is a larger, deliberately out-of-scope change here — don't assume
   today's fix makes concurrent-run span attribution exact in the general
-  case, only "no longer silently and unconditionally wrong."
+  case, only "no longer silently and unconditionally wrong." Update (#346):
+  that call-scoped id now exists — `runInline`'s new trailing `runId`
+  parameter defaults to `crypto.randomUUID()` on the *top-level* call only
+  (every recursive call passes its already-minted `runId` straight through),
+  and `TraceEvent` (`src/control/trace.ts`) carries it on every node-enter/
+  node-exit. `createOtelExporter`'s `open` map is now keyed by `runId` first
+  and `path` second (still a stack per `(runId, path)`, for the same-path-
+  twice-in-one-run case, e.g. `sink.fanout(['a', 'a'])`), and `traceId` is
+  derived directly from `runId` (dashes stripped — a v4 UUID's 32 hex digits
+  are already a spec-valid 16-byte OTel trace id) instead of being minted at
+  `path === ''` and inherited downward. This is now exact, not best-effort,
+  for the `TraceEvent`/span side. `GovernorEvent` deliberately still stays
+  name-keyed (`openByName` in `otel.ts`, unchanged) — #346 itself offered
+  that as an acceptable fallback rather than threading `runId` through
+  `GovernorEvent` too, which would touch every `onEvent` consumer's shape;
+  a future change wanting exact governor-event attribution across concurrent
+  runs still needs that larger, separate change.

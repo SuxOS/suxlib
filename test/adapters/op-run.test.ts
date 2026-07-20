@@ -157,10 +157,10 @@ test('runOpSpec: opts.gOpts.onTrace (the same gOpts bag onEvent already rides) r
   const result = await runOpSpec({ spec, input }, { gOpts: { onTrace: (e) => trace.push(e) } }) as { base64: string }
   expect(Buffer.from(result.base64, 'base64').toString('utf8')).toBe('a: 1')
   expect(trace).toEqual([
-    { kind: 'node-enter', tag: 'pipe', name: undefined, path: '' },
-    { kind: 'node-enter', tag: 'leaf', name: 'convert', path: '0' },
-    { kind: 'node-exit', tag: 'leaf', name: 'convert', path: '0', durationMs: expect.any(Number), ok: true },
-    { kind: 'node-exit', tag: 'pipe', name: undefined, path: '', durationMs: expect.any(Number), ok: true },
+    { kind: 'node-enter', tag: 'pipe', name: undefined, path: '', runId: expect.any(String) },
+    { kind: 'node-enter', tag: 'leaf', name: 'convert', path: '0', runId: expect.any(String) },
+    { kind: 'node-exit', tag: 'leaf', name: 'convert', path: '0', runId: expect.any(String), durationMs: expect.any(Number), ok: true },
+    { kind: 'node-exit', tag: 'pipe', name: undefined, path: '', runId: expect.any(String), durationMs: expect.any(Number), ok: true },
   ])
 })
 
