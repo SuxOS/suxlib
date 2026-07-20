@@ -742,7 +742,10 @@ function inlineMdToHtml(s: string): string {
   const codes: string[] = []
   return encodeEntitiesXml(s)
     .replace(/`([^`]+)`/g, (_m, c) => `\x00${codes.push(`<code>${c}</code>`) - 1}\x00`)
-    .replace(/\[([^\]]*)\]\(([^)]*)\)/g, (_m, txt, href) => `<a href="${sanitizeUrl(href)}">${txt}</a>`)
+    .replace(
+      /\[([^\]]*)\]\(([^)]*)\)/g,
+      (_m, txt, href) => `\x00${codes.push(`<a href="${sanitizeUrl(href)}">${txt}</a>`) - 1}\x00`,
+    )
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/__([^_]+)__/g, '<strong>$1</strong>')
     .replace(/\*([^*]+)\*/g, '<em>$1</em>')

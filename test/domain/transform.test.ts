@@ -259,6 +259,11 @@ test('markdownToHtml sanitizes an unsafe link scheme to a harmless anchor', () =
   expect(html).toContain('href="#"')
 })
 
+test('markdownToHtml does not let emphasis regexes corrupt an underscore/asterisk in a link href', () => {
+  const html = markdownToHtml('[click here](http://example.com/foo_bar_baz)')
+  expect(html).toContain('<a href="http://example.com/foo_bar_baz">click here</a>')
+})
+
 test('htmlToMarkdown converts headings, lists, links, and code', () => {
   const md = htmlToMarkdown('<h1>Hi</h1><ul><li>one</li><li>two</li></ul><a href="https://x.test">link</a>')
   expect(md).toContain('# Hi')

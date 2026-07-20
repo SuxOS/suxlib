@@ -216,6 +216,17 @@ test('buildOp rejects an out-of-range leaf retries', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { retries: 6 } })).toThrow(/retries/)
 })
 
+test('buildOp rejects a non-boolean leaf `opts.heavy`/`opts.memo` instead of silently misrouting it (#318)', () => {
+  expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { heavy: 'false' as any } })).toThrow(/opts\.heavy/)
+  expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { memo: '0' as any } })).toThrow(/opts\.memo/)
+})
+
+test('buildOp rejects a non-boolean sink `opts.heavy`/`opts.memo`, including on a per-target opts (#318)', () => {
+  expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { heavy: 'false' as any } })).toThrow(/opts\.heavy/)
+  expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { memo: '0' as any } })).toThrow(/opts\.memo/)
+  expect(() => buildOp({ tag: 'sink', targets: [{ name: 'out', opts: { heavy: 'false' as any } }] })).toThrow(/targets/)
+})
+
 test('buildOp rejects an invalid leaf `opts.kind` instead of silently bypassing reliability gating (#262)', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { kind: 'nope' as any } })).toThrow(/opts\.kind/)
 })
@@ -538,6 +549,13 @@ test('validateOpSpec reports an invalid leaf `opts.kind` the same way buildOp\'s
   const spec: OpSpec = { tag: 'leaf', name: 'scrub', opts: { kind: 'nope' as any } }
   const errors = validateOpSpec(spec)
   expect(errors.some((e) => /opts\.kind/.test(e.message))).toBe(true)
+})
+
+test('validateOpSpec reports a non-boolean leaf `opts.heavy`/`opts.memo` the same way buildOp\'s throw does (#318)', () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'scrub', opts: { heavy: 'false' as any, memo: '0' as any } }
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => /opts\.heavy/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /opts\.memo/.test(e.message))).toBe(true)
 })
 
 test('validateOpSpec reports an out-of-range sink `opts.retries` the same way buildOp\'s throw does (#247)', () => {
