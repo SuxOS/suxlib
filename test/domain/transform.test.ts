@@ -40,6 +40,10 @@ test('parseYaml strips a trailing comment after a genuinely quoted scalar (#329)
   expect(parseYaml("key: 'it''s a test' # comment")).toEqual({ key: "it's a test" })
 })
 
+test('parseYaml does not truncate a flow-collection value at a "#" inside one of its quoted elements (#345)', () => {
+  expect(parseYaml('key: [1, "a # not comment", 3] # real comment')).toEqual({ key: [1, 'a # not comment', 3] })
+})
+
 test('parseYaml and parseXml guard against prototype pollution via __proto__ keys', () => {
   const y = parseYaml('__proto__:\n  polluted: true\nq: hi') as Record<string, unknown>
   expect(({} as Record<string, unknown>).polluted).toBeUndefined()

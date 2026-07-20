@@ -7,18 +7,31 @@
 // Span tree: a TraceEvent's `path` is already a genuine hierarchical route
 // (childPath() in src/runtime/inline.ts always builds a child's path as
 // `parentPath + "/" + segment"), so a span's parent is just whatever span is
-// still open at `path.slice(0, path.lastIndexOf('/'))`. `durationMs` is
-// already computed by `traced()`, so span timing needs no extra
-// instrumentation -- the exporter just anchors each span's start at the
-// real wall-clock time its node-enter arrived (not caps.clock, which tests
-// often fake) and adds durationMs on top for the end.
+// still open at `path.slice(0, path.lastIndexOf('/'))` *within the same
+// run* -- `path` alone repeats across separate runInline calls (every call's
+// own root is `path === ''`), so lookups are scoped by the TraceEvent's
+// `runId` (#346) first, then `path` within that run's own map. `traceId` is
+// derived directly from `runId` (a v4 UUID's 32 hex digits with the dashes
+// stripped are already a spec-valid 16-byte OTel trace id) rather than
+// minted per root `path` -- so two concurrent runs sharing this exporter
+// always land in distinct, correctly-attributed traces even when their
+// windows overlap without nesting and they visit the exact same relative
+// path. `durationMs` is already computed by `traced()`, so span timing needs
+// no extra instrumentation -- the exporter just anchors each span's start at
+// the real wall-clock time its node-enter arrived (not caps.clock, which
+// tests often fake) and adds durationMs on top for the end.
 //
-// GovernorEvents are keyed by leaf `name`, not `path` -- the same leaf name
-// can be open at more than one path at once (concurrent map/mapField
-// items), so there's no exact way to attach an event to "the" span that
+// GovernorEvents are keyed by leaf `name` only, not `runId`/`path` -- the
+// same leaf name can be open at more than one path (or run) at once
+// (concurrent map/mapField items, or two concurrent runs sharing a leaf
+// name), so there's no exact way to attach an event to "the" span that
 // caused it. This attaches to the innermost (most recently entered, still
 // open) span sharing that name -- a best-effort approximation, not a precise
-// correlation; see #334's own scoping note.
+// correlation; see #334's own scoping note. #346 only closes this gap on the
+// TraceEvent/span side -- GovernorEvent deliberately stays name-keyed (its
+// own issue's accepted fallback), since threading `runId` through it too
+// would change GovernorEvent's shape and every onEvent consumer along with
+// it, which is out of scope here.
 //
 // onTrace/onEvent must never throw: src/runtime/inline.ts's traced() calls
 // onTrace directly inside its try, so a throw from here on the success path
@@ -109,27 +122,29 @@ function toOtlpSpan(s: OtelSpan): Record<string, unknown> {
 /**
  * Builds one exporter instance's `onTrace`/`onEvent` pair, meant to be passed
  * as `RunGovernedOpts.onTrace`/`onEvent` (src/control/governor.ts) -- reaches
- * every adapter today via `opRunGOpts` with zero further plumbing. A fresh
- * traceId is minted whenever a node-enter arrives at `path === ''` (the root
- * of a runInline call), so spans across separate calls sharing one exporter
- * instance still land in distinct traces.
+ * every adapter today via `opRunGOpts` with zero further plumbing. Each
+ * TraceEvent's `runId` (#346) maps directly to its span's `traceId`, so
+ * spans across separate calls sharing one exporter instance always land in
+ * distinct, correctly-attributed traces -- including two calls whose
+ * windows overlap without nesting.
  */
 export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
   const fetchFn = opts.fetchFn ?? fetch
   const maxBuffered = opts.maxBufferedSpans ?? DEFAULT_MAX_BUFFERED_SPANS
   const serviceName = opts.serviceName ?? 'suxlib-op-engine'
 
-  // Keyed by path, but each value is a *stack* (not a single entry): a path
-  // string is only unique within one runInline call (it's rebuilt from '' at
-  // every call's own root), so two overlapping runInline calls sharing this
-  // exporter instance both produce a node-enter at path '' -- a flat
-  // Map<path, entry> would let the second one's set() silently clobber the
-  // first's still-open entry. Pushing/popping preserves both; traceId is
-  // minted fresh per root entry and inherited by children via the parent's
-  // still-open entry (same lookup parentSpanId already does), not a shared
-  // mutable variable, so a finished span is always stamped with its own
-  // run's traceId even while another run is mid-flight on the same exporter.
-  const open = new Map<string, { spanId: string; startNano: bigint; tag: string; name?: string; traceId: string }[]>()
+  // Keyed by runId first, then path -- but each path's value is still a
+  // *stack* (not a single entry): within one run, the same relative path can
+  // legitimately be open more than once at a time (e.g. sink.fanout(['a',
+  // 'a']) reaches childPath(path, 'a') twice concurrently), so a flat
+  // Map<path, entry> per run would let the second push silently clobber the
+  // first's still-open entry. Scoping the outer map by runId (#346) is what
+  // actually fixes cross-run clobbering -- two concurrent runInline calls
+  // sharing this exporter instance never share a path-map, even when their
+  // windows overlap without nesting and they visit the exact same relative
+  // path.
+  type OpenEntry = { spanId: string; startNano: bigint; tag: string; name?: string }
+  const open = new Map<string, Map<string, OpenEntry[]>>()
   const openByName = new Map<string, string[]>()
   const pendingEvents = new Map<string, { name: string; timeUnixNano: string; attributes: Record<string, AttrValue> }[]>()
   const finished: OtelSpan[] = []
@@ -139,19 +154,23 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     while (finished.length > maxBuffered) finished.shift()
   }
 
-  function peekOpen(path: string) {
-    const stack = open.get(path)
+  function peekOpen(pathMap: Map<string, OpenEntry[]>, path: string) {
+    const stack = pathMap.get(path)
     return stack && stack.length > 0 ? stack[stack.length - 1] : undefined
   }
 
+  // A v4 UUID (crypto.randomUUID(), what runInline mints runId from) is 32
+  // hex digits once the dashes are stripped -- already a spec-valid 16-byte
+  // OTel trace id, so no separate random mint is needed here.
+  const traceIdOf = (runId: string): string => runId.replace(/-/g, '')
+
   const onTrace: TraceEventHandler = (e: TraceEvent) => {
     if (e.kind === 'node-enter') {
-      const pPath = parentPathOf(e.path)
-      const parentEntry = pPath === undefined ? undefined : peekOpen(pPath)
-      const traceId = e.path === '' ? randomHex(16) : (parentEntry?.traceId ?? randomHex(16))
-      const stack = open.get(e.path) ?? []
-      stack.push({ spanId: randomHex(8), startNano: BigInt(Date.now()) * 1_000_000n, tag: e.tag, name: e.name, traceId })
-      open.set(e.path, stack)
+      const pathMap = open.get(e.runId) ?? new Map<string, OpenEntry[]>()
+      open.set(e.runId, pathMap)
+      const stack = pathMap.get(e.path) ?? []
+      stack.push({ spanId: randomHex(8), startNano: BigInt(Date.now()) * 1_000_000n, tag: e.tag, name: e.name })
+      pathMap.set(e.path, stack)
       if (e.name) {
         const nameStack = openByName.get(e.name) ?? []
         nameStack.push(e.path)
@@ -160,10 +179,11 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
       return
     }
     // node-exit
-    const stack = open.get(e.path)
+    const pathMap = open.get(e.runId)
+    const stack = pathMap?.get(e.path)
     const entry = stack?.pop()
-    if (!entry) return // defensive: an exit with no matching enter should not happen
-    if (stack && stack.length === 0) open.delete(e.path)
+    if (!pathMap || !entry) return // defensive: an exit with no matching enter should not happen
+    if (stack && stack.length === 0) pathMap.delete(e.path)
     if (e.name) {
       const nameStack = openByName.get(e.name)
       if (nameStack) {
@@ -173,12 +193,13 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
       }
     }
     const pPath = parentPathOf(e.path)
-    const parentSpanId = pPath === undefined ? undefined : peekOpen(pPath)?.spanId
+    const parentSpanId = pPath === undefined ? undefined : peekOpen(pathMap, pPath)?.spanId
+    if (pathMap.size === 0) open.delete(e.runId)
     const endNano = entry.startNano + BigInt(Math.round(e.durationMs * 1_000_000))
     const events = pendingEvents.get(e.path) ?? []
     pendingEvents.delete(e.path)
     pushFinished({
-      traceId: entry.traceId,
+      traceId: traceIdOf(e.runId),
       spanId: entry.spanId,
       parentSpanId,
       name: e.name ? `${e.tag}:${e.name}` : e.tag,

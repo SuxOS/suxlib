@@ -104,6 +104,35 @@ describe('otel exporter', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
+  it('does not misattribute spans/parentage between two concurrent runs of the identical op-tree shape whose windows overlap without nesting (#346)', async () => {
+    let spans: any[] = []
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      spans = JSON.parse(req.body).resourceSpans[0].scopeSpans[0].spans
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelExporter({ endpoint: 'https://x', fetchFn })
+    const treeFor = (delayMs: number) => pipe(
+      op('a', async (n: number) => { await new Promise((r) => setTimeout(r, delayMs)); return n + 1 }, { kind: 'pure' }),
+      op('b', async (n: number) => n * 2, { kind: 'pure' }),
+    )
+    await Promise.all([
+      runInline(treeFor(15), 1, clockCaps(), { onTrace: exporter.onTrace }),
+      runInline(treeFor(5), 10, clockCaps(), { onTrace: exporter.onTrace }),
+    ])
+    await exporter.flush()
+    expect(spans).toHaveLength(6)
+    const pipes = spans.filter((s: any) => s.name === 'pipe')
+    expect(pipes).toHaveLength(2)
+    expect(pipes[0].traceId).not.toBe(pipes[1].traceId)
+    for (const pipeSpan of pipes) {
+      const children = spans.filter((s: any) => s.parentSpanId === pipeSpan.spanId)
+      expect(children).toHaveLength(2)
+      // Every child of this pipe span must share its own run's traceId, not
+      // the other concurrent run's -- the exact misattribution #346 flags.
+      expect(children.every((c: any) => c.traceId === pipeSpan.traceId)).toBe(true)
+    }
+  })
+
   it('drops the oldest buffered span once maxBufferedSpans is exceeded', async () => {
     const exporter = createOtelExporter({ endpoint: 'https://x', maxBufferedSpans: 2 })
     for (let i = 0; i < 5; i++) {
