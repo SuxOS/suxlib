@@ -100,6 +100,12 @@ describe('http adapter', () => {
     expect(((await res.json()) as { error: string }).error).toMatch(/duplicate/i)
   })
 
+  it('POST /archive/create: a non-numeric mtime surfaces a clean 400, not a corrupted archive', async () => {
+    const res = await post('archive/create', { format: 'zip', files: [{ name: 'a.txt', base64: b64('hi'), mtime: 'oops' }] })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toMatch(/mtime/i)
+  })
+
   it('POST /pdf/shrink: happy path round-trips a valid PDF as base64', async () => {
     const { PDFDocument } = await import('pdf-lib')
     const doc = await PDFDocument.create()

@@ -145,6 +145,24 @@ describe('mcp adapter', () => {
     expect(body.trace.map((e) => e.kind)).toEqual(['node-enter', 'node-exit'])
   })
 
+  it('run_pipeline: streams live per-node progress notifications when the client requests one via progressToken', async () => {
+    const progress: number[] = []
+    const result = await client.callTool(
+      {
+        name: 'run_pipeline',
+        arguments: {
+          spec: { tag: 'leaf', name: 'convert' },
+          input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+        },
+      },
+      undefined,
+      { onprogress: (p) => progress.push(p.progress) },
+    )
+    expect(result.isError).toBeFalsy()
+    expect(progress.length).toBeGreaterThan(0)
+    expect(progress).toEqual([...progress].sort((a, b) => a - b))
+  })
+
   it('run_pipeline: a leaf spec\'s `params` reach the leaf through the MCP tool schema, not just buildOp directly (unzip -> map(wrapHandle, convert))', async () => {
     const zipMod = await import('fflate')
     const zip = zipMod.zipSync({ 'a.json': new TextEncoder().encode('{"a":1}') })
