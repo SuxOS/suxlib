@@ -32,6 +32,11 @@ test('toYaml/parseYaml round-trip objects, arrays, and multiline strings', () =>
   expect(parseYaml(toYaml(obj))).toEqual(obj)
 })
 
+test('toYaml/parseYaml round-trip numbers rendered in scientific notation instead of losing their numeric type (#371)', () => {
+  const obj = { huge: 1e21, tiny: 5e-10 }
+  expect(parseYaml(toYaml(obj))).toEqual(obj)
+})
+
 test('toYaml/parseYaml round-trip a nested array (array-of-arrays) instead of silently corrupting it (#352)', () => {
   const obj = { a: [[1, 2], [3, 4]] }
   expect(toYaml(obj)).toBe('a:\n  - - 1\n    - 2\n  - - 3\n    - 4')
@@ -89,6 +94,14 @@ test('parseXml parses a lone element named like an Object.prototype member inste
 test('parseCsv keeps a quoted-empty row but drops a truly blank line', () => {
   expect(parseCsv('a\n""\nb\n', ',')).toEqual([['a'], [''], ['b']])
   expect(parseCsv('a\n\nb\n', ',')).toEqual([['a'], ['b']])
+})
+
+test('parseCsv treats a stray quote mid-field as a literal character, not a field-opening quote', () => {
+  expect(parseCsv('name,note\nAda,3" pipe\nGrace,ok\n', ',')).toEqual([
+    ['name', 'note'],
+    ['Ada', '3" pipe'],
+    ['Grace', 'ok'],
+  ])
 })
 
 test('parseCsv strips a leading UTF-8 BOM instead of baking it into the first field', () => {

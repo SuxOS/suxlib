@@ -48,6 +48,15 @@ test('any failure in half-open reopens the breaker and resets the cooldown', () 
   expect(b.allow(200)).toBe(true)
 })
 
+test('a failure landing while already open does not re-extend the cooldown window (#372)', () => {
+  const b = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 2 })
+  b.onFailure(0) // trips open at t=0
+  expect(b.state).toBe('open')
+  b.onFailure(80) // a straggling concurrent call fails after the trip
+  expect(b.state).toBe('open')
+  expect(b.allow(100)).toBe(true) // cooldown still measured from t=0, not re-pushed to 80
+})
+
 test('reserveHalfOpenProbe caps reservations at one until released', () => {
   const b = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 2 })
   expect(b.reserveHalfOpenProbe()).toBe(true)
