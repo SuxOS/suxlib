@@ -149,17 +149,30 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
   // sharing this exporter instance never share a path-map, even when their
   // windows overlap without nesting and they visit the exact same relative
   // path.
-  type OpenEntry = { spanId: string; startNano: bigint; tag: string; name?: string; callId: string }
+  // events lives directly on each OpenEntry (pushed in onEvent by finding
+  // the matching stack entry, not a separate path-keyed map) so that two
+  // duplicate-named concurrent spans (e.g. sink.fanout(['a', 'a'])) each
+  // keep their own event list through to node-exit -- a map keyed only by
+  // `${runId}::${path}` would merge both spans' events into one list and
+  // hand the whole thing to whichever span's node-exit fired first.
+  type OpenEntry = {
+    spanId: string
+    startNano: bigint
+    tag: string
+    name?: string
+    callId: string
+    runId: string
+    events: { name: string; timeUnixNano: string; attributes: Record<string, AttrValue> }[]
+  }
   const open = new Map<string, Map<string, OpenEntry[]>>()
-  // Keyed by leaf name to a stack of {path, runId} -- runId (#348) lets
-  // onEvent below prefer the span that's actually in the same run as the
-  // GovernorEvent it's attaching, instead of always falling back to "the
+  // Keyed by leaf name to a stack of the *same* OpenEntry objects held in
+  // `open`'s per-path stacks (shared references, not copies) -- runId (#348)
+  // lets onEvent below prefer the span that's actually in the same run as
+  // the GovernorEvent it's attaching, instead of always falling back to "the
   // innermost span sharing this leaf name" regardless of which run opened
   // it. A GovernorEvent with no runId (a primitive shared outside runInline,
   // or an older caller) still falls back to that old best-effort behavior.
-  const openByName = new Map<string, { path: string; runId: string }[]>()
-  const pendingEventsKey = (runId: string, path: string): string => `${runId}::${path}`
-  const pendingEvents = new Map<string, { name: string; timeUnixNano: string; attributes: Record<string, AttrValue> }[]>()
+  const openByName = new Map<string, OpenEntry[]>()
   const finished: OtelSpan[] = []
 
   function pushFinished(span: OtelSpan): void {
@@ -182,11 +195,12 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
       const pathMap = open.get(e.runId) ?? new Map<string, OpenEntry[]>()
       open.set(e.runId, pathMap)
       const stack = pathMap.get(e.path) ?? []
-      stack.push({ spanId: randomHex(8), startNano: BigInt(Date.now()) * 1_000_000n, tag: e.tag, name: e.name, callId: e.callId })
+      const entry: OpenEntry = { spanId: randomHex(8), startNano: BigInt(Date.now()) * 1_000_000n, tag: e.tag, name: e.name, callId: e.callId, runId: e.runId, events: [] }
+      stack.push(entry)
       pathMap.set(e.path, stack)
       if (e.name) {
         const nameStack = openByName.get(e.name) ?? []
-        nameStack.push({ path: e.path, runId: e.runId })
+        nameStack.push(entry)
         openByName.set(e.name, nameStack)
       }
       return
@@ -206,7 +220,7 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     if (e.name) {
       const nameStack = openByName.get(e.name)
       if (nameStack) {
-        const i = nameStack.map(x => x.path === e.path && x.runId === e.runId).lastIndexOf(true)
+        const i = nameStack.findIndex((x) => x.callId === e.callId)
         if (i !== -1) nameStack.splice(i, 1)
         if (nameStack.length === 0) openByName.delete(e.name)
       }
@@ -215,8 +229,6 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     const parentSpanId = pPath === undefined ? undefined : peekOpen(pathMap, pPath)?.spanId
     if (pathMap.size === 0) open.delete(e.runId)
     const endNano = entry.startNano + BigInt(Math.round(e.durationMs * 1_000_000))
-    const events = pendingEvents.get(pendingEventsKey(e.runId, e.path)) ?? []
-    pendingEvents.delete(pendingEventsKey(e.runId, e.path))
     pushFinished({
       traceId: traceIdOf(e.runId),
       spanId: entry.spanId,
@@ -225,7 +237,7 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
       startTimeUnixNano: entry.startNano.toString(),
       endTimeUnixNano: endNano.toString(),
       attributes: { 'op.tag': e.tag, ...(e.name ? { 'op.name': e.name } : {}), 'op.path': e.path },
-      events,
+      events: entry.events,
       status: e.ok ? { code: 'OK' } : { code: 'ERROR', message: e.error },
     })
   }
@@ -243,10 +255,7 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     const entry = runId
       ? [...stack].reverse().find(s => s.runId === runId) ?? stack[stack.length - 1]
       : stack[stack.length - 1]
-    const key = pendingEventsKey(entry.runId, entry.path)
-    const list = pendingEvents.get(key) ?? []
-    list.push({ name: e.kind, timeUnixNano: (BigInt(Date.now()) * 1_000_000n).toString(), attributes: eventAttributes(e) })
-    pendingEvents.set(key, list)
+    entry.events.push({ name: e.kind, timeUnixNano: (BigInt(Date.now()) * 1_000_000n).toString(), attributes: eventAttributes(e) })
   }
 
   async function flush(): Promise<void> {

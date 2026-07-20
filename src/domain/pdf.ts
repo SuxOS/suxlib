@@ -5,7 +5,7 @@
 // many source kinds and is out of the fileops-absorption boundary; it reuses
 // loadBoundedPdf below for its own bomb-guarded PDFDocument.load() call).
 
-import { PDFDocument, PDFName, PDFRef } from 'pdf-lib'
+import { PDFDict, PDFDocument, PDFName, PDFRef, PDFStream } from 'pdf-lib'
 import type { LeafFn } from '../op/types.js'
 import type { Handle } from '../effects/types.js'
 import { resolve, putBytes } from '../handles/handle.js'
@@ -138,6 +138,20 @@ export async function pdfShrink(input: Uint8Array, opts: PdfShrinkOptions = {}):
     if (metadataRef !== undefined) {
       doc.catalog.delete(metadataKey)
       if (metadataRef instanceof PDFRef) doc.context.delete(metadataRef)
+    }
+
+    // /Metadata can also hang off individual page dicts and XObjects (e.g.
+    // Adobe/InDesign/Illustrator's per-image XMP packets) -- not just the
+    // catalog. Walk every indirect object's own dict (a bare dict, or a
+    // stream's dict) for its own /Metadata key and apply the same
+    // delete-both-the-reference-and-the-indirect-object treatment.
+    for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+      const dict = obj instanceof PDFDict ? obj : obj instanceof PDFStream ? obj.dict : undefined
+      if (!dict || dict === doc.catalog) continue
+      const ref = dict.get(metadataKey)
+      if (ref === undefined) continue
+      dict.delete(metadataKey)
+      if (ref instanceof PDFRef) doc.context.delete(ref)
     }
   }
 

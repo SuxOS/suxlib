@@ -78,7 +78,10 @@ export function redactText(text: string, types?: RedactType[]): RedactResult {
       if (type === 'ip' && !ipv4Ok(m)) return m
       if (bare) {
         const start = Math.max(0, offset - BARE_SSN_CONTEXT_WINDOW)
-        if (!BARE_SSN_CONTEXT_RE.test(text.slice(start, offset))) return m
+        const end = offset + m.length + BARE_SSN_CONTEXT_WINDOW
+        const before = BARE_SSN_CONTEXT_RE.test(text.slice(start, offset))
+        const after = BARE_SSN_CONTEXT_RE.test(text.slice(offset + m.length, end))
+        if (!before && !after) return m
       }
       counts[type] = (counts[type] ?? 0) + 1
       return `[REDACTED:${type}]`
