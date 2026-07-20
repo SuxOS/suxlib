@@ -107,6 +107,24 @@ test('sanitizeImage keeps an ICC color profile (APP2) while dropping EXIF (APP1)
   expect(hasExif).toBe(false)
 })
 
+test('sanitizeImage keeps an ICC color profile (APP2) placed after the first SOS scan of a progressive JPEG', () => {
+  const soi = new Uint8Array([0xff, 0xd8])
+  const sos1 = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0xaa, 0xbb])
+  const app2Icc = jpegSegment(0xe2, new TextEncoder().encode('ICC_PROFILE\0fake-profile-bytes'))
+  const sos2 = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0xcc, 0xdd, 0xff, 0xd9])
+  const parts = [soi, sos1, app2Icc, sos2]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const jpeg = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    jpeg.set(p, off)
+    off += p.length
+  }
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).toContain('fake-profile-bytes')
+})
+
 test('sanitizeImage strips a metadata segment placed after the first SOS scan of a progressive JPEG', () => {
   const soi = new Uint8Array([0xff, 0xd8])
   // First scan: SOS header (len=2, no extra header bytes) + entropy data containing
