@@ -232,6 +232,19 @@ describe('cli `archive extract` (real CLI entry point)', () => {
     expect(printed.entries).toEqual([{ name: 'in.txt', bytes: 5, text: 'hello', truncated: undefined, mtime: 1700000000000, base64: bytesToB64(data) }])
     logSpy.mockRestore()
   })
+
+  it('rejects an invalid --format instead of crashing with a destructure TypeError (#350)', async () => {
+    const work = tmpDir()
+    const outPath = join(work, 'out.zip')
+    writeFileSync(outPath, archiveCreate('zip', [{ name: 'in.txt', data: new TextEncoder().encode('hello') }]))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'archive', 'extract', '-f', 'bogus', outPath])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/--format must be zip, tar, gzip, or tar\.gz/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
 })
 
 describe('cli `pipeline run` (real CLI entry point)', () => {

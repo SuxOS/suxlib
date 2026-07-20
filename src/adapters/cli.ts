@@ -83,6 +83,7 @@ archiveCmd
   .option('-f, --format <format>', 'zip | tar | gzip | tar.gz (default: inferred from extension)')
   .action((archivePath: string, opts: { output?: string; format?: string }) => {
     const format = (opts.format as ArchiveFormat) ?? inferArchiveFormat(archivePath)
+    if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, gzip, or tar.gz (got '${format}')`)
     const bytes = new Uint8Array(readFileSync(archivePath))
     if (!opts.output) {
       const { entries, skipped } = archiveExtract(format, bytes)

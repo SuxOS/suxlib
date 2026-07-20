@@ -201,6 +201,15 @@ There is no linter in this repo. Run both locally before pushing.
   `zipCreate` now builds this fallback with the local `Date` constructor instead,
   and recomputes it per call (not as a module-level constant) so it tracks the
   process's TZ at call time rather than whatever TZ was active at import.
+- pdf-lib gotcha (`src/domain/pdf.ts`, #351): `PDFDocument.save()`'s writer
+  (`PDFWriter`/`PDFStreamWriter`) serializes every object in
+  `context.enumerateIndirectObjects()` unconditionally — it does not do a
+  reachability walk from the trailer/catalog. Deleting a dict's reference to
+  an indirect object (`dict.delete(name)`) only unlinks it; the object's
+  bytes still round-trip into the output unless you *also*
+  `context.delete(ref)` the object itself. Any future feature that means to
+  drop PDF content (not just stop referencing it) needs both calls, the way
+  `pdfShrink`'s XMP-stripping fix does.
 - `src/domain/transform.ts`'s `toXml`/`parseXml` marker-attribute scheme
   (`EMPTY_ARRAY_ATTR`/`SINGLE_ARRAY_ATTR`/`NULL_VALUE_ATTR`/`NESTED_ARRAY_ATTR`) has
   a gotcha of its own: `attach()`'s promote-on-repeat logic used to infer "this key
@@ -427,7 +436,18 @@ There is no linter in this repo. Run both locally before pushing.
   the offending issue `hold`/`needs-human` is the actual fix, since both
   labels are already an EXPAND exclusion signal this task's own instructions
   honor, so the low-tier dispatcher almost certainly does too. Labelled
-  both `needs-human` this batch rather than dropping a seventh time.
+  both `needs-human` this batch rather than dropping a seventh time. Update
+  (2026-07-20, batch building #351/#350/#352): #242/#309 re-checked yet again
+  — `gh pr checks 241`/`308` both still fail `security-review` on the
+  identical `.suxos-ci/scripts/classify-security-noverdict.sh: No such file
+  or directory` error, and `grep -rn "snapshotValue\|releaseCancelled" src/`
+  is still empty on real `origin/main`. Nearly got fooled the same way this
+  note already warns about: `git log --oneline --all | grep <name>` (the
+  `--all` walks every ref, not just `main`) surfaced `3f7ecaa` looking like
+  landed `releaseCancelled` code — `git merge-base --is-ancestor 3f7ecaa
+  origin/main` (exit 1) caught that it's only on the stale, closed-unmerged
+  `bot/issue-build-29707704140` branch. Dropped both again, unbuilt, not
+  superseded.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than

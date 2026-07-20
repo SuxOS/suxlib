@@ -647,6 +647,8 @@ export function archiveCreate(format: ArchiveFormat, files: ArchiveFile[]): Uint
     case 'gzip':
       if (files.length !== 1) throw new Error(`gzip packs exactly one file — got ${files.length}. Use format='zip' or 'tar' for multiple.`)
       return gzipCreate(files[0].data, files[0].mtime ?? 0, files[0].name)
+    default:
+      throw new Error(`unknown archive format '${format}' — expected one of ${ARCHIVE_FORMATS.join(', ')}`)
   }
 }
 
@@ -672,6 +674,8 @@ export function archiveExtract(format: ArchiveFormat, bytes: Uint8Array): Archiv
     }
     case 'gzip':
       return { entries: [gzipExtract(bytes)] }
+    default:
+      throw new Error(`unknown archive format '${format}' — expected one of ${ARCHIVE_FORMATS.join(', ')}`)
   }
 }
 

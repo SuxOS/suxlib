@@ -32,6 +32,30 @@ test('toYaml/parseYaml round-trip objects, arrays, and multiline strings', () =>
   expect(parseYaml(toYaml(obj))).toEqual(obj)
 })
 
+test('toYaml/parseYaml round-trip a nested array (array-of-arrays) instead of silently corrupting it (#352)', () => {
+  const obj = { a: [[1, 2], [3, 4]] }
+  expect(toYaml(obj)).toBe('a:\n  - - 1\n    - 2\n  - - 3\n    - 4')
+  expect(parseYaml(toYaml(obj))).toEqual(obj)
+})
+
+test('toYaml/parseYaml round-trip a top-level nested array and triple-nested arrays', () => {
+  const obj = [[1, 2], [3, 4]]
+  expect(parseYaml(toYaml(obj))).toEqual(obj)
+
+  const triple = { a: [[[1, 2], [3]], [[4]]] }
+  expect(parseYaml(toYaml(triple))).toEqual(triple)
+})
+
+test('toYaml/parseYaml round-trip a nested array whose inner arrays contain objects', () => {
+  const obj = { a: [[{ x: 1 }, { y: 2 }]] }
+  expect(parseYaml(toYaml(obj))).toEqual(obj)
+})
+
+test('toYaml/parseYaml round-trip an array mixing empty and non-empty nested arrays', () => {
+  const obj = { a: [[], [1, 2], [3]] }
+  expect(parseYaml(toYaml(obj))).toEqual(obj)
+})
+
 test('parseYaml strips a trailing comment without over-protecting a plain scalar containing an apostrophe (#329)', () => {
   expect(parseYaml("note: it's great # trailing comment")).toEqual({ note: "it's great" })
 })
