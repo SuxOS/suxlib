@@ -46,6 +46,17 @@ function isResolvedHandle(v: unknown): v is Handle {
 // already send in one request.
 export const MAX_HYDRATE_BYTES = 50_000_000
 
+// Bomb guard on trace: true's collected TraceEvent buffer, mirroring
+// MAX_HYDRATE_BYTES above. map/mapField's OpSpec only range-checks
+// `concurrency` (src/op/spec.ts's buildOp/validateOpSpec), never the length
+// of the array being mapped over -- that's a property of the hydrated JSON
+// input, not the spec -- so a modest request body piped through a `map`
+// node with trace: true would otherwise grow this in-memory array without
+// bound (one node-enter/node-exit pair per item visited), amplifying a
+// small request into large uncapped server-side memory retention across
+// HTTP/MCP/CLI, the one surface that pattern had been skipped on.
+export const MAX_TRACE_EVENTS = 20_000
+
 async function hydrate(store: Store, value: unknown, budget: { totalBytes: number }): Promise<unknown> {
   if (isHandleRef(value)) {
     const bytes = b64ToBytes(value.base64)
@@ -194,7 +205,20 @@ export async function runOpSpec({ spec, input, trace }: OpRunRequest, opts: OpRu
     events = []
     const collected = events
     const userOnTrace = opts.gOpts?.onTrace
-    gOpts = { ...opts.gOpts, onTrace: (e) => { collected.push(e); userOnTrace?.(e) } }
+    gOpts = {
+      ...opts.gOpts,
+      onTrace: (e) => {
+        collected.push(e)
+        // Fail loud, consistent with every other bomb guard in this file
+        // (hydrate()'s MAX_HYDRATE_BYTES): abort the run rather than
+        // silently truncating the trace and returning a partial-but-looks-
+        // complete buffer to the caller.
+        if (collected.length > MAX_TRACE_EVENTS) {
+          throw new Error(`op-run trace collected more than ${MAX_TRACE_EVENTS} TraceEvents (bomb guard).`)
+        }
+        userOnTrace?.(e)
+      },
+    }
   }
   const result = await runInline(tree, hydrated, caps, gOpts)
   const dehydrated = await dehydrate(store, result)
