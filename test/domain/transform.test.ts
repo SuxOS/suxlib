@@ -37,6 +37,12 @@ test('toYaml/parseYaml round-trip numbers rendered in scientific notation instea
   expect(parseYaml(toYaml(obj))).toEqual(obj)
 })
 
+test('toYaml/parseYaml round-trip a bare top-level scalar document instead of silently returning {} (#376)', () => {
+  for (const v of [1e21, 'hello', 42, true, false, null]) {
+    expect(parseYaml(toYaml(v))).toEqual(v)
+  }
+})
+
 test('toYaml/parseYaml round-trip a nested array (array-of-arrays) instead of silently corrupting it (#352)', () => {
   const obj = { a: [[1, 2], [3, 4]] }
   expect(toYaml(obj)).toBe('a:\n  - - 1\n    - 2\n  - - 3\n    - 4')

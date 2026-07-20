@@ -189,6 +189,14 @@ export function parseYaml(text: string): unknown {
     const first = lines[i]
     if (first === undefined) return null
     if (/^\s*-(\s|$)/.test(first)) return parseSeq(minIndent, depth)
+    // toYaml never nests a bare scalar under a key or seq item (it always
+    // inlines those as "key: value"/"- value") -- a line with no ':' key
+    // pattern can only happen at the true document root, i.e. toYaml was
+    // called on a bare scalar (1e21, 'hello', ...) with nothing to map/seq.
+    if (depth === 0 && splitKey(first) === null) {
+      i++
+      return parseScalar(first)
+    }
     return parseMap(minIndent, depth)
   }
   function parseSeq(minIndent: number, depth: number): unknown[] {

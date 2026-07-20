@@ -188,6 +188,38 @@ describe('otel exporter', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps each duplicate-named concurrent span\'s own GovernorEvent list, not a merged/misattributed one (#357)', async () => {
+    let spans: any[] = []
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      spans = JSON.parse(req.body).resourceSpans[0].scopeSpans[0].spans
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelExporter({ endpoint: 'https://x', fetchFn })
+    // Two spans open at the identical path/runId/name (e.g.
+    // sink.fanout(['a', 'a'])): entry1 (callId '1') pushed first, entry2
+    // (callId '2') pushed second -- so entry2 is "the innermost span sharing
+    // this name" that a name-only GovernorEvent (no runId) attaches to.
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1' })
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '2' })
+    exporter.onEvent({ kind: 'retry-attempt', name: 'a', attempt: 0, delayMs: 5 })
+    // callId '1' -- NOT the entry onEvent above attaches to -- exits FIRST
+    // here. A path-keyed pendingEvents map (the pre-#357 bug) hands whichever
+    // span exits first every event pending for this shared path, regardless
+    // of which entry onEvent actually meant to attach it to -- so callId '1'
+    // would wrongly steal callId '2''s event the moment it pops the shared
+    // list, leaving callId '2' with none.
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1', durationMs: 1, ok: true })
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '2', durationMs: 1, ok: true })
+    await exporter.flush()
+    expect(spans).toHaveLength(2)
+    // pushFinished appends in node-exit order, so spans[0] is callId '1'
+    // (exited first, wrongly favored by the pre-#357 path-keyed bug) and
+    // spans[1] is callId '2' (the entry onEvent actually selected).
+    expect(spans[0].events).toHaveLength(0)
+    expect(spans[1].events).toHaveLength(1)
+    expect(spans[1].events[0].name).toBe('retry-attempt')
+  })
+
   it('drops the oldest buffered span once maxBufferedSpans is exceeded', async () => {
     const exporter = createOtelExporter({ endpoint: 'https://x', maxBufferedSpans: 2 })
     for (let i = 0; i < 5; i++) {
