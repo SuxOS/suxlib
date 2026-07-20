@@ -744,7 +744,7 @@ function inlineMdToHtml(s: string): string {
     .replace(/`([^`]+)`/g, (_m, c) => `\x00${codes.push(`<code>${c}</code>`) - 1}\x00`)
     .replace(
       /\[([^\]]*)\]\(([^)]*)\)/g,
-      (_m, txt, href) => `\x00${codes.push(`<a href="${sanitizeUrl(href)}">${txt}</a>`) - 1}\x00`,
+      (_m, txt, href) => `<a href="\x00${codes.push(sanitizeUrl(href)) - 1}\x00">${txt}</a>`,
     )
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/__([^_]+)__/g, '<strong>$1</strong>')
