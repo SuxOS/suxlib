@@ -49,6 +49,7 @@ function needsQuote(s: string): boolean {
   if (s === '') return true
   if (/^(true|false|null|~)$/i.test(s)) return true
   if (/^-?\d+(\.\d+)?$/.test(s)) return true
+  if (/^-?\d(\.\d+)?[eE][+-]?\d+$/.test(s)) return true
   return /[:#\[\]{}&*!|>'"%@`,\n\r\t]|^[\s?-]|\s$/.test(s)
 }
 
@@ -106,6 +107,7 @@ function parseScalar(raw: string): unknown {
     if (Number.isSafeInteger(n)) return n
   }
   if (/^-?\d*\.\d+$/.test(s)) return parseFloat(s)
+  if (/^-?\d(\.\d+)?[eE][+-]?\d+$/.test(s)) return parseFloat(s)
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
     if (s[0] === '"') {
       try {
@@ -331,7 +333,7 @@ export function parseCsv(text: string, delim: string): string[][] {
       } else field += c
       continue
     }
-    if (c === '"') {
+    if (c === '"' && field === '') {
       inQ = true
       started = true
     } else if (c === delim) {

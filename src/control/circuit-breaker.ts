@@ -71,6 +71,7 @@ export function circuitBreaker(opts: {
         opts.onEvent?.({ kind: 'breaker-open', nowMs, runId })
         return
       }
+      if (state === 'open') return
       if (++consecutiveFailures >= opts.failureThreshold) {
         state = 'open'
         openedAtMs = nowMs
