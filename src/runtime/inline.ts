@@ -23,6 +23,11 @@ function throwFirstOrAggregate(results: PromiseSettledResult<any>[], label: stri
   throw new AggregateError(failures, `${label}: ${failures.length} concurrent failures`)
 }
 
+// Monotonic per-process counter backing traced()'s callId (#366) -- cheap
+// (no crypto), and only needs to be unique among calls concurrently sharing
+// one tag/name/path/runId, which a simple increment already guarantees.
+let traceCallSeq = 0
+
 // Wraps one Op node's execution with node-enter/node-exit trace events (see
 // src/control/trace.ts) when gOpts.onTrace is supplied; a bare passthrough
 // otherwise -- no timing call, no event object, no try/catch -- so tracing
@@ -35,14 +40,15 @@ async function traced<T>(tag: string, name: string | undefined, path: string, ru
   if (gOpts?.signal?.aborted) throw new OpAbortError()
   const onTrace = gOpts?.onTrace
   if (!onTrace) return fn()
+  const callId = String(++traceCallSeq)
   const t0 = caps.clock.now()
-  onTrace({ kind: 'node-enter', tag, name, path, runId })
+  onTrace({ kind: 'node-enter', tag, name, path, runId, callId })
   try {
     const result = await fn()
-    onTrace({ kind: 'node-exit', tag, name, path, runId, durationMs: caps.clock.now() - t0, ok: true })
+    onTrace({ kind: 'node-exit', tag, name, path, runId, callId, durationMs: caps.clock.now() - t0, ok: true })
     return result
   } catch (err) {
-    onTrace({ kind: 'node-exit', tag, name, path, runId, durationMs: caps.clock.now() - t0, ok: false, error: err instanceof Error ? err.message : String(err) })
+    onTrace({ kind: 'node-exit', tag, name, path, runId, callId, durationMs: caps.clock.now() - t0, ok: false, error: err instanceof Error ? err.message : String(err) })
     throw err
   }
 }

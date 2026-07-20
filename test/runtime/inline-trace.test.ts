@@ -21,8 +21,8 @@ test('runInline traces a single leaf: node-enter then node-exit with ok:true and
   const result = await runInline(leaf, 1, clockCaps(), { onTrace: (e) => trace.push(e) })
   expect(result).toBe(2)
   expect(trace).toEqual([
-    { kind: 'node-enter', tag: 'leaf', name: 'id', path: '', runId: expect.any(String) },
-    { kind: 'node-exit', tag: 'leaf', name: 'id', path: '', runId: expect.any(String), durationMs: expect.any(Number), ok: true },
+    { kind: 'node-enter', tag: 'leaf', name: 'id', path: '', runId: expect.any(String), callId: expect.any(String) },
+    { kind: 'node-exit', tag: 'leaf', name: 'id', path: '', runId: expect.any(String), callId: expect.any(String), durationMs: expect.any(Number), ok: true },
   ])
 })
 
@@ -31,8 +31,8 @@ test('runInline traces a failing leaf: node-exit carries ok:false and the error 
   const trace: TraceEvent[] = []
   await expect(runInline(leaf, null, clockCaps(), { onTrace: (e) => trace.push(e) })).rejects.toThrow('kaboom')
   expect(trace).toEqual([
-    { kind: 'node-enter', tag: 'leaf', name: 'boom', path: '', runId: expect.any(String) },
-    { kind: 'node-exit', tag: 'leaf', name: 'boom', path: '', runId: expect.any(String), durationMs: expect.any(Number), ok: false, error: 'kaboom' },
+    { kind: 'node-enter', tag: 'leaf', name: 'boom', path: '', runId: expect.any(String), callId: expect.any(String) },
+    { kind: 'node-exit', tag: 'leaf', name: 'boom', path: '', runId: expect.any(String), callId: expect.any(String), durationMs: expect.any(Number), ok: false, error: 'kaboom' },
   ])
 })
 
@@ -138,6 +138,23 @@ test('runInline traces a sink fanout: each target gets its own node-enter/exit, 
   expect(exits.find((e) => e.tag === 'sink')).toMatchObject({ ok: false })
 })
 
+test('runInline gives every node-enter/node-exit pair a distinct, matching callId, including two duplicate-named concurrent sink targets (#366)', async () => {
+  const tree = sink.fanout(['a', 'a'])
+  const caps = clockCaps({ a: { name: 'a', write: async (v: any) => v } })
+  const trace: TraceEvent[] = []
+  await runInline(tree, { x: 1 }, caps, { onTrace: (e) => trace.push(e) })
+  const targetEnters = trace.filter((e) => e.kind === 'node-enter' && e.tag === 'sink-target') as Extract<TraceEvent, { kind: 'node-enter' }>[]
+  const targetExits = trace.filter((e) => e.kind === 'node-exit' && e.tag === 'sink-target') as Extract<TraceEvent, { kind: 'node-exit' }>[]
+  expect(targetEnters).toHaveLength(2)
+  expect(targetExits).toHaveLength(2)
+  expect(targetEnters[0].callId).not.toBe(targetEnters[1].callId)
+  // Every exit's callId must match exactly one enter's callId (its own call),
+  // not just be a member of the same path.
+  const enterIds = new Set(targetEnters.map((e) => e.callId))
+  for (const exit of targetExits) expect(enterIds.has(exit.callId)).toBe(true)
+  expect(new Set(targetExits.map((e) => e.callId)).size).toBe(2)
+})
+
 test('runInline stamps every TraceEvent of one call with the same runId, and two separate calls get different runIds (#346)', async () => {
   const tree = pipe(
     op('a', async (n: number) => n + 1, { kind: 'pure' }),
@@ -163,7 +180,7 @@ test('runInline\'s onTrace and gOpts.onEvent are independent streams: supplying 
   expect(result).toBe('ok')
   expect(events).toEqual([{ kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number), runId: expect.any(String) }])
   expect(trace).toEqual([
-    { kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String) },
-    { kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String), durationMs: expect.any(Number), ok: true },
+    { kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String), callId: expect.any(String) },
+    { kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String), callId: expect.any(String), durationMs: expect.any(Number), ok: true },
   ])
 })
