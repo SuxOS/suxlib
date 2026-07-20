@@ -264,6 +264,11 @@ test('markdownToHtml does not let emphasis regexes corrupt an underscore/asteris
   expect(html).toContain('<a href="http://example.com/foo_bar_baz">click here</a>')
 })
 
+test('markdownToHtml still renders emphasis markers inside link text', () => {
+  const html = markdownToHtml('[*bold link text*](http://example.com/foo)')
+  expect(html).toContain('<a href="http://example.com/foo"><em>bold link text</em></a>')
+})
+
 test('htmlToMarkdown converts headings, lists, links, and code', () => {
   const md = htmlToMarkdown('<h1>Hi</h1><ul><li>one</li><li>two</li></ul><a href="https://x.test">link</a>')
   expect(md).toContain('# Hi')
