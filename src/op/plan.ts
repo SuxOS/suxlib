@@ -35,7 +35,10 @@ export type OpPlan = {
  *   resolves its own effective opts: a target's own `opts.retries` if given,
  *   else the sink node's `opts.retries`, matching buildOpNode's `sink.fanout`
  *   wiring). This is the worst-case count of attempts a full run could burn
- *   across the whole tree.
+ *   across the whole tree. A `leaf` node carrying `params` adds one more --
+ *   buildOpNode (./spec.ts) inserts a synthetic `retries: 0` mergeOp ahead of
+ *   the real leaf when `params` is present, and that mergeOp is itself a
+ *   governed call site (one real attempt at run time).
  * - `usesAsk`/`usesCache`/`usesLlm`/`llmLeaves`/`sinkTargets`: which optional
  *   `Caps` fields (`Caps.ask`, `Caps.cache`, `Caps.llm`, `Caps.sinks`) the
  *   spec will actually reach if run -- `ask`/`sinks` are visible directly on
@@ -76,6 +79,7 @@ function walkPlan(spec: OpSpec, plan: OpPlan, llmLeaves: Set<string>, sinkTarget
     case 'leaf': {
       if (typeof spec.name !== 'string' || !spec.name) return
       plan.maxRetryMultiplier += (spec.opts?.retries ?? 0) + 1
+      if (spec.params) plan.maxRetryMultiplier += 1
       if (spec.opts?.memo) plan.usesCache = true
       if (LEAF_CAPS[spec.name]?.includes('llm')) {
         plan.usesLlm = true
