@@ -218,7 +218,21 @@ There is no linter in this repo. Run both locally before pushing.
   fix for the href-corruption bug #317) also swallowed the link *text*, silently
   breaking emphasis markers inside link text (#323). Push only `sanitizeUrl(href)`
   into the pool and leave `txt` in the template literal so later passes still reach
-  it.
+  it. Update (#328): the four emphasis regexes themselves had two more bugs from
+  the same root cause (flat regex passes with no delimiter-nesting or HTML-tag
+  awareness) — `**`/`__`'s `[^*]+`/`[^_]+` content class rejected any nesting
+  (`**bold *italic* still bold**` left the outer `**` unmatched entirely, so the
+  later `*`/`_` em pass then matched two unbalanced fragments across it), and none
+  of the four excluded `<`/`>`, so a stray unpaired `*`/`_` in one link's text
+  (`[*foo](...)`) could match all the way through to a stray partner in a
+  *different* link's text, swallowing the `</a>...<a href=...>` between them as
+  "emphasis content." Fixed by making `**`/`__` lazy (`[^<>]+?`, allowing a single
+  nested `*`/`_` through so the subsequent em pass still finds and wraps it) and
+  adding `<`/`>` to all four content classes (so no emphasis span can cross a tag
+  boundary the link/code pass already inserted). Any future change to these four
+  regexes should keep both properties — lazy quantifiers for the double-delimiter
+  pairs, and `<`/`>` excluded from every content class — rather than reverting to
+  a plain `[^*]+`-style class.
 - Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
   `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
   `circuitBreaker` gating for `effect` leaves is configured separately, via
