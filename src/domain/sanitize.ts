@@ -158,6 +158,107 @@ function findValidIccApp2Offsets(bytes: Uint8Array): Set<number> {
   return valid ? new Set(candidates.map((c) => c.offset)) : new Set()
 }
 
+const EXIF_PREFIX = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00] // "Exif\0\0"
+const EXIF_ORIENTATION_TAG = 0x0112
+
+/**
+ * Read the EXIF Orientation tag (IFD0, tag 0x0112, type SHORT, count 1) out of
+ * an EXIF APP1 payload (the bytes *after* the "Exif\0\0" prefix, i.e. starting
+ * at the TIFF header). Returns the raw 1-8 orientation value if present and
+ * well-formed, else null — malformed/truncated/absent-tag EXIF is not an
+ * error here, just "nothing worth preserving."
+ */
+function readExifOrientation(payload: Uint8Array): number | null {
+  if (payload.length < 8) return null
+  let little: boolean
+  if (payload[0] === 0x49 && payload[1] === 0x49) little = true
+  else if (payload[0] === 0x4d && payload[1] === 0x4d) little = false
+  else return null
+  const u16 = (o: number) => (little ? payload[o] | (payload[o + 1] << 8) : (payload[o] << 8) | payload[o + 1])
+  const u32 = (o: number) =>
+    little
+      ? (payload[o] | (payload[o + 1] << 8) | (payload[o + 2] << 16) | (payload[o + 3] << 24)) >>> 0
+      : ((payload[o] << 24) | (payload[o + 1] << 16) | (payload[o + 2] << 8) | payload[o + 3]) >>> 0
+  if (payload.length < 8 || u16(2) !== 0x2a) return null
+  const ifd0Offset = u32(4)
+  if (ifd0Offset + 2 > payload.length) return null
+  const count = u16(ifd0Offset)
+  const entriesStart = ifd0Offset + 2
+  if (entriesStart + count * 12 > payload.length) return null
+  for (let k = 0; k < count; k++) {
+    const entryOff = entriesStart + k * 12
+    if (u16(entryOff) !== EXIF_ORIENTATION_TAG) continue
+    if (u16(entryOff + 2) !== 3 || u32(entryOff + 4) !== 1) return null // type must be SHORT, count 1
+    const value = u16(entryOff + 8)
+    return value >= 1 && value <= 8 ? value : null
+  }
+  return null
+}
+
+/**
+ * Find EXIF (APP1, "Exif\0\0"-prefixed) segments carrying a non-default
+ * Orientation value, mapping segment offset -> orientation (2-8; orientation
+ * 1 is "normal", nothing to preserve). Mirrors findValidIccApp2Offsets's
+ * traversal (including continuing past SOS for a progressive JPEG's later
+ * scans) so both scanners stay consistent about where a marker can appear.
+ */
+function findExifOrientationOffsets(bytes: Uint8Array): Map<number, number> {
+  const offsets = new Map<number, number>()
+  let i = 2
+  while (i + 3 < bytes.length && bytes[i] === 0xff) {
+    const marker = bytes[i + 1]
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
+      i += 2
+      if (marker === 0xd9) break
+      continue
+    }
+    if (i + 3 >= bytes.length) break
+    const len = (bytes[i + 2] << 8) | bytes[i + 3]
+    if (len < 2 || i + 2 + len > bytes.length) break
+    if (marker === 0xe1 && len >= 2 + EXIF_PREFIX.length && EXIF_PREFIX.every((b, k) => bytes[i + 4 + k] === b)) {
+      const payload = bytes.subarray(i + 4 + EXIF_PREFIX.length, i + 2 + len)
+      const orientation = readExifOrientation(payload)
+      if (orientation !== null && orientation !== 1) offsets.set(i, orientation)
+    }
+    i += 2 + len
+    if (marker === 0xda) {
+      while (i < bytes.length) {
+        const b = bytes[i]
+        if (b !== 0xff) { i++; continue }
+        const next = bytes[i + 1]
+        if (next === 0x00 || (next !== undefined && next >= 0xd0 && next <= 0xd7)) { i += 2; continue }
+        break
+      }
+    }
+  }
+  return offsets
+}
+
+/**
+ * Build a minimal synthetic EXIF APP1 segment carrying nothing but the
+ * Orientation tag — TIFF header + a single-entry IFD0 + no next-IFD. Used in
+ * place of dropping an Orientation-bearing EXIF segment outright: this
+ * sanitizer rebuilds JPEGs segment-by-segment without decoding pixel data
+ * (CLAUDE.md), so it can't bake a non-default orientation into the pixels
+ * themselves — but it can still avoid the #360 bug (a portrait photo's pixel
+ * data, stored landscape-orientation with an Orientation tag telling viewers
+ * to rotate on display, rendering sideways once that tag is silently
+ * stripped) by keeping just the one tag a viewer needs, the same "keep only
+ * what's needed to render correctly" treatment ICC APP2/PNG's gAMA/cHRM/sRGB
+ * already get.
+ */
+function buildOrientationApp1(orientation: number): number[] {
+  const tiff = [
+    0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // "II" (little-endian), 42, IFD0 offset = 8
+    0x01, 0x00, // IFD0 entry count = 1
+    0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, orientation & 0xff, 0x00, 0x00, 0x00, // tag 0x0112, SHORT, count 1, value
+    0x00, 0x00, 0x00, 0x00, // next IFD offset = 0 (none)
+  ]
+  const payload = [...EXIF_PREFIX, ...tiff]
+  const len = payload.length + 2
+  return [0xff, 0xe1, (len >> 8) & 0xff, len & 0xff, ...payload]
+}
+
 /**
  * Strip JPEG APPn metadata markers (APP0 kept — it's the JFIF header most
  * decoders expect; APP1 EXIF/XMP, APP13 Photoshop IPTC, COM comments are
@@ -166,13 +267,18 @@ function findValidIccApp2Offsets(bytes: Uint8Array): Set<number> {
  * consistent sequence/total across all of a profile's segments, see
  * findValidIccApp2Offsets) — an ICC profile is rendering data, not privacy
  * metadata, matching stripPngMetadata's treatment of iCCP/sRGB/gAMA/cHRM as
- * data to preserve. Non-ICC APP2 is still dropped. Segment-level rebuild:
- * walk markers, drop the ones that carry metadata, keep SOS and the
+ * data to preserve. Non-ICC APP2 is still dropped. An EXIF APP1 carrying a
+ * non-default Orientation tag (#360) is replaced with a minimal synthetic
+ * APP1 holding just that tag (buildOrientationApp1) instead of being dropped
+ * outright, so a portrait phone photo doesn't silently render sideways once
+ * the rest of its EXIF (GPS, camera model, ...) is stripped. Segment-level
+ * rebuild: walk markers, drop the ones that carry metadata, keep SOS and the
  * entropy-coded scan data verbatim.
  */
 function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('not a JPEG (missing SOI marker)')
   const iccOffsets = findValidIccApp2Offsets(bytes)
+  const exifOrientationOffsets = findExifOrientationOffsets(bytes)
   const out: number[] = [0xff, 0xd8]
   let i = 2
   let terminated = false
@@ -241,6 +347,8 @@ function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
     const isMetadata = ((marker >= 0xe1 && marker <= 0xef) || marker === 0xfe) && !isIccApp2 // APP1-APP15, COM (ICC-bearing APP2 kept)
     if (!isMetadata) {
       for (let j = i; j < i + 2 + len; j++) out.push(bytes[j])
+    } else if (marker === 0xe1 && exifOrientationOffsets.has(i)) {
+      out.push(...buildOrientationApp1(exifOrientationOffsets.get(i)!))
     }
     i += 2 + len
   }

@@ -212,6 +212,85 @@ test('sanitizeImage drops multiple ICC-tagged APP2 segments whose sequence/total
   expect(text).not.toContain('profile-part-2')
 })
 
+test('sanitizeImage preserves EXIF Orientation as a minimal synthetic APP1 while stripping the rest of EXIF (#360)', () => {
+  const orientation = 6
+  const payload = buildExifOrientationPayload(orientation, 'SecretCameraMake')
+  const jpeg = buildJpegWithExif(payload)
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).not.toContain('SecretCameraMake')
+  expect(text).toContain('Exif\0\0')
+  const bytes = Array.from(result.bytes)
+  // tag 0x0112 (LE), type SHORT (3), count 1, value = orientation
+  const orientationEntry = [0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, orientation, 0x00, 0x00, 0x00]
+  const hasOrientationEntry = bytes.some((_, i) => orientationEntry.every((b, k) => bytes[i + k] === b))
+  expect(hasOrientationEntry).toBe(true)
+})
+
+test('sanitizeImage drops EXIF entirely when Orientation is 1 (normal), same as before #360', () => {
+  const payload = buildExifOrientationPayload(1, 'SecretCameraMake')
+  const jpeg = buildJpegWithExif(payload)
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).not.toContain('Exif\0\0')
+  expect(text).not.toContain('SecretCameraMake')
+})
+
+test('sanitizeImage drops EXIF entirely when it has no parseable Orientation tag, same as before #360', () => {
+  // A big-endian TIFF header, IFD0 with zero entries -- no Orientation tag present.
+  const tiff = Uint8Array.from([0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+  const jpeg = buildJpegWithExif(tiff)
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).not.toContain('Exif\0\0')
+})
+
+// ---- EXIF Orientation builders for the #360 tests above ----
+function u16le(v: number): number[] {
+  return [v & 0xff, (v >> 8) & 0xff]
+}
+function u32le(v: number): number[] {
+  return [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff]
+}
+function buildExifOrientationPayload(orientation: number, makeString: string): Uint8Array {
+  const enc = new TextEncoder()
+  const makeBytes = enc.encode(makeString + '\0')
+  const ifd0Offset = 8
+  const entryCount = 2
+  const ifd0Size = 2 + entryCount * 12 + 4
+  const stringOffset = ifd0Offset + ifd0Size
+  const out: number[] = [
+    0x49, 0x49, 0x2a, 0x00, // "II", 42 (little-endian)
+    ...u32le(ifd0Offset),
+    ...u16le(entryCount),
+    // entry: Make (0x010f), ASCII (2), count=makeBytes.length, offset=stringOffset (out-of-line)
+    ...u16le(0x010f), ...u16le(2), ...u32le(makeBytes.length), ...u32le(stringOffset),
+    // entry: Orientation (0x0112), SHORT (3), count=1, value=orientation (inline)
+    ...u16le(0x0112), ...u16le(3), ...u32le(1), orientation & 0xff, 0x00, 0x00, 0x00,
+    ...u32le(0), // next IFD offset
+    ...makeBytes,
+  ]
+  return Uint8Array.from(out)
+}
+function buildJpegWithExif(exifPayload: Uint8Array): Uint8Array {
+  const enc = new TextEncoder()
+  const full = new Uint8Array(6 + exifPayload.length)
+  full.set(enc.encode('Exif\0\0'), 0)
+  full.set(exifPayload, 6)
+  const soi = new Uint8Array([0xff, 0xd8])
+  const app1 = jpegSegment(0xe1, full)
+  const sos = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0x00, 0x01, 0xff, 0xd9])
+  const parts = [soi, app1, sos]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const jpeg = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    jpeg.set(p, off)
+    off += p.length
+  }
+  return jpeg
+}
+
 // ---- minimal JPEG builder for the ICC-preservation test above ----
 function jpegSegment(marker: number, payload: Uint8Array): Uint8Array {
   const len = payload.length + 2
