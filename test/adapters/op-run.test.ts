@@ -138,6 +138,18 @@ test('runOpSpec: hydrate() bails on the aggregate byte guard across multiple $ha
   await expect(runOpSpec({ spec, input })).rejects.toThrow(/bomb guard/)
 })
 
+test('runOpSpec: trace: true bails on the TraceEvent count bomb guard for a large map fan-out instead of buffering it all', async () => {
+  const { MAX_TRACE_EVENTS } = await import('../../src/adapters/op-run.js')
+  // Each item contributes a node-enter/node-exit pair; the map node itself
+  // contributes one more pair -- comfortably over MAX_TRACE_EVENTS either way.
+  const items = Array.from({ length: Math.ceil(MAX_TRACE_EVENTS / 2) + 1 }, (_, i) => i)
+  const spec: OpSpec = { tag: 'map', op: { tag: 'leaf', name: 'shout', opts: { kind: 'pure' } }, concurrency: 16 }
+  await expect(runOpSpec(
+    { spec, input: items, trace: true },
+    { leaves: { shout: async (input) => input } },
+  )).rejects.toThrow(/bomb guard/)
+})
+
 test('runOpSpec: opts.gOpts.onTrace (the same gOpts bag onEvent already rides) receives node-enter/node-exit for every node the spec visits (#215)', async () => {
   const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'convert' }] }
   const trace: unknown[] = []
