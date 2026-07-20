@@ -39,6 +39,19 @@ test('planOpSpec reports sink targets and sums each target\'s own effective retr
   expect(plan.maxRetryMultiplier).toBe((1 + 1) + (3 + 1))
 })
 
+test('planOpSpec falls back to the fanout\'s own opts per-field, not as a whole object, matching runInline\'s sink case', () => {
+  // 'vault' only overrides `memo` -- its `retries` must still fall back to the
+  // node-level opts.retries (2), not silently reset to 0.
+  const spec: OpSpec = {
+    tag: 'sink',
+    targets: [{ name: 'vault', opts: { memo: true } }],
+    opts: { retries: 2 },
+  }
+  const plan = planOpSpec(spec)
+  expect(plan.maxRetryMultiplier).toBe(2 + 1)
+  expect(plan.usesCache).toBe(true)
+})
+
 test('planOpSpec flags usesAsk for an ask node', () => {
   const spec: OpSpec = { tag: 'ask', prompt: 'proceed?', timeout: '5m', onTimeout: 'proceed' }
   const plan = planOpSpec(spec)

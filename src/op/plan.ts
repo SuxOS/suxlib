@@ -98,11 +98,17 @@ function walkPlan(spec: OpSpec, plan: OpPlan, llmLeaves: Set<string>, sinkTarget
       if (!Array.isArray(spec.targets)) return
       for (const target of spec.targets) {
         const name = typeof target === 'string' ? target : target?.name
-        const opts = (typeof target === 'string' ? undefined : target?.opts) ?? spec.opts
+        const targetOpts = typeof target === 'string' ? undefined : target?.opts
         if (typeof name !== 'string' || !name) continue
         sinkTargets.add(name)
-        plan.maxRetryMultiplier += (opts?.retries ?? 0) + 1
-        if (opts?.memo) plan.usesCache = true
+        // Per-field fallback to the fanout's own opts, mirroring runInline's
+        // 'sink' case (src/runtime/inline.ts) exactly -- a target that only
+        // overrides `memo` still falls back to the node-level `retries`,
+        // not to zero.
+        const retries = targetOpts?.retries ?? spec.opts?.retries ?? 0
+        const memo = targetOpts?.memo ?? spec.opts?.memo
+        plan.maxRetryMultiplier += retries + 1
+        if (memo) plan.usesCache = true
       }
       return
     }
