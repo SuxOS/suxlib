@@ -274,13 +274,19 @@ function readZipMtimes(bytes: Uint8Array): Record<string, number> {
     const efl = readU16(bytes, o + 30)
     const cml = readU16(bytes, o + 32)
     const name = strFromU8(bytes.subarray(o + 46, o + 46 + fnl))
-    const year = ((modDate >> 9) & 0x7f) + 1980
-    const month = (modDate >> 5) & 0xf
-    const day = modDate & 0x1f
-    const hours = (modTime >> 11) & 0x1f
-    const minutes = (modTime >> 5) & 0x3f
-    const seconds = (modTime & 0x1f) * 2
-    mtimes[name] = new Date(year, month - 1, day, hours, minutes, seconds).getTime()
+    // modDate === 0 (year 1980, month 0, day 0) is some zip writers' "no
+    // timestamp" sentinel, not a real date -- new Date(1980, -1, 0, ...)
+    // would otherwise normalize to a bogus 1979-11-30 instead of leaving the
+    // entry's mtime absent.
+    if (modDate !== 0) {
+      const year = ((modDate >> 9) & 0x7f) + 1980
+      const month = (modDate >> 5) & 0xf
+      const day = modDate & 0x1f
+      const hours = (modTime >> 11) & 0x1f
+      const minutes = (modTime >> 5) & 0x3f
+      const seconds = (modTime & 0x1f) * 2
+      mtimes[name] = new Date(year, month - 1, day, hours, minutes, seconds).getTime()
+    }
     o += 46 + fnl + efl + cml
   }
   return mtimes

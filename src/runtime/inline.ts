@@ -11,6 +11,18 @@ export class AskTimeoutError extends Error {
 
 const childPath = (path: string, seg: string | number): string => (path === '' ? String(seg) : `${path}/${seg}`)
 
+// Surfaces every concurrent failure from a fan-out (map/mapField/sink), not
+// just the first-by-index one -- but preserves today's exact single-failure
+// behavior (rethrow that one reason unwrapped) rather than always wrapping,
+// since some callers (the 'catch' case's `err instanceof OpAbortError` check,
+// #279) rely on the thrown value's own identity/type.
+function throwFirstOrAggregate(results: PromiseSettledResult<any>[], label: string): void {
+  const failures = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map((r) => r.reason)
+  if (failures.length === 0) return
+  if (failures.length === 1) throw failures[0]
+  throw new AggregateError(failures, `${label}: ${failures.length} concurrent failures`)
+}
+
 // Wraps one Op node's execution with node-enter/node-exit trace events (see
 // src/control/trace.ts) when gOpts.onTrace is supplied; a bare passthrough
 // otherwise -- no timing call, no event object, no try/catch -- so tracing
@@ -56,11 +68,17 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         // slower item's node-exit trace has landed.
         const results = await Promise.allSettled(items.map(async (it, i) => {
           await node.concurrency.acquire(gOpts?.signal)
-          try { out[i] = await runInline(node.op, it, caps, gOpts, childPath(path, i)); node.concurrency.release(true) }
+          let result: any
+          try { result = await runInline(node.op, it, caps, gOpts, childPath(path, i)) }
           catch (e) { node.concurrency.release(false); throw e }
+          // Post-success release deliberately sits outside the try/catch above,
+          // same as runGoverned's #275 fix -- a throw here (e.g. a host onEvent
+          // callback) must not be misclassified as an item failure, which would
+          // double-release the concurrency slot.
+          out[i] = result
+          node.concurrency.release(true)
         }))
-        const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
-        if (failed) throw failed.reason
+        throwFirstOrAggregate(results, 'map')
         return out
       })
     case 'mapField':
@@ -70,16 +88,23 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         const out = new Array(items.length)
         const results = await Promise.allSettled(items.map(async (it, i) => {
           await node.concurrency.acquire(gOpts?.signal)
-          try {
-            const value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts, childPath(path, i))
-            out[i] = { ...(it as Record<string, unknown>), [node.elementField]: value }
-            node.concurrency.release(true)
-          } catch (e) { node.concurrency.release(false); throw e }
+          let value: any
+          try { value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts, childPath(path, i)) }
+          catch (e) { node.concurrency.release(false); throw e }
+          // Post-success release outside try/catch, same reasoning as 'map' above.
+          out[i] = { ...(it as Record<string, unknown>), [node.elementField]: value }
+          node.concurrency.release(true)
         }))
-        const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
-        if (failed) throw failed.reason
+        throwFirstOrAggregate(results, 'mapField')
         const { [node.arrayField]: _dropped, ...rest } = obj
-        return { ...rest, [node.renameTo ?? node.arrayField]: out }
+        const targetField = node.renameTo ?? node.arrayField
+        // A renameTo naming a field that survives the arrayField drop would
+        // silently clobber that field via object-spread's later-key-wins
+        // semantics -- reject it explicitly instead.
+        if (node.renameTo !== undefined && node.renameTo !== node.arrayField && Object.prototype.hasOwnProperty.call(rest, targetField)) {
+          throw new Error(`mapField's renameTo "${targetField}" collides with an existing field on the input object`)
+        }
+        return { ...rest, [targetField]: out }
       })
     case 'reconcile':
       return traced('reconcile', undefined, path, caps, gOpts, () => runReconcile(node.opts, input, caps.store))
@@ -117,8 +142,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
             return runGoverned(governorName, opts, (v, c) => s.write(v, c), input, caps, caps.governors?.[governorName], gOpts)
           })
         }))
-        const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
-        if (failed) throw failed.reason
+        throwFirstOrAggregate(results, 'sink')
         return input
       })
     case 'ask':

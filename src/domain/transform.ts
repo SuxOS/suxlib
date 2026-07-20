@@ -126,11 +126,52 @@ function parseScalar(raw: string): unknown {
   return s
 }
 
+// Strips a trailing `# comment`, but only when the `#` sits outside a quoted
+// scalar -- tracked at the character level rather than "does this line
+// contain a quote anywhere" (the old heuristic, which both over-protected a
+// plain scalar containing a stray apostrophe like "it's great # comment" and
+// under-protected a genuinely quoted scalar followed by a real comment).
+// `expectValueStart` marks positions where a quote character actually opens
+// a quoted token (line start, right after "- ", right after "key: ") --
+// everywhere else a quote char is just a literal, e.g. the apostrophe in
+// "it's".
+function stripYamlComment(line: string): string {
+  let inQuote: '"' | "'" | null = null
+  let expectValueStart = true
+  let i = 0
+  while (i < line.length) {
+    const c = line[i]
+    if (inQuote) {
+      if (inQuote === '"' && c === '\\') { i += 2; continue }
+      if (c === inQuote) {
+        if (inQuote === "'" && line[i + 1] === "'") { i += 2; continue }
+        inQuote = null
+        expectValueStart = false
+      }
+      i++
+      continue
+    }
+    if (c === '"' || c === "'") {
+      if (expectValueStart) inQuote = c
+      else expectValueStart = false
+      i++
+      continue
+    }
+    if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i).replace(/\s+$/, '')
+    if (c === ':' && (line[i + 1] === undefined || /\s/.test(line[i + 1]))) { expectValueStart = true; i++; continue }
+    if (c === '-' && expectValueStart && (line[i + 1] === undefined || /\s/.test(line[i + 1]))) { i++; continue }
+    if (/\s/.test(c)) { i++; continue }
+    expectValueStart = false
+    i++
+  }
+  return line
+}
+
 export function parseYaml(text: string): unknown {
   const lines = text
     .split(/\r?\n/)
     .filter((l) => l.trim() !== '' && !/^\s*#/.test(l))
-    .map((l) => (/["']/.test(l) ? l : l.replace(/\s+#.*$/, '')))
+    .map(stripYamlComment)
     .map((l) => l.replace(/\s+$/, ''))
 
   let i = 0
