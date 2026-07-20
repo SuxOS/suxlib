@@ -565,3 +565,21 @@ There is no linter in this repo. Run both locally before pushing.
   whose problem is one of those, not an out-of-range number, or it'll
   incorrectly observe `isError: true` from schema rejection instead of a
   `{ valid: false }` result.
+- `otel.ts`'s exporters (#334/#338) are meant to be constructed once and
+  reused across every concurrent `runInline` call reaching an adapter, but
+  `TraceEvent.path` (#339) is only unique *within* one call — every call's
+  own root is `path === ''`, so two calls overlapping on one exporter both
+  produce a node-enter at that same path. `createOtelExporter`'s `open` map
+  is keyed by path to a *stack* of entries (push on enter, pop on exit,
+  traceId minted at root and inherited by children via the parent's
+  still-open entry) rather than a single entry, so two overlapping runs no
+  longer clobber each other — but this only resolves correctly when one
+  run's whole window nests inside the other's (started later, finished
+  earlier); two runs whose windows overlap without nesting and which visit
+  the exact same relative path can still pop the wrong entry, since nothing
+  in the `TraceEvent`/`GovernorEvent` stream carries a per-call identifier to
+  disambiguate that case. A real fix needs a call-scoped id threaded through
+  `runInline`/`traced()` (`src/runtime/inline.ts`) into every `TraceEvent`,
+  which is a larger, deliberately out-of-scope change here — don't assume
+  today's fix makes concurrent-run span attribution exact in the general
+  case, only "no longer silently and unconditionally wrong."

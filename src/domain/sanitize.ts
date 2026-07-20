@@ -125,13 +125,27 @@ function findValidIccApp2Offsets(bytes: Uint8Array): Set<number> {
     }
     if (i + 3 >= bytes.length) break
     const len = (bytes[i + 2] << 8) | bytes[i + 3]
-    if (marker === 0xda || len < 2 || i + 2 + len > bytes.length) break
+    if (len < 2 || i + 2 + len > bytes.length) break
     if (marker === 0xe2 && len >= 2 + ICC_PROFILE_TAG.length + 2 && ICC_PROFILE_TAG.every((b, k) => bytes[i + 4 + k] === b)) {
       const seq = bytes[i + 4 + ICC_PROFILE_TAG.length]
       const total = bytes[i + 4 + ICC_PROFILE_TAG.length + 1]
       candidates.push({ offset: i, seq, total })
     }
     i += 2 + len
+    if (marker === 0xda) {
+      // SOS header consumed above -- skip past its entropy-coded scan data
+      // byte-by-byte (mirroring stripJpegMetadata's own main loop) instead of
+      // stopping the scan here, so an ICC APP2 in a later scan of a
+      // progressive JPEG is still found rather than silently dropped as
+      // ordinary metadata.
+      while (i < bytes.length) {
+        const b = bytes[i]
+        if (b !== 0xff) { i++; continue }
+        const next = bytes[i + 1]
+        if (next === 0x00 || (next !== undefined && next >= 0xd0 && next <= 0xd7)) { i += 2; continue }
+        break
+      }
+    }
   }
   if (!candidates.length) return new Set()
   // A single APP2 carrying the tag is the common (small-profile) case — keep it
