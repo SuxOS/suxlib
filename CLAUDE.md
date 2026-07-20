@@ -357,7 +357,18 @@ There is no linter in this repo. Run both locally before pushing.
   member once the real PR lands. Drop #309/#242 as blocked (not superseded)
   until #308/#241 merge, and re-check `gh pr checks 308`/`241` rather than
   assuming the infra gap is still open by the time either issue is next
-  claimed.
+  claimed. Update (2026-07-20): re-checked per the above — both still fail
+  `security-review` on the identical missing-script error, so #309/#242 were
+  dropped again unbuilt. #172 (bare-Handle `params` guard)/PR #173 is a third,
+  independent instance of the same #320 gap blocking an otherwise-complete,
+  ready-to-merge fix — with the gap still open, assume *any* issue that looks
+  freshly buildable may already have a stuck-but-still-OPEN PR against it;
+  `gh pr list --search "<issue>" --state all` before building, not just for
+  closed/superseded branches. #320 itself was labeled `needs-human` after two
+  consecutive daily batches independently rediscovered it as unfixable from
+  suxlib (the script and its home repo, SuxOS/.github, aren't reachable from
+  here at all) — nothing left for a builder to do on it short of that label,
+  so stop requeuing it until a human restores the upstream script.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
