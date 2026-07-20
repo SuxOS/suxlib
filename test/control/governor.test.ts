@@ -36,6 +36,38 @@ test('emits a retry-attempt event before each backoff sleep', async () => {
   ])
 })
 
+test('threads a caller-supplied runId (#348) onto every GovernorEvent kind runGoverned can emit', async () => {
+  let calls = 0
+  const fn = async () => { calls++; if (calls === 1) throw new Error('flaky'); return 'ok' }
+  const events: any[] = []
+  // createGovernor tags every primitive event with the leaf `name` at
+  // construction time (see its own JSDoc) -- runId is threaded separately, by
+  // runGoverned, as a per-call argument to each primitive's gating method.
+  const governor = createGovernor('leaf', { circuitBreaker: { failureThreshold: 5, cooldownMs: 1000, halfOpenSuccesses: 1 }, concurrency: { kind: 'aimd', start: 1, max: 1 } }, (e) => events.push(e))
+  const result = await runGoverned(
+    'leaf', { kind: 'effect', retries: 1 }, fn, null, caps(), governor,
+    { ...noSleep, onEvent: (e) => events.push(e) },
+    'run-xyz',
+  )
+  expect(result).toBe('ok')
+  expect(events.length).toBeGreaterThan(0)
+  expect(events.every((e) => e.runId === 'run-xyz')).toBe(true)
+  expect(events.some((e) => e.kind === 'retry-attempt')).toBe(true)
+  expect(events.some((e) => e.kind === 'aimd-increase')).toBe(true)
+})
+
+test('threads runId through memo-hit/memo-miss events', async () => {
+  const fn = async (v: any) => v
+  const c = { ...caps(), cache: new MemoryCache() }
+  const events: any[] = []
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, { ...noSleep, onEvent: e => events.push(e) }, 'run-abc')
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, { ...noSleep, onEvent: e => events.push(e) }, 'run-abc')
+  expect(events).toEqual([
+    { kind: 'memo-miss', name: 'shrink', runId: 'run-abc' },
+    { kind: 'memo-hit', name: 'shrink', runId: 'run-abc' },
+  ])
+})
+
 test('rethrows the original error once retries are exhausted', async () => {
   const fn = async () => { throw new Error('always fails') }
   await expect(

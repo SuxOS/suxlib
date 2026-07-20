@@ -42,16 +42,16 @@ export function aimd(opts: { start?: number; min?: number; max?: number; onEvent
   return {
     get limit() { return limit },
     async acquire(signal?: AbortSignal) { await enqueue(q, pump, signal) },
-    release(ok: boolean) {
+    release(ok: boolean, runId?: string) {
       inflight--
       if (ok) {
         if (++successes >= limit) {
           limit = Math.min(max, limit + 1); successes = 0
-          opts.onEvent?.({ kind: 'aimd-increase', limit })
+          opts.onEvent?.({ kind: 'aimd-increase', limit, runId })
         }
       } else {
         limit = Math.max(min, Math.floor(limit / 2)); successes = 0
-        opts.onEvent?.({ kind: 'aimd-decrease', limit })
+        opts.onEvent?.({ kind: 'aimd-decrease', limit, runId })
       }
       pump()
     },

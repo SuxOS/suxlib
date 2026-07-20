@@ -83,6 +83,31 @@ describe('otel exporter', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
+  it('scopes a GovernorEvent to the run that produced it, not just the innermost span sharing its leaf name (#348)', async () => {
+    const traceIdOf = (runId: string) => runId.replace(/-/g, '')
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      const spans = JSON.parse(req.body).resourceSpans[0].scopeSpans[0].spans
+      const spanA = spans.find((s: any) => s.traceId === traceIdOf('run-A'))
+      const spanB = spans.find((s: any) => s.traceId === traceIdOf('run-B'))
+      expect(spanA.events.some((e: any) => e.name === 'retry-attempt')).toBe(true)
+      expect(spanB.events.some((e: any) => e.name === 'retry-attempt')).toBe(false)
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelExporter({ endpoint: 'https://x', fetchFn })
+    // Two concurrent "flaky" spans, same leaf name, distinct runs -- run-B's
+    // span is entered second, so it's "the innermost span sharing this leaf
+    // name" by the pre-#348 name-only fallback. A retry-attempt tagged with
+    // run-A's own runId must still land on run-A's span, not run-B's, even
+    // though run-B's span is the one still open more recently.
+    exporter.onTrace({ kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: 'run-A' })
+    exporter.onTrace({ kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: 'run-B' })
+    exporter.onEvent({ kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: 5, runId: 'run-A' })
+    exporter.onTrace({ kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: 'run-A', durationMs: 1, ok: true })
+    exporter.onTrace({ kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: 'run-B', durationMs: 1, ok: true })
+    await exporter.flush()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
   it('gives each of two overlapping runInline calls its own traceId, not a shared/overwritten one', async () => {
     const fetchFn = vi.fn(async (_url: any, req: any) => {
       const body = JSON.parse(req.body)

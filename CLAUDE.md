@@ -615,4 +615,29 @@ There is no linter in this repo. Run both locally before pushing.
   that as an acceptable fallback rather than threading `runId` through
   `GovernorEvent` too, which would touch every `onEvent` consumer's shape;
   a future change wanting exact governor-event attribution across concurrent
-  runs still needs that larger, separate change.
+  runs still needs that larger, separate change. Update (#348): that larger
+  change landed — `GovernorEvent` (`src/control/events.ts`) now carries an
+  optional `runId` on every variant, same optionality pattern as `name`. The
+  wrinkle `name`'s own convention doesn't have: `createGovernor`'s `tagged`
+  wrapper (`src/control/governor.ts`) tags `name` once, at construction time,
+  because a leaf's breaker/tokenBucket/concurrency are built once and shared
+  across every `runInline` call that reaches that leaf — there is no single
+  `runId` to bake in at that point. So `runId` instead rides in as a plain
+  call argument threaded fresh through every gating method on each governor
+  primitive (`CircuitBreaker.allow/onSuccess/onFailure`, `TokenBucket.take`,
+  `Concurrency.release`) from `runGoverned`, which itself takes `runId` as a
+  new optional trailing parameter (not folded into `RunGovernedOpts`,
+  since `gOpts` is a caller-supplied object that can be reused across
+  separate top-level `runInline` calls — mutating it with a per-call runId
+  would reintroduce the exact cross-run ambiguity this issue exists to fix).
+  `runInline`'s two `runGoverned` call sites (leaf, sink-target) pass their
+  already-in-scope `runId` straight through. `otel.ts`'s `openByName` now
+  tracks `{path, runId}` pairs per leaf name instead of bare paths, and its
+  `onEvent` prefers the innermost entry whose `runId` matches the incoming
+  event, falling back to the old "innermost span sharing this name"
+  behavior only when the event carries no `runId` at all. Any future
+  governor primitive (or `Concurrency` implementation) that emits a
+  `GovernorEvent` needs to accept and stamp this same per-call `runId`
+  argument to stay attributable — don't reach for `createGovernor`'s
+  construction-time tagging for it, that pattern only fits values that are
+  stable for a primitive's whole lifetime.
