@@ -89,6 +89,17 @@ There is no linter in this repo. Run both locally before pushing.
 - **Self-isolate work in a git worktree**: `git worktree add .scratch-worktrees/<slug>
   -b <type>/<slug>` — don't work directly on a checked-out branch that another
   session/task might also be touching.
+- **When a suxbot-filed issue is itself about the low-tier dispatcher repeatedly
+  re-selecting/dropping another specific issue** (#313, re: #264 being claimed and
+  dropped 15+ times as effort:large/needs-a-design-pass), the fix usually doesn't
+  require editing the dispatcher logic in `SuxOS/.github`'s reusable
+  `issue-build.yml`, which this repo can't touch anyway — check whether directly
+  labelling the offending issue `hold` or `needs-human`
+  (`gh issue edit <n> --add-label hold`) resolves it first. Both labels are already
+  treated as exclusion signals by this task's own EXPAND criteria ("not already
+  labelled `building`/`hold`/`needs-human`"), and the batch dispatcher honors them
+  too — #264 already carries `hold` as of this note, confirming it stopped the
+  repeat claim/drop cycle with zero code or cross-repo change.
 - **Before reimplementing a requeued issue, check for a stale closed-PR builder
   branch**: a prior attempt's branch (`git fetch origin
   bot/issue-build-<run-id>`, findable via the issue's own comment history/linked
@@ -139,7 +150,21 @@ There is no linter in this repo. Run both locally before pushing.
   still open/stuck as of this note — don't assume a prerequisite's PR number
   stays fixed once you go looking; re-check via `gh pr list --search
   "<issue>" --state all` rather than trusting a previously-recorded PR
-  number.
+  number. Update: as of 2026-07-20, #241 (#234) is now also `CONFLICTING`
+  with `main` on top of the same `security-review` failure, and a sibling
+  follow-up, #309 (`runGoverned`'s own catch block misclassifying a future
+  `OpAbortError` from inside a leaf's `fn` the same way #303 fixes for
+  map/mapField), has the *same* blocked-on-unmerged-prerequisite shape but a
+  genuinely different root cause worth telling apart: #303's PR #308 fails
+  `security-review` not because of a real finding in the diff, but because
+  the workflow's own `.suxos-ci/scripts/classify-security-noverdict.sh`
+  helper is missing (`No such file or directory`) — an infra gap in the
+  reusable `SuxOS/.github` workflow, not something fixable from a commit to
+  this repo. Also: #308 already landed `Concurrency.releaseCancelled()` (not
+  `releaseNeutral()`, which #309 guessed pre-merge) — don't add a second,
+  independent method to unblock #309 without first checking whether #303/#308
+  has merged, or it'll duplicate the interface addition and conflict when it
+  lands.
 
 ## Consumers
 
