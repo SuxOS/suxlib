@@ -6,7 +6,8 @@
     ".": "./src/index.ts",
     "./adapters/cli": "./src/adapters/cli.ts",
     "./adapters/http": "./src/adapters/http.ts",
-    "./adapters/mcp": "./src/adapters/mcp.ts"
+    "./adapters/mcp": "./src/adapters/mcp.ts",
+    "./adapters/otel": "./src/adapters/otel.ts"
   },
   "bin": { "suxlib-fileops": "./bin/fileops.mjs" },
   "scripts": { "test": "vitest run", "build": "tsc -p tsconfig.json --noEmit" },
