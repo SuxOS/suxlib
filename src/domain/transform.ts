@@ -787,10 +787,10 @@ function inlineMdToHtml(s: string): string {
       /\[([^\]]*)\]\(([^)]*)\)/g,
       (_m, txt, href) => `<a href="\x00${codes.push(sanitizeUrl(href)) - 1}\x00">${txt}</a>`,
     )
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/__([^_]+)__/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/_([^_]+)_/g, '<em>$1</em>')
+    .replace(/\*\*([^<>]+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^<>]+?)__/g, '<strong>$1</strong>')
+    .replace(/\*([^*<>]+)\*/g, '<em>$1</em>')
+    .replace(/_([^_<>]+)_/g, '<em>$1</em>')
     .replace(/\x00(\d+)\x00/g, (_m, i) => codes[Number(i)])
 }
 

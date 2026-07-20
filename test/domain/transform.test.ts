@@ -277,6 +277,18 @@ test('markdownToHtml still renders emphasis markers inside link text', () => {
   expect(html).toContain('<a href="http://example.com/foo"><em>bold link text</em></a>')
 })
 
+test('markdownToHtml renders nested emphasis inside bold instead of leaving stray asterisks', () => {
+  const html = markdownToHtml('**bold *italic* still bold**')
+  expect(html).toContain('<strong>bold <em>italic</em> still bold</strong>')
+})
+
+test('markdownToHtml does not let a stray emphasis marker span across two separate links', () => {
+  const html = markdownToHtml('[*foo](http://x.test) and [bar*](http://y.test)')
+  expect(html).toContain('<a href="http://x.test">*foo</a>')
+  expect(html).toContain('<a href="http://y.test">bar*</a>')
+  expect(html).not.toContain('<em>')
+})
+
 test('htmlToMarkdown converts headings, lists, links, and code', () => {
   const md = htmlToMarkdown('<h1>Hi</h1><ul><li>one</li><li>two</li></ul><a href="https://x.test">link</a>')
   expect(md).toContain('# Hi')
