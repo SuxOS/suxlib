@@ -84,6 +84,20 @@ test('scrub (Handle-based leaf) round-trips a PNG through a Store and reports th
   expect(detectImageKind(await resolve(store, result.handle))).toBe('png')
 })
 
+test('sanitizeImage drops a PNG eXIf chunk with default Orientation (1) entirely', () => {
+  const png = buildMinimalPng({ exifOrientation: 1 })
+  const result = sanitizeImage(png)
+  expect(findPngChunk(result.bytes, 'eXIf')).toBeNull()
+})
+
+test('sanitizeImage preserves a PNG eXIf chunk carrying a non-default Orientation instead of dropping it', () => {
+  const png = buildMinimalPng({ exifOrientation: 6 })
+  const result = sanitizeImage(png)
+  const exif = findPngChunk(result.bytes, 'eXIf')
+  expect(exif).not.toBeNull()
+  expect(readOrientationLE(exif!)).toBe(6)
+})
+
 test('sanitizeImage rejects an image over MAX_IMAGE_INPUT_BYTES', () => {
   const big = new Uint8Array(MAX_IMAGE_INPUT_BYTES + 1)
   big.set([0x89, 0x50, 0x4e, 0x47])
@@ -338,11 +352,41 @@ function chunk(type: string, data: Uint8Array): Uint8Array {
   dv.setUint32(8 + len, crc32(crcInput))
   return out
 }
-function buildMinimalPng(opts: { tEXt?: boolean }): Uint8Array {
+function findPngChunk(bytes: Uint8Array, type: string): Uint8Array | null {
+  let i = 8
+  while (i + 8 <= bytes.length) {
+    const len = ((bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3]) >>> 0
+    const t = String.fromCharCode(bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7])
+    if (t === type) return bytes.slice(i + 8, i + 8 + len)
+    i += 8 + len + 4
+    if (t === 'IEND') break
+  }
+  return null
+}
+function readOrientationLE(tiff: Uint8Array): number {
+  const ifdOffset = tiff[4] | (tiff[5] << 8) | (tiff[6] << 16) | (tiff[7] << 24)
+  const entryOffset = ifdOffset + 2 // first (only) entry
+  return tiff[entryOffset + 8] | (tiff[entryOffset + 9] << 8)
+}
+function tiffOrientationPayload(orientation: number): Uint8Array {
+  return new Uint8Array([
+    0x49, 0x49, // 'II' little-endian
+    0x2a, 0x00, // TIFF magic 42
+    0x08, 0x00, 0x00, 0x00, // offset to IFD0
+    0x01, 0x00, // 1 entry
+    0x12, 0x01, // tag 0x0112 Orientation
+    0x03, 0x00, // type SHORT
+    0x01, 0x00, 0x00, 0x00, // count 1
+    orientation & 0xff, (orientation >> 8) & 0xff, 0x00, 0x00, // value + padding
+    0x00, 0x00, 0x00, 0x00, // next IFD offset
+  ])
+}
+function buildMinimalPng(opts: { tEXt?: boolean; exifOrientation?: number }): Uint8Array {
   const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
   const ihdr = chunk('IHDR', new Uint8Array(13)) // zeroed header, fine for a metadata-strip test
   const parts = [sig, ihdr]
   if (opts.tEXt) parts.push(chunk('tEXt', new TextEncoder().encode('Comment\0hello')))
+  if (opts.exifOrientation !== undefined) parts.push(chunk('eXIf', tiffOrientationPayload(opts.exifOrientation)))
   parts.push(chunk('IDAT', new Uint8Array([0])))
   parts.push(chunk('IEND', new Uint8Array(0)))
   const total = parts.reduce((n, p) => n + p.length, 0)
