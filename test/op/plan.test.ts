@@ -52,6 +52,14 @@ test('planOpSpec falls back to the fanout\'s own opts per-field, not as a whole 
   expect(plan.usesCache).toBe(true)
 })
 
+test('planOpSpec counts the synthetic mergeOp attempt for a leaf spec with params', () => {
+  // buildOpNode (./spec.ts) inserts a `retries: 0` mergeOp ahead of the real
+  // leaf whenever `params` is present -- that's one more governed attempt.
+  const spec: OpSpec = { tag: 'leaf', name: 'convert', opts: { retries: 2 }, params: { to: 'yaml' } }
+  const plan = planOpSpec(spec)
+  expect(plan.maxRetryMultiplier).toBe(1 + (2 + 1)) // mergeOp attempt + (retries+1)
+})
+
 test('planOpSpec flags usesAsk for an ask node', () => {
   const spec: OpSpec = { tag: 'ask', prompt: 'proceed?', timeout: '5m', onTimeout: 'proceed' }
   const plan = planOpSpec(spec)
