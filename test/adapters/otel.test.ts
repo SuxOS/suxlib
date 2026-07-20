@@ -188,6 +188,31 @@ describe('otel exporter', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
+  it('routes a GovernorEvent to the exact span that produced it by callId, not the innermost sharing name+runId (#380)', async () => {
+    // Two spans open at the identical run/name (e.g. sink.fanout(['a', 'a']))
+    // -- runId alone (#348) can't tell them apart since both share it too. A
+    // retry-attempt tagged with the *first* call's callId must land on that
+    // call's span, not on callId-2's span, even though callId-2 is the one
+    // still open more recently (the pre-#380 name+runId fallback would
+    // always resolve to it).
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      const spans = JSON.parse(req.body).resourceSpans[0].scopeSpans[0].spans
+      const span1 = spans.find((s: any) => s.attributes.some((a: any) => a.key === 'op.path' && a.value.stringValue === '0'))
+      const span2 = spans.find((s: any) => s.attributes.some((a: any) => a.key === 'op.path' && a.value.stringValue === '1'))
+      expect(span1.events.some((e: any) => e.name === 'retry-attempt')).toBe(true)
+      expect(span2.events.some((e: any) => e.name === 'retry-attempt')).toBe(false)
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelExporter({ endpoint: 'https://x', fetchFn })
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1' })
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '1', runId: 'run-1', callId: '2' })
+    exporter.onEvent({ kind: 'retry-attempt', name: 'a', attempt: 0, delayMs: 5, runId: 'run-1', callId: '1' })
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1', durationMs: 1, ok: true })
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '1', runId: 'run-1', callId: '2', durationMs: 1, ok: true })
+    await exporter.flush()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
   it('drops the oldest buffered span once maxBufferedSpans is exceeded', async () => {
     const exporter = createOtelExporter({ endpoint: 'https://x', maxBufferedSpans: 2 })
     for (let i = 0; i < 5; i++) {

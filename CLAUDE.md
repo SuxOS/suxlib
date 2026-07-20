@@ -678,7 +678,26 @@ There is no linter in this repo. Run both locally before pushing.
   kind of field addition — check `test/runtime/inline-trace.test.ts`,
   `test/adapters/otel.test.ts`, and `test/adapters/op-run.test.ts` (the three
   files with literal `TraceEvent` shapes) whenever `TraceEvent`'s shape
-  changes again.
+  changes again. Update (#380): the same gap existed on the `GovernorEvent`
+  side — `runId` alone still collapses two duplicate-named concurrent calls
+  sharing one run (`sink.fanout(['a', 'a'])`) onto whichever span is
+  innermost, since both share `name` *and* `runId` too. `GovernorEvent` now
+  also carries `callId?: string` (`src/control/events.ts`), and `runGoverned`
+  (`src/control/governor.ts`) takes it as a trailing parameter (alongside
+  `runId`) threaded to every gating method (`allow`/`onSuccess`/`onFailure`/
+  `take`/`acquire`/`release`) exactly the way `runId` already is — the value
+  passed in is the *same* `callId` `traced()` minted for that leaf/sink-target
+  call (`traced()`'s `fn` callback now receives `callId` as an argument so
+  `runtime/inline.ts`'s `'leaf'`/`'sink-target'` cases can forward it), not a
+  separately-minted id, so a GovernorEvent and its TraceEvent pair always
+  agree on one id. `createOtelExporter`'s `openByName` stack entries
+  (`src/adapters/otel.ts`) now carry `callId` too, and `onEvent` prefers an
+  exact `callId` match before falling back to `runId`-only, then to
+  innermost-by-name — same three-tier fallback shape as the `runId` fallback
+  it's layered on top of. Any future `GovernorEvent`-emitting primitive needs
+  to accept and stamp this same per-call `callId` argument to stay
+  attributable when duplicate-named calls can share both a leaf name and a
+  run.
 - `src/op/plan.ts`'s `planOpSpec` (#361) is a third non-executing structural
   sibling to `validateOpSpec`/`describePipelineSchema` (`src/op/spec.ts`,
   `src/op/introspect.ts`) — its `maxRetryMultiplier` (Σ(retries+1)) sums over

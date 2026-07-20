@@ -106,7 +106,8 @@ function attrList(attrs: Record<string, AttrValue>): { key: string; value: Retur
 }
 
 function eventAttributes(e: GovernorEvent): Record<string, AttrValue> {
-  const { kind: _kind, name: _name, runId: _runId, ...rest } = e as GovernorEvent & { name?: string; runId?: string }
+  const { kind: _kind, name: _name, runId: _runId, callId: _callId, ...rest } =
+    e as GovernorEvent & { name?: string; runId?: string; callId?: string }
   return rest as Record<string, AttrValue>
 }
 
@@ -151,13 +152,16 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
   // path.
   type OpenEntry = { spanId: string; startNano: bigint; tag: string; name?: string; callId: string }
   const open = new Map<string, Map<string, OpenEntry[]>>()
-  // Keyed by leaf name to a stack of {path, runId} -- runId (#348) lets
-  // onEvent below prefer the span that's actually in the same run as the
-  // GovernorEvent it's attaching, instead of always falling back to "the
+  // Keyed by leaf name to a stack of {path, runId, callId} -- runId (#348)
+  // lets onEvent below prefer the span that's actually in the same run as
+  // the GovernorEvent it's attaching, instead of always falling back to "the
   // innermost span sharing this leaf name" regardless of which run opened
   // it. A GovernorEvent with no runId (a primitive shared outside runInline,
   // or an older caller) still falls back to that old best-effort behavior.
-  const openByName = new Map<string, { path: string; runId: string }[]>()
+  // callId (#380) disambiguates *within* one run+name pair -- runId alone
+  // still collapses two duplicate-named concurrent calls sharing one run
+  // (e.g. sink.fanout(['a', 'a'])) onto whichever is innermost.
+  const openByName = new Map<string, { path: string; runId: string; callId: string }[]>()
   const pendingEventsKey = (runId: string, path: string): string => `${runId}::${path}`
   const pendingEvents = new Map<string, { name: string; timeUnixNano: string; attributes: Record<string, AttrValue> }[]>()
   const finished: OtelSpan[] = []
@@ -186,7 +190,7 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
       pathMap.set(e.path, stack)
       if (e.name) {
         const nameStack = openByName.get(e.name) ?? []
-        nameStack.push({ path: e.path, runId: e.runId })
+        nameStack.push({ path: e.path, runId: e.runId, callId: e.callId })
         openByName.set(e.name, nameStack)
       }
       return
@@ -206,7 +210,7 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     if (e.name) {
       const nameStack = openByName.get(e.name)
       if (nameStack) {
-        const i = nameStack.map(x => x.path === e.path && x.runId === e.runId).lastIndexOf(true)
+        const i = nameStack.findIndex(x => x.callId === e.callId)
         if (i !== -1) nameStack.splice(i, 1)
         if (nameStack.length === 0) openByName.delete(e.name)
       }
@@ -235,14 +239,20 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     if (!name) return
     const stack = openByName.get(name)
     if (!stack || stack.length === 0) return
-    // Prefer the innermost open span that's also in the same run (#348) --
-    // only falling back to "the innermost span sharing this leaf name"
-    // regardless of run when the event carries no runId at all (a primitive
-    // driven outside runInline).
+    // Prefer the exact span this call opened (#380, matched by callId) --
+    // this is what tells apart two duplicate-named concurrent calls sharing
+    // one run (e.g. sink.fanout(['a', 'a'])), which runId alone can't.
+    // Falls back to the innermost open span in the same run (#348) when the
+    // event carries no callId (an older/hand-built GovernorEvent), and
+    // further to the innermost span sharing this leaf name regardless of
+    // run when it carries no runId either (a primitive driven outside
+    // runInline).
     const runId = 'runId' in e ? e.runId : undefined
-    const entry = runId
-      ? [...stack].reverse().find(s => s.runId === runId) ?? stack[stack.length - 1]
-      : stack[stack.length - 1]
+    const callId = 'callId' in e ? e.callId : undefined
+    const entry =
+      (callId ? stack.find(s => s.callId === callId) : undefined) ??
+      (runId ? [...stack].reverse().find(s => s.runId === runId) : undefined) ??
+      stack[stack.length - 1]
     const key = pendingEventsKey(entry.runId, entry.path)
     const list = pendingEvents.get(key) ?? []
     list.push({ name: e.kind, timeUnixNano: (BigInt(Date.now()) * 1_000_000n).toString(), attributes: eventAttributes(e) })

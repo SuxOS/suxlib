@@ -25,16 +25,27 @@
  * to the exact run that produced it instead of falling back to "the
  * innermost span sharing that leaf name" when two concurrent runs share one
  * leaf.
+ *
+ * `callId` (#380, following #366's TraceEvent precedent) disambiguates
+ * *within* one run+name pair -- runId alone still collapses two duplicate-
+ * named concurrent calls in the same run (e.g. sink.fanout(['a', 'a'])) onto
+ * the same target, since both share both `name` and `runId`. `runGoverned`
+ * (governor.ts) is handed the exact same callId its caller's `traced()`
+ * wrapper (runtime/inline.ts) minted for this call, and threads it through
+ * each governor primitive's gating method the same way it already threads
+ * `runId` -- so a shared onEvent sink (otel.ts) can match a GovernorEvent to
+ * the one open span that actually produced it, not just the innermost one
+ * sharing its name and run.
  */
 export type GovernorEvent =
-  | { kind: 'breaker-open'; nowMs: number; name?: string; runId?: string }
-  | { kind: 'breaker-half-open'; nowMs: number; name?: string; runId?: string }
-  | { kind: 'breaker-close'; nowMs: number; name?: string; runId?: string }
-  | { kind: 'aimd-increase'; limit: number; name?: string; runId?: string }
-  | { kind: 'aimd-decrease'; limit: number; name?: string; runId?: string }
-  | { kind: 'token-wait'; attempt: number; delayMs: number; name?: string; runId?: string }
-  | { kind: 'retry-attempt'; name: string; attempt: number; delayMs: number; runId?: string }
-  | { kind: 'memo-hit'; name: string; runId?: string }
-  | { kind: 'memo-miss'; name: string; runId?: string }
+  | { kind: 'breaker-open'; nowMs: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'breaker-half-open'; nowMs: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'breaker-close'; nowMs: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'aimd-increase'; limit: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'aimd-decrease'; limit: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'token-wait'; attempt: number; delayMs: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'retry-attempt'; name: string; attempt: number; delayMs: number; runId?: string; callId?: string }
+  | { kind: 'memo-hit'; name: string; runId?: string; callId?: string }
+  | { kind: 'memo-miss'; name: string; runId?: string; callId?: string }
 
 export type GovernorEventHandler = (e: GovernorEvent) => void
