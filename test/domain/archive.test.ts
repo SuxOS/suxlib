@@ -300,6 +300,10 @@ test('gzipCreate/gzipExtract round-trips an explicit mtime, and omits it when no
   expect(gzipExtract(noMtime).mtime).toBeUndefined()
 })
 
+test('gzipCreate rejects a negative mtime instead of silently wrapping it', () => {
+  expect(() => gzipCreate(strToU8('hi'), -86400000)).toThrow(/negative/)
+})
+
 test('tarCreate/tarExtract round-trips an explicit per-file mtime, including 0', () => {
   const mtime = 1_700_000_000_000
   const packed = tarCreate([{ name: 'a.txt', data: strToU8('AAA'), mtime }])

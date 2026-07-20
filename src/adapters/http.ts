@@ -142,6 +142,11 @@ const routes: Route[] = [
       const format = (body.format ?? 'zip') as ArchiveFormat
       if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, gzip, or tar.gz'))
       if (!Array.isArray(body.files) || !body.files.length) return errorResponse(new Error('`files` array required'))
+      for (const f of body.files) {
+        if (f.mtime !== undefined && !(typeof f.mtime === 'number' && Number.isFinite(f.mtime))) {
+          return errorResponse(new Error(`file '${f.name}' has a non-numeric mtime`))
+        }
+      }
       const entries = body.files.map((f) => ({ name: f.name, data: b64ToBytes(f.base64), mtime: f.mtime }))
       const out = archiveCreate(format, entries)
       return json({ format, mime: ARCHIVE_MIME[format], bytes: out.length, base64: bytesToB64(out) })

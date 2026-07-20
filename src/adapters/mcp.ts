@@ -317,7 +317,30 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         // into cooperative cancellation (#279) unless a host-supplied
         // opRunGOpts already declares one.
         const signal = extra?.signal
-        const gOpts = signal ? { ...opts.opRunGOpts, signal: opts.opRunGOpts?.signal ?? signal } : opts.opRunGOpts
+        let gOpts = signal ? { ...opts.opRunGOpts, signal: opts.opRunGOpts?.signal ?? signal } : opts.opRunGOpts
+        // Bridge #215's live per-node onTrace stream to MCP's standard
+        // notifications/progress, keyed off the request's progressToken --
+        // only when the client actually asked for progress (opted in by
+        // sending one). progress/total are per-run node-visit counts (not a
+        // percentage; the total node count isn't knowable up front), which
+        // still gives a client visibility that the run is alive and moving
+        // rather than none until the whole call resolves. Additive to any
+        // host-supplied onTrace, same pattern as the signal wiring above.
+        const progressToken = extra?._meta?.progressToken
+        if (progressToken !== undefined) {
+          const userOnTrace = gOpts?.onTrace
+          let progress = 0
+          gOpts = {
+            ...gOpts,
+            onTrace: (e) => {
+              userOnTrace?.(e)
+              if (e.kind === 'node-exit') {
+                progress++
+                extra.sendNotification({ method: 'notifications/progress', params: { progressToken, progress, message: e.path || e.tag } }).catch(() => {})
+              }
+            },
+          }
+        }
         return textResult(await runOpSpec({ spec, input, trace }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, gOpts, ask: opts.opRunAsk }))
       },
     )

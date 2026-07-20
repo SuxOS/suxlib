@@ -300,8 +300,20 @@ export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {
 
 // ---------- gzip ----------
 
+// Gzip's on-disk MTIME (RFC 1952 §2.3.1) is an unsigned 4-byte seconds
+// count, the same non-negative-integer shape as tar's mtime field --
+// mirrors assertTarMtimeNotNegative. mtime === 0 is fflate's documented
+// "omit the timestamp" sentinel (see the comment below), not a real
+// pre-1970 value, so it's exempt from this check.
+function assertGzipMtimeNotNegative(mtime: number): void {
+  if (mtime !== 0 && mtime < 0) {
+    throw new Error(`gzip mtime (${mtime}) is negative, which gzip's unsigned MTIME field can't represent — negative mtimes are rejected instead of wrapping to a bogus far-future timestamp.`)
+  }
+}
+
 export function gzipCreate(data: Uint8Array, mtime = 0, filename?: string): Uint8Array {
   if (data.length > MAX_UNPACK_BYTES) throw new Error(`archive input totals more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
+  assertGzipMtimeNotNegative(mtime)
   // fflate only omits the header's wall-clock MTIME when mtime is exactly 0
   // (any other value, including undefined, embeds Date.now()) — default to 0
   // so gzipCreate(tarCreate(files)) stays fully deterministic end to end.
