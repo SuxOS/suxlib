@@ -200,8 +200,12 @@ const isValidSinkTarget = (t: unknown): boolean => {
   if (typeof o.name !== 'string' || !o.name) return false
   if (o.opts === undefined) return true
   if (typeof o.opts !== 'object' || o.opts === null || Array.isArray(o.opts)) return false
-  const r = (o.opts as OpSpecSinkOpts).retries
-  return r === undefined || (Number.isInteger(r) && r >= 0 && r <= MAX_LEAF_RETRIES)
+  const targetOpts = o.opts as OpSpecSinkOpts
+  const r = targetOpts.retries
+  if (r !== undefined && !(Number.isInteger(r) && r >= 0 && r <= MAX_LEAF_RETRIES)) return false
+  if (targetOpts.heavy !== undefined && typeof targetOpts.heavy !== 'boolean') return false
+  if (targetOpts.memo !== undefined && typeof targetOpts.memo !== 'boolean') return false
+  return true
 }
 
 /**
@@ -255,6 +259,12 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       }
       if (o.kind !== undefined && o.kind !== 'pure' && o.kind !== 'effect') {
         errors.push({ path, message: `leaf "${spec.name}": \`opts.kind\` must be "pure" or "effect"` })
+      }
+      if (o.heavy !== undefined && typeof o.heavy !== 'boolean') {
+        errors.push({ path, message: `leaf "${spec.name}": \`opts.heavy\` must be a boolean` })
+      }
+      if (o.memo !== undefined && typeof o.memo !== 'boolean') {
+        errors.push({ path, message: `leaf "${spec.name}": \`opts.memo\` must be a boolean` })
       }
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         errors.push({ path, message: `leaf "${spec.name}": \`params\` must be an object` })
@@ -313,6 +323,12 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
         errors.push({ path, message: `sink: \`opts.retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}` })
       }
+      if (spec.opts?.heavy !== undefined && typeof spec.opts.heavy !== 'boolean') {
+        errors.push({ path, message: 'sink: `opts.heavy` must be a boolean' })
+      }
+      if (spec.opts?.memo !== undefined && typeof spec.opts.memo !== 'boolean') {
+        errors.push({ path, message: 'sink: `opts.memo` must be a boolean' })
+      }
       return
     }
     case 'reconcile': {
@@ -369,6 +385,12 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       if (o.kind !== undefined && o.kind !== 'pure' && o.kind !== 'effect') {
         throw new Error(`leaf "${spec.name}": \`opts.kind\` must be "pure" or "effect"`)
+      }
+      if (o.heavy !== undefined && typeof o.heavy !== 'boolean') {
+        throw new Error(`leaf "${spec.name}": \`opts.heavy\` must be a boolean`)
+      }
+      if (o.memo !== undefined && typeof o.memo !== 'boolean') {
+        throw new Error(`leaf "${spec.name}": \`opts.memo\` must be a boolean`)
       }
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         throw new Error(`leaf "${spec.name}": \`params\` must be an object`)
@@ -431,6 +453,12 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       const so = spec.opts?.retries
       if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
         throw new Error(`sink: \`opts.retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}`)
+      }
+      if (spec.opts?.heavy !== undefined && typeof spec.opts.heavy !== 'boolean') {
+        throw new Error('sink: `opts.heavy` must be a boolean')
+      }
+      if (spec.opts?.memo !== undefined && typeof spec.opts.memo !== 'boolean') {
+        throw new Error('sink: `opts.memo` must be a boolean')
       }
       return sink.fanout(spec.targets, spec.opts)
     }
