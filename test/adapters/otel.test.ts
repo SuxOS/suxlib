@@ -83,6 +83,39 @@ describe('otel exporter', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps duplicate-named concurrent spans\' GovernorEvents separate, e.g. sink.fanout([\'a\', \'a\']) (#357)', async () => {
+    let spans: any[] = []
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      spans = JSON.parse(req.body).resourceSpans[0].scopeSpans[0].spans
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelExporter({ endpoint: 'https://x', fetchFn })
+    const path = '/sink/a'
+    const attemptsOf = (s: any) =>
+      s.events.filter((e: any) => e.name === 'retry-attempt').map((e: any) => e.attributes.find((a: any) => a.key === 'attempt')?.value.intValue)
+    // Mirrors sink.fanout(['a', 'a']): both targets share one name, path, and
+    // runId, so they're indistinguishable at the GovernorEvent level -- but
+    // the first target's own retry-attempt (attempt 0) fires while it's the
+    // *only* open entry, before the second target (attempt 1) even opens. A
+    // shared (runId, path)-keyed pendingEvents bucket would fold attempt 0
+    // into whichever span exits first once the second entry opens, leaving
+    // the first target's own span with none of its own events at flush time.
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path, runId: 'run-A' })
+    exporter.onEvent({ kind: 'retry-attempt', name: 'a', attempt: 0, delayMs: 1, runId: 'run-A' })
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path, runId: 'run-A' })
+    exporter.onEvent({ kind: 'retry-attempt', name: 'a', attempt: 1, delayMs: 2, runId: 'run-A' })
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path, runId: 'run-A', durationMs: 1, ok: true })
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path, runId: 'run-A', durationMs: 1, ok: true })
+    await exporter.flush()
+    expect(spans).toHaveLength(2)
+    // The first span to exit (the second-opened entry, still topmost) must
+    // carry only attempt 1 -- not also attempt 0, which fired while it was
+    // the *other* entry's own event. The second span to exit must still have
+    // attempt 0, not an empty list drained by the sibling's earlier exit.
+    expect(attemptsOf(spans[0])).toEqual(['1'])
+    expect(attemptsOf(spans[1])).toEqual(['0'])
+  })
+
   it('scopes a GovernorEvent to the run that produced it, not just the innermost span sharing its leaf name (#348)', async () => {
     const traceIdOf = (runId: string) => runId.replace(/-/g, '')
     const fetchFn = vi.fn(async (_url: any, req: any) => {
