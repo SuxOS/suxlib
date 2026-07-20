@@ -30,6 +30,7 @@ export function fixed(n: number): Concurrency {
   return {
     async acquire(signal?: AbortSignal) { await enqueue(q, pump, signal) },
     release() { inflight--; pump() },
+    releaseCancelled() { inflight--; pump() },
   }
 }
 
@@ -55,5 +56,9 @@ export function aimd(opts: { start?: number; min?: number; max?: number; onEvent
       }
       pump()
     },
+    // A cancelled attempt is neither a success nor a failure -- it never ran
+    // to completion, so it must not move `limit`/`successes` either way, only
+    // free the slot (#309).
+    releaseCancelled() { inflight--; pump() },
   }
 }

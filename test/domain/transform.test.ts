@@ -32,6 +32,12 @@ test('toYaml/parseYaml round-trip objects, arrays, and multiline strings', () =>
   expect(parseYaml(toYaml(obj))).toEqual(obj)
 })
 
+test('toYaml/parseYaml round-trip a bare top-level scalar document (#376)', () => {
+  expect(parseYaml(toYaml('hello'))).toBe('hello')
+  expect(parseYaml(toYaml(42))).toBe(42)
+  expect(parseYaml(toYaml(true))).toBe(true)
+})
+
 test('toYaml/parseYaml round-trip a nested array (array-of-arrays) instead of silently corrupting it (#352)', () => {
   const obj = { a: [[1, 2], [3, 4]] }
   expect(toYaml(obj)).toBe('a:\n  - - 1\n    - 2\n  - - 3\n    - 4')

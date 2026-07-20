@@ -346,6 +346,25 @@ test('reports failure to an AIMD concurrency limiter on a rejected attempt, halv
   expect(limiter.limit).toBe(4)
 })
 
+test('releases the concurrency slot neutrally (not as a failure) when fn() itself throws OpAbortError (#309)', async () => {
+  const limiter = aimd({ start: 8, min: 1 })
+  const fn = async () => { throw new OpAbortError() }
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency: limiter }, noSleep),
+  ).rejects.toBeInstanceOf(OpAbortError)
+  expect(limiter.limit).toBe(8)
+})
+
+test('falls back to release(true) for a Concurrency without releaseCancelled when fn() throws OpAbortError', async () => {
+  const events: boolean[] = []
+  const limiter = { acquire: async () => {}, release: (ok: boolean) => { events.push(ok) } }
+  const fn = async () => { throw new OpAbortError() }
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency: limiter }, noSleep),
+  ).rejects.toBeInstanceOf(OpAbortError)
+  expect(events).toEqual([true])
+})
+
 test('releases the concurrency slot when the token bucket throws, without ever acquiring it', async () => {
   const limiter = fixed(1)
   let acquireCalls = 0

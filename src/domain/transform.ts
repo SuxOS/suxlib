@@ -187,6 +187,11 @@ export function parseYaml(text: string): unknown {
     const first = lines[i]
     if (first === undefined) return null
     if (/^\s*-(\s|$)/.test(first)) return parseSeq(minIndent, depth)
+    // A bare top-level scalar document ("hello", "42", the output of
+    // toYaml('hello')/toYaml(1e21)) has no ':' at all -- splitKey returns
+    // null for it, which would otherwise fall through into parseMap and
+    // silently produce {} (#376) instead of round-tripping the scalar.
+    if (!splitKey(first)) { i++; return parseScalar(first.trim()) }
     return parseMap(minIndent, depth)
   }
   function parseSeq(minIndent: number, depth: number): unknown[] {

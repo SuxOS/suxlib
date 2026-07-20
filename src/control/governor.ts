@@ -166,13 +166,24 @@ export async function runGoverned(
       if (concurrency) { await concurrency.acquire(gOpts.signal); acquired = true }
       result = await fn(input, caps, idemKey)
     } catch (err) {
-      if (acquired) concurrency!.release(false, runId)
-      if (probeReserved) breaker!.releaseHalfOpenProbe()
       // A queued tokenBucket.take/concurrency.acquire aborting (#297) throws
       // here too, having never reached fn() -- must not be misclassified as
       // a leaf failure (breaker bookkeeping, a spurious retry-attempt event),
-      // same principle as the post-success-bookkeeping guard below (#275).
-      if (err instanceof OpAbortError) throw err
+      // same principle as the post-success-bookkeeping guard below (#275). This
+      // also covers a future abort-aware fn() throwing OpAbortError itself
+      // (#309): release the concurrency slot neutrally (not release(false),
+      // which would wrongly punish an AIMD limiter's throughput for a
+      // cancellation rather than a real failure) before rethrowing.
+      if (err instanceof OpAbortError) {
+        if (acquired) {
+          if (concurrency!.releaseCancelled) concurrency!.releaseCancelled(runId)
+          else concurrency!.release(true, runId)
+        }
+        if (probeReserved) breaker!.releaseHalfOpenProbe()
+        throw err
+      }
+      if (acquired) concurrency!.release(false, runId)
+      if (probeReserved) breaker!.releaseHalfOpenProbe()
       breaker?.onFailure(caps.clock.now(), runId)
       if (attempt >= maxRetries) throw err
       const delayMs = backoffFullJitter(attempt, backoff, gOpts.rand)
