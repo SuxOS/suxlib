@@ -556,3 +556,23 @@ describe('cli `pipeline validate` (real CLI entry point)', () => {
     logSpy.mockRestore()
   })
 })
+
+describe('cli `pipeline plan` (real CLI entry point)', () => {
+  it('prints a non-executing cost/capability audit without running the spec (#361)', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    writeFileSync(specPath, JSON.stringify({
+      spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'extract', opts: { retries: 2 } }, { tag: 'map', op: { tag: 'leaf', name: 'stamp' }, concurrency: 5 }] },
+    }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'plan', specPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string)
+    expect(printed.nodeCount).toBe(4) // pipe + leaf + map + leaf
+    expect(printed.maxConcurrency).toBe(5)
+    expect(printed.maxRetryMultiplier).toBe(3 + 1) // extract retries:2 -> 3, stamp default -> 1
+    expect(printed.usesLlm).toBe(true)
+    expect(printed.llmLeaves).toEqual(['extract'])
+    logSpy.mockRestore()
+  })
+})

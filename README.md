@@ -122,6 +122,15 @@ first problem it finds), validate walks the whole spec and returns every error i
 pass — `{ valid, errors: [{ path, message }] }` — so a caller composing a nontrivial
 spec doesn't need one round-trip per mistake.
 
+To estimate a spec's blast radius before actually running it, all three adapters also
+expose a non-executing plan: `POST /op/plan`, the `plan_pipeline` MCP tool, and
+`suxlib-fileops pipeline plan <spec-file>`. It reports total node count, the widest
+`map`/`mapField` `concurrency` declared anywhere in the tree, the worst-case
+Σ(retries+1) retry multiplier across every leaf/sink, and which optional capabilities
+(`ask`, `cache` via `opts.memo`, `llm` via `extract`/`summarize`, and named `sink`
+targets) the spec will reach if run — all figures a caller can compute from the spec's
+own shape, without touching `caps.store`/`llm`/`sinks` or building the real `Op` tree.
+
 ## Development
 
 ```sh

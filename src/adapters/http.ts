@@ -12,6 +12,7 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
+import { planOpSpec } from '../op/plan.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm, Ask } from '../effects/types.js'
 import type { RunGovernedOpts } from '../control/governor.js'
@@ -257,6 +258,15 @@ const routes: Route[] = [
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
       const errors = validateOpSpec(body.spec as OpSpec, env.opRunLeaves)
       return json({ valid: errors.length === 0, errors })
+    },
+  },
+  {
+    method: 'POST',
+    path: '/op/plan',
+    handle: async (rawBody) => {
+      const body = rawBody as { spec?: unknown }
+      if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
+      return json(planOpSpec(body.spec as OpSpec))
     },
   },
 ]

@@ -15,6 +15,7 @@ import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
+import { planOpSpec } from '../op/plan.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm, Ask } from '../effects/types.js'
 import type { RunGovernedOpts } from '../control/governor.js'
@@ -349,6 +350,21 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         const errors = validateOpSpec(spec, opts.opRunLeaves)
         return textResult({ valid: errors.length === 0, errors })
       },
+    )
+  }
+
+  if (enabled('plan_pipeline')) {
+    server.registerTool(
+      'plan_pipeline',
+      {
+        description:
+          'Report a non-executing cost/capability audit for a `run_pipeline` OpSpec: total node count, the widest ' +
+          'declared map/mapField concurrency, the worst-case Σ(retries+1) retry multiplier across every leaf/sink, ' +
+          'and which optional capabilities (ask, cache/memo, llm, named sink targets) the spec will reach if run -- ' +
+          'lets a caller estimate blast radius and check readiness against its own Caps before actually running a spec.',
+        inputSchema: { spec: opSpecSchema },
+      },
+      async ({ spec }) => textResult(planOpSpec(spec)),
     )
   }
 }

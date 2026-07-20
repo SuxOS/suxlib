@@ -16,6 +16,7 @@ import { runOpSpec, type OpRunOpts } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
+import { planOpSpec } from '../op/plan.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 const program = new Command()
@@ -386,6 +387,21 @@ pipelineCmd
     const errors = validateOpSpec(parsed.spec as OpSpec, runOpts.leaves)
     console.log(JSON.stringify({ valid: errors.length === 0, errors }, null, 2))
     if (errors.length) process.exitCode = 1
+  })
+
+/** Non-executing cost/capability audit (#361) -- reports node count, worst-case
+ * map/mapField concurrency, worst-case Σ(retries+1) retry multiplier, and which
+ * optional Caps fields (ask/cache/llm/sink targets) the spec will reach if run,
+ * without touching caps.store/llm/sinks or building the actual Op tree. See
+ * src/op/plan.ts's planOpSpec doc for the full breakdown. */
+pipelineCmd
+  .command('plan')
+  .description('Report a non-executing cost/capability audit for a JSON op-tree spec (node count, worst-case concurrency/retries, Caps reachability)')
+  .argument('<spec-file>', 'JSON file: { spec: OpSpec }')
+  .action(async (specFile: string) => {
+    const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown }
+    if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
+    console.log(JSON.stringify(planOpSpec(parsed.spec as OpSpec), null, 2))
   })
 
 /** Re-exported for tests: the actual dispatch logic is `dispatchTransform` in

@@ -33,7 +33,7 @@ describe('mcp adapter', () => {
 
   it('lists the expected tools', async () => {
     const { tools } = await client.listTools()
-    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline', 'describe_pipeline', 'validate_pipeline'].sort())
+    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline', 'describe_pipeline', 'validate_pipeline', 'plan_pipeline'].sort())
   })
 
   it('transform: happy path json -> yaml', async () => {
@@ -281,6 +281,19 @@ describe('mcp adapter', () => {
     expect(body.valid).toBe(false)
     expect(body.errors.some((e) => /unknown leaf "nope-1"/.test(e.message))).toBe(true)
     expect(body.errors.some((e) => /unknown leaf "nope-2"/.test(e.message))).toBe(true)
+  })
+
+  it('plan_pipeline: reports a non-executing cost/capability audit (#361)', async () => {
+    const result = await client.callTool({
+      name: 'plan_pipeline',
+      arguments: { spec: { tag: 'map', op: { tag: 'leaf', name: 'extract' }, concurrency: 3 } },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { nodeCount: number; maxConcurrency: number; usesLlm: boolean; llmLeaves: string[] }
+    expect(body.nodeCount).toBe(2)
+    expect(body.maxConcurrency).toBe(3)
+    expect(body.usesLlm).toBe(true)
+    expect(body.llmLeaves).toEqual(['extract'])
   })
 })
 
