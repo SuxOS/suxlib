@@ -678,7 +678,24 @@ There is no linter in this repo. Run both locally before pushing.
   kind of field addition — check `test/runtime/inline-trace.test.ts`,
   `test/adapters/otel.test.ts`, and `test/adapters/op-run.test.ts` (the three
   files with literal `TraceEvent` shapes) whenever `TraceEvent`'s shape
-  changes again.
+  changes again. Update (#380): `runId` alone still can't disambiguate two
+  duplicate-named leaves/sink-targets *within one run* that each
+  independently emit their own `GovernorEvent` (both retry, say) — both land
+  on `openByName`'s innermost entry, starving the outer one, since `runId`
+  is identical for both. `GovernorEvent` now also carries `callId` (`src/
+  control/events.ts`), and `runGoverned` (`src/control/governor.ts`) takes it
+  as a second trailing parameter alongside `runId`, threading it into every
+  gating method (`allow`/`onSuccess`/`onFailure`/`take`/`release`) the same
+  way `runId` already was — `runInline`'s `traced()` wrapper now hands its
+  own per-node `callId` into the `fn` it wraps (`fn: (callId: string) =>
+  ...`) so the `'leaf'`/`'sink-target'` call sites can pass the identical id
+  into `runGoverned`. `createOtelExporter`'s `onEvent` (`src/adapters/
+  otel.ts`) now prefers an exact `callId` match before falling back to
+  `runId`, then to innermost-by-name. Any future governor primitive needs to
+  accept and stamp this same per-call `callId` (as a plain parameter, not
+  construction-time tagging, same reasoning as `runId`) to stay exactly
+  attributable when it can be invoked more than once concurrently for the
+  same leaf name within one run.
 - `src/op/plan.ts`'s `planOpSpec` (#361) is a third non-executing structural
   sibling to `validateOpSpec`/`describePipelineSchema` (`src/op/spec.ts`,
   `src/op/introspect.ts`) — its `maxRetryMultiplier` (Σ(retries+1)) sums over

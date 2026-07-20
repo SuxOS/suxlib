@@ -32,19 +32,29 @@ let traceCallSeq = 0
 // src/control/trace.ts) when gOpts.onTrace is supplied; a bare passthrough
 // otherwise -- no timing call, no event object, no try/catch -- so tracing
 // costs nothing when a caller doesn't ask for it.
-async function traced<T>(tag: string, name: string | undefined, path: string, runId: string, caps: Caps, gOpts: RunGovernedOpts | undefined, fn: () => Promise<T>): Promise<T> {
+//
+// `fn` is handed the callId minted for this node (#380) so a 'leaf'/
+// 'sink-target' call site can pass the identical id into runGoverned, which
+// stamps it onto every GovernorEvent it causes a governor primitive to
+// emit -- letting a shared onEvent sink (src/adapters/otel.ts) match a
+// GovernorEvent to the exact call, not just the exact run, the same way
+// TraceEvent's own callId (#366) already disambiguates two duplicate-named
+// concurrent spans. When tracing is off (no onTrace), a callId is still
+// minted so runGoverned always has one to stamp -- it just never appears in
+// a TraceEvent.
+async function traced<T>(tag: string, name: string | undefined, path: string, runId: string, caps: Caps, gOpts: RunGovernedOpts | undefined, fn: (callId: string) => Promise<T>): Promise<T> {
   // Cooperative-cancellation checkpoint (#279): every node runInline
   // dispatches -- leaf, pipe step, map/mapField item, reconcile, sink
   // fanout/target, ask, catch's try -- passes through here before it starts,
   // so one check here is equivalent to a check at every one of those sites.
   if (gOpts?.signal?.aborted) throw new OpAbortError()
-  const onTrace = gOpts?.onTrace
-  if (!onTrace) return fn()
   const callId = String(++traceCallSeq)
+  const onTrace = gOpts?.onTrace
+  if (!onTrace) return fn(callId)
   const t0 = caps.clock.now()
   onTrace({ kind: 'node-enter', tag, name, path, runId, callId })
   try {
-    const result = await fn()
+    const result = await fn(callId)
     onTrace({ kind: 'node-exit', tag, name, path, runId, callId, durationMs: caps.clock.now() - t0, ok: true })
     return result
   } catch (err) {
@@ -63,8 +73,8 @@ async function traced<T>(tag: string, name: string | undefined, path: string, ru
 export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGovernedOpts, path = '', runId: string = crypto.randomUUID()): Promise<any> {
   switch (node.tag) {
     case 'leaf':
-      return traced('leaf', node.name, path, runId, caps, gOpts, () =>
-        runGoverned(node.name, node.opts, node.fn, input, caps, caps.governors?.[node.name], gOpts, runId))
+      return traced('leaf', node.name, path, runId, caps, gOpts, (callId) =>
+        runGoverned(node.name, node.opts, node.fn, input, caps, caps.governors?.[node.name], gOpts, runId, callId))
     case 'pipe':
       return traced('pipe', undefined, path, runId, caps, gOpts, async () => {
         let v = input
@@ -138,7 +148,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
           // retries by declaring its own `opts: { retries: 0 }`.
           const name = typeof t === 'string' ? t : t.name
           const targetOpts = typeof t === 'string' ? undefined : t.opts
-          return traced('sink-target', name, childPath(path, name), runId, caps, gOpts, async () => {
+          return traced('sink-target', name, childPath(path, name), runId, caps, gOpts, async (callId) => {
             const s = caps.sinks[name]
             if (!s) throw new Error(`unknown sink "${name}" (registered: ${Object.keys(caps.sinks).join(', ')})`)
             // Each write runs through runGoverned exactly like an 'effect' leaf's
@@ -152,7 +162,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
               heavy: targetOpts?.heavy ?? node.opts?.heavy,
               memo: targetOpts?.memo ?? node.opts?.memo,
             }
-            return runGoverned(governorName, opts, (v, c) => s.write(v, c), input, caps, caps.governors?.[governorName], gOpts, runId)
+            return runGoverned(governorName, opts, (v, c) => s.write(v, c), input, caps, caps.governors?.[governorName], gOpts, runId, callId)
           })
         }))
         throwFirstOrAggregate(results, 'sink')

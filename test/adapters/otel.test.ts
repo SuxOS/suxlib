@@ -220,6 +220,32 @@ describe('otel exporter', () => {
     expect(spans[1].events[0].name).toBe('retry-attempt')
   })
 
+  it('routes a GovernorEvent to the correct one of two duplicate-name-and-runId spans via callId (#380)', async () => {
+    let spans: any[] = []
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      spans = JSON.parse(req.body).resourceSpans[0].scopeSpans[0].spans
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelExporter({ endpoint: 'https://x', fetchFn })
+    // Two spans open at the identical path/runId/name (sink.fanout(['a',
+    // 'a'])): callId '1' pushed first, callId '2' pushed second. Unlike the
+    // #357 test above, each duplicate target here emits its *own*
+    // GovernorEvent (both retry independently) carrying its own callId --
+    // before #380, onEvent only matched on name+runId, so both events would
+    // land on the same (innermost, callId '2') span's list, starving callId
+    // '1' entirely even though its own retry-attempt was meant for it.
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1' })
+    exporter.onTrace({ kind: 'node-enter', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '2' })
+    exporter.onEvent({ kind: 'retry-attempt', name: 'a', attempt: 0, delayMs: 5, runId: 'run-1', callId: '1' })
+    exporter.onEvent({ kind: 'retry-attempt', name: 'a', attempt: 0, delayMs: 5, runId: 'run-1', callId: '2' })
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '1', durationMs: 1, ok: true })
+    exporter.onTrace({ kind: 'node-exit', tag: 'sink-target', name: 'a', path: '0', runId: 'run-1', callId: '2', durationMs: 1, ok: true })
+    await exporter.flush()
+    expect(spans).toHaveLength(2)
+    expect(spans[0].events).toHaveLength(1)
+    expect(spans[1].events).toHaveLength(1)
+  })
+
   it('drops the oldest buffered span once maxBufferedSpans is exceeded', async () => {
     const exporter = createOtelExporter({ endpoint: 'https://x', maxBufferedSpans: 2 })
     for (let i = 0; i < 5; i++) {
