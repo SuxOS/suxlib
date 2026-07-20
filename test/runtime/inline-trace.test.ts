@@ -161,7 +161,7 @@ test('runInline\'s onTrace and gOpts.onEvent are independent streams: supplying 
   const trace: TraceEvent[] = []
   const result = await runInline(leaf, null, clockCaps(), { onEvent: (e) => events.push(e), onTrace: (e) => trace.push(e), sleep: async () => {} })
   expect(result).toBe('ok')
-  expect(events).toEqual([{ kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number) }])
+  expect(events).toEqual([{ kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number), runId: expect.any(String) }])
   expect(trace).toEqual([
     { kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String) },
     { kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String), durationMs: expect.any(Number), ok: true },

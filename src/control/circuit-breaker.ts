@@ -4,9 +4,9 @@ export type BreakerState = 'closed' | 'open' | 'half-open'
 
 export interface CircuitBreaker {
   readonly state: BreakerState
-  allow(nowMs: number): boolean
-  onSuccess(nowMs: number): void
-  onFailure(nowMs: number): void
+  allow(nowMs: number, runId?: string): boolean
+  onSuccess(nowMs: number, runId?: string): void
+  onFailure(nowMs: number, runId?: string): void
   // Caps concurrent half-open probes at one (spec §7's livelock guard). Owned by
   // the breaker itself rather than an external map keyed on instance identity, so
   // a durable CircuitBreaker (backing caps.governors for a future sux-side
@@ -39,42 +39,42 @@ export function circuitBreaker(opts: {
     releaseHalfOpenProbe() {
       halfOpenProbeInFlight = false
     },
-    allow(nowMs) {
+    allow(nowMs, runId) {
       if (state === 'open') {
         if (nowMs - openedAtMs >= opts.cooldownMs) {
           state = 'half-open'
           consecutiveSuccesses = 0
-          opts.onEvent?.({ kind: 'breaker-half-open', nowMs })
+          opts.onEvent?.({ kind: 'breaker-half-open', nowMs, runId })
           return true
         }
         return false
       }
       return true
     },
-    onSuccess(nowMs) {
+    onSuccess(nowMs, runId) {
       if (state === 'half-open') {
         if (++consecutiveSuccesses >= opts.halfOpenSuccesses) {
           state = 'closed'
           consecutiveFailures = 0
           consecutiveSuccesses = 0
-          opts.onEvent?.({ kind: 'breaker-close', nowMs })
+          opts.onEvent?.({ kind: 'breaker-close', nowMs, runId })
         }
         return
       }
       consecutiveFailures = 0
     },
-    onFailure(nowMs) {
+    onFailure(nowMs, runId) {
       if (state === 'half-open') {
         state = 'open'
         openedAtMs = nowMs
         consecutiveSuccesses = 0
-        opts.onEvent?.({ kind: 'breaker-open', nowMs })
+        opts.onEvent?.({ kind: 'breaker-open', nowMs, runId })
         return
       }
       if (++consecutiveFailures >= opts.failureThreshold) {
         state = 'open'
         openedAtMs = nowMs
-        opts.onEvent?.({ kind: 'breaker-open', nowMs })
+        opts.onEvent?.({ kind: 'breaker-open', nowMs, runId })
       }
     },
   }

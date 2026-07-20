@@ -21,17 +21,23 @@
 // the real wall-clock time its node-enter arrived (not caps.clock, which
 // tests often fake) and adds durationMs on top for the end.
 //
-// GovernorEvents are keyed by leaf `name` only, not `runId`/`path` -- the
-// same leaf name can be open at more than one path (or run) at once
-// (concurrent map/mapField items, or two concurrent runs sharing a leaf
-// name), so there's no exact way to attach an event to "the" span that
-// caused it. This attaches to the innermost (most recently entered, still
-// open) span sharing that name -- a best-effort approximation, not a precise
-// correlation; see #334's own scoping note. #346 only closes this gap on the
-// TraceEvent/span side -- GovernorEvent deliberately stays name-keyed (its
-// own issue's accepted fallback), since threading `runId` through it too
-// would change GovernorEvent's shape and every onEvent consumer along with
-// it, which is out of scope here.
+// GovernorEvents are keyed by leaf `name` first (#334's original scoping),
+// but now also disambiguated by `runId` when the event carries one (#348):
+// `openByName` tracks {path, runId} pairs per name, and `onEvent` prefers the
+// innermost still-open entry whose `runId` matches the event's own, only
+// falling back to "the innermost span sharing this name" (the old,
+// run-blind behavior) when the event has no `runId` at all -- a primitive
+// driven outside `runGoverned`/`runInline`. `runGoverned` (src/control/
+// governor.ts) threads the calling runInline's `runId` into every governor
+// primitive's gating method (allow/onSuccess/onFailure/take/release), and
+// each primitive stamps it onto the GovernorEvent it emits -- the same
+// call-scoped-id approach #346 used for TraceEvent, applied one layer
+// further in. This still isn't a mathematical guarantee (two concurrent runs
+// sharing one leaf name that also somehow share one runId -- not possible
+// with runInline's crypto.randomUUID() default, but a caller-supplied
+// gOpts/runId scheme could theoretically collide), but it closes the gap for
+// the realistic production shape #348 called out: two concurrent calls of
+// the same op-tree sharing one leaf name.
 //
 // onTrace/onEvent must never throw: src/runtime/inline.ts's traced() calls
 // onTrace directly inside its try, so a throw from here on the success path
@@ -100,7 +106,7 @@ function attrList(attrs: Record<string, AttrValue>): { key: string; value: Retur
 }
 
 function eventAttributes(e: GovernorEvent): Record<string, AttrValue> {
-  const { kind: _kind, name: _name, ...rest } = e as GovernorEvent & { name?: string }
+  const { kind: _kind, name: _name, runId: _runId, ...rest } = e as GovernorEvent & { name?: string; runId?: string }
   return rest as Record<string, AttrValue>
 }
 
@@ -145,7 +151,14 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
   // path.
   type OpenEntry = { spanId: string; startNano: bigint; tag: string; name?: string }
   const open = new Map<string, Map<string, OpenEntry[]>>()
-  const openByName = new Map<string, string[]>()
+  // Keyed by leaf name to a stack of {path, runId} -- runId (#348) lets
+  // onEvent below prefer the span that's actually in the same run as the
+  // GovernorEvent it's attaching, instead of always falling back to "the
+  // innermost span sharing this leaf name" regardless of which run opened
+  // it. A GovernorEvent with no runId (a primitive shared outside runInline,
+  // or an older caller) still falls back to that old best-effort behavior.
+  const openByName = new Map<string, { path: string; runId: string }[]>()
+  const pendingEventsKey = (runId: string, path: string): string => `${runId}::${path}`
   const pendingEvents = new Map<string, { name: string; timeUnixNano: string; attributes: Record<string, AttrValue> }[]>()
   const finished: OtelSpan[] = []
 
@@ -173,7 +186,7 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
       pathMap.set(e.path, stack)
       if (e.name) {
         const nameStack = openByName.get(e.name) ?? []
-        nameStack.push(e.path)
+        nameStack.push({ path: e.path, runId: e.runId })
         openByName.set(e.name, nameStack)
       }
       return
@@ -187,7 +200,7 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     if (e.name) {
       const nameStack = openByName.get(e.name)
       if (nameStack) {
-        const i = nameStack.lastIndexOf(e.path)
+        const i = nameStack.map(x => x.path === e.path && x.runId === e.runId).lastIndexOf(true)
         if (i !== -1) nameStack.splice(i, 1)
         if (nameStack.length === 0) openByName.delete(e.name)
       }
@@ -196,8 +209,8 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     const parentSpanId = pPath === undefined ? undefined : peekOpen(pathMap, pPath)?.spanId
     if (pathMap.size === 0) open.delete(e.runId)
     const endNano = entry.startNano + BigInt(Math.round(e.durationMs * 1_000_000))
-    const events = pendingEvents.get(e.path) ?? []
-    pendingEvents.delete(e.path)
+    const events = pendingEvents.get(pendingEventsKey(e.runId, e.path)) ?? []
+    pendingEvents.delete(pendingEventsKey(e.runId, e.path))
     pushFinished({
       traceId: traceIdOf(e.runId),
       spanId: entry.spanId,
@@ -216,10 +229,18 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     if (!name) return
     const stack = openByName.get(name)
     if (!stack || stack.length === 0) return
-    const path = stack[stack.length - 1]
-    const list = pendingEvents.get(path) ?? []
+    // Prefer the innermost open span that's also in the same run (#348) --
+    // only falling back to "the innermost span sharing this leaf name"
+    // regardless of run when the event carries no runId at all (a primitive
+    // driven outside runInline).
+    const runId = 'runId' in e ? e.runId : undefined
+    const entry = runId
+      ? [...stack].reverse().find(s => s.runId === runId) ?? stack[stack.length - 1]
+      : stack[stack.length - 1]
+    const key = pendingEventsKey(entry.runId, entry.path)
+    const list = pendingEvents.get(key) ?? []
     list.push({ name: e.kind, timeUnixNano: (BigInt(Date.now()) * 1_000_000n).toString(), attributes: eventAttributes(e) })
-    pendingEvents.set(path, list)
+    pendingEvents.set(key, list)
   }
 
   async function flush(): Promise<void> {

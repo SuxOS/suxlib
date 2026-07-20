@@ -100,6 +100,17 @@ export function createGovernor(name: string, spec: GovernorSpec, onEvent?: Gover
  * (same graceful-degradation pattern as `caps.ask` being optional) rather
  * than an error, so a leaf declaring `memo: true` still runs fine against a
  * Caps that hasn't wired a Cache yet.
+ *
+ * `runId` (#348) is the calling runInline call's own id (see inline.ts's
+ * header comment on why it's minted once per top-level call and passed
+ * unchanged through every recursive call) -- passed here as a plain
+ * parameter, not folded into `gOpts`, since `gOpts` is a caller-supplied
+ * object that may be reused across separate top-level runInline calls (the
+ * exact multi-run-sharing scenario #348 exists to disambiguate), so mutating
+ * it with a per-call runId would reintroduce the same cross-run ambiguity
+ * one layer up. Every governor primitive's gating method
+ * (allow/onSuccess/onFailure/take/release) takes it as an optional trailing
+ * arg and stamps it onto the GovernorEvent it emits.
  */
 export async function runGoverned(
   name: string,
@@ -109,14 +120,15 @@ export async function runGoverned(
   caps: Caps,
   governor: Governor | undefined,
   gOpts: RunGovernedOpts = {},
+  runId?: string,
 ): Promise<any> {
   if (opts.memo && caps.cache) {
     const key = await memoKey(name, input)
     const cached = await caps.cache.get(key)
-    if (cached !== undefined) { gOpts.onEvent?.({ kind: 'memo-hit', name }); return cached }
-    const result = await runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts)
+    if (cached !== undefined) { gOpts.onEvent?.({ kind: 'memo-hit', name, runId }); return cached }
+    const result = await runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts, runId)
     await caps.cache.put(key, result)
-    gOpts.onEvent?.({ kind: 'memo-miss', name })
+    gOpts.onEvent?.({ kind: 'memo-miss', name, runId })
     return result
   }
   const maxRetries = opts.retries ?? 0
@@ -141,7 +153,7 @@ export async function runGoverned(
     if (gOpts.signal?.aborted) throw new OpAbortError()
     let probeReserved = false
     if (breaker) {
-      if (!breaker.allow(caps.clock.now())) throw new CircuitOpenError(name)
+      if (!breaker.allow(caps.clock.now(), runId)) throw new CircuitOpenError(name)
       if (breaker.state === 'half-open') {
         if (!breaker.reserveHalfOpenProbe()) throw new CircuitOpenError(name)
         probeReserved = true
@@ -150,21 +162,21 @@ export async function runGoverned(
     let acquired = false
     let result: Awaited<ReturnType<typeof fn>>
     try {
-      if (gated && governor?.tokenBucket) await governor.tokenBucket.take(1, caps.clock, sleep, gOpts.signal)
+      if (gated && governor?.tokenBucket) await governor.tokenBucket.take(1, caps.clock, sleep, gOpts.signal, runId)
       if (concurrency) { await concurrency.acquire(gOpts.signal); acquired = true }
       result = await fn(input, caps, idemKey)
     } catch (err) {
-      if (acquired) concurrency!.release(false)
+      if (acquired) concurrency!.release(false, runId)
       if (probeReserved) breaker!.releaseHalfOpenProbe()
       // A queued tokenBucket.take/concurrency.acquire aborting (#297) throws
       // here too, having never reached fn() -- must not be misclassified as
       // a leaf failure (breaker bookkeeping, a spurious retry-attempt event),
       // same principle as the post-success-bookkeeping guard below (#275).
       if (err instanceof OpAbortError) throw err
-      breaker?.onFailure(caps.clock.now())
+      breaker?.onFailure(caps.clock.now(), runId)
       if (attempt >= maxRetries) throw err
       const delayMs = backoffFullJitter(attempt, backoff, gOpts.rand)
-      gOpts.onEvent?.({ kind: 'retry-attempt', name, attempt, delayMs })
+      gOpts.onEvent?.({ kind: 'retry-attempt', name, attempt, delayMs, runId })
       await sleepOrAbort(sleep, delayMs, gOpts.signal)
       continue
     }
@@ -174,9 +186,9 @@ export async function runGoverned(
     // misclassified as a leaf failure, which would double-release the
     // concurrency slot and reopen a breaker that just legitimately closed
     // (#275).
-    if (acquired) concurrency!.release(true)
+    if (acquired) concurrency!.release(true, runId)
     if (probeReserved) breaker!.releaseHalfOpenProbe()
-    breaker?.onSuccess(caps.clock.now())
+    breaker?.onSuccess(caps.clock.now(), runId)
     return result
   }
 }

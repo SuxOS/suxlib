@@ -58,7 +58,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
   switch (node.tag) {
     case 'leaf':
       return traced('leaf', node.name, path, runId, caps, gOpts, () =>
-        runGoverned(node.name, node.opts, node.fn, input, caps, caps.governors?.[node.name], gOpts))
+        runGoverned(node.name, node.opts, node.fn, input, caps, caps.governors?.[node.name], gOpts, runId))
     case 'pipe':
       return traced('pipe', undefined, path, runId, caps, gOpts, async () => {
         let v = input
@@ -146,7 +146,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
               heavy: targetOpts?.heavy ?? node.opts?.heavy,
               memo: targetOpts?.memo ?? node.opts?.memo,
             }
-            return runGoverned(governorName, opts, (v, c) => s.write(v, c), input, caps, caps.governors?.[governorName], gOpts)
+            return runGoverned(governorName, opts, (v, c) => s.write(v, c), input, caps, caps.governors?.[governorName], gOpts, runId)
           })
         }))
         throwFirstOrAggregate(results, 'sink')
