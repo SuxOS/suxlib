@@ -211,6 +211,14 @@ There is no linter in this repo. Run both locally before pushing.
   `WeakMap` instead of inferring from shape — any future marker attribute whose
   decoded value can itself be an array must thread through that same `forceArray`
   path rather than relying on `Array.isArray(cur)`.
+- `src/domain/transform.ts`'s `inlineMdToHtml` placeholder-pool trick (shielding
+  code-span/link content from the later `**`/`__`/`*`/`_` emphasis regexes via
+  `\x00N\x00` tokens) must protect exactly the sensitive substring, not the whole
+  enclosing construct — pooling the entire `<a href="...">${txt}</a>` output (#321's
+  fix for the href-corruption bug #317) also swallowed the link *text*, silently
+  breaking emphasis markers inside link text (#323). Push only `sanitizeUrl(href)`
+  into the pool and leave `txt` in the template literal so later passes still reach
+  it.
 - Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
   `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
   `circuitBreaker` gating for `effect` leaves is configured separately, via
