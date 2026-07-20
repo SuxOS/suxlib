@@ -331,7 +331,25 @@ There is no linter in this repo. Run both locally before pushing.
   `mapField` item-level `node.concurrency.acquire()` calls (`src/runtime/
   inline.ts:58,72`) — a different, unnamed limiter from `governor.ts`'s
   per-leaf one, out of #297's stated scope, so a map item queued behind a
-  full fan-out limiter still can't be cancelled early.
+  full fan-out limiter still can't be cancelled early. Update: #303 (open PR
+  #308) and #234 (open PR #241) are both stuck on the *same* org-level infra
+  gap #320 tracks — `.suxos-ci/scripts/classify-security-noverdict.sh` is
+  missing from the reusable `security-review` workflow, so it fails closed
+  on every PR that hits it regardless of diff content. #309 (proposing
+  `runGoverned`'s catch use a neutral-release outcome, matching #303's fix)
+  and #242 (a snapshot-byte budget guard on #234's `trace: 'full'` feature)
+  are follow-ups to those two still-unmerged PRs — grepped `Concurrency`
+  (`src/op/types.ts`) and `src/control/trace.ts` as of this note and neither
+  `releaseCancelled()`/`releaseNeutral()` nor `snapshotValue`/`traceSnapshots`
+  exist on `main` yet. Don't reimplement either prerequisite speculatively to
+  unblock its follow-up — a prior stale branch (`bot/issue-build-29707704140`,
+  PR #304, closed unmerged) already found #303 actually landed the method as
+  `releaseCancelled()`, not the `releaseNeutral()` name #309 itself guesses,
+  so building the follow-up first risks a name mismatch/duplicate interface
+  member once the real PR lands. Drop #309/#242 as blocked (not superseded)
+  until #308/#241 merge, and re-check `gh pr checks 308`/`241` rather than
+  assuming the infra gap is still open by the time either issue is next
+  claimed.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
