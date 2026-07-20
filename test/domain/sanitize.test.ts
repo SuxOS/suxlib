@@ -44,6 +44,20 @@ test('redactText only redacts a bare 9-digit SSN when nearby context labels it',
   expect(unlabeled.redacted).toContain('123456789')
 })
 
+test('redactText also honors a trailing SSN label, not just a leading one', () => {
+  const trailing = redactText('123456789 is my SSN')
+  expect(trailing.redacted).toContain('[REDACTED:ssn]')
+  const trailingPhrase = redactText('Please use 123456789 (this is your social security number)')
+  expect(trailingPhrase.redacted).toContain('[REDACTED:ssn]')
+})
+
+test('redactText does not let an earlier pattern\'s own [REDACTED:ssn] placeholder count as context for an unrelated bare number', () => {
+  const out = redactText('Invoice 987654321 near tax id 123-45-6789.')
+  expect(out.redacted).toContain('987654321')
+  expect(out.redacted).toContain('[REDACTED:ssn]')
+  expect(out.counts.ssn).toBe(1)
+})
+
 test('redact (Handle-based leaf) round-trips text through a Store and reports the same counts as redactText', async () => {
   const store = new MemoryStore()
   const handle = await putText(store, 'contact a@b.com')

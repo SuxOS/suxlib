@@ -18,6 +18,14 @@ export type RedactType = (typeof REDACT_TYPES)[number]
 // clear (e.g. "SSN: 123456789") — otherwise it's left alone to avoid false positives.
 const BARE_SSN_CONTEXT_WINDOW = 30
 const BARE_SSN_CONTEXT_RE = /\b(?:ssn|social\s*security)\b/i
+// PATTERNS runs earlier entries' full replace pass before later ones, over the
+// same reassigned `text`, so by the time the bare-SSN pattern's context check
+// runs, `text` may already contain an earlier pattern's own "[REDACTED:ssn]"
+// placeholder nearby -- whose literal "ssn" would otherwise satisfy
+// BARE_SSN_CONTEXT_RE and redact an unrelated bare number that has no real
+// label in the original input. Strip placeholders out of the context window
+// before testing it so a prior redaction can never masquerade as context.
+const REDACTED_PLACEHOLDER_RE = /\[REDACTED:\w+\]/g
 
 const PATTERNS: Array<{ type: RedactType; re: RegExp; bare?: boolean }> = [
   { type: 'email', re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
@@ -77,8 +85,10 @@ export function redactText(text: string, types?: RedactType[]): RedactResult {
       if (type === 'credit_card' && !luhnOk(m)) return m
       if (type === 'ip' && !ipv4Ok(m)) return m
       if (bare) {
+        const hasContext = (window: string) => BARE_SSN_CONTEXT_RE.test(window.replace(REDACTED_PLACEHOLDER_RE, ''))
         const start = Math.max(0, offset - BARE_SSN_CONTEXT_WINDOW)
-        if (!BARE_SSN_CONTEXT_RE.test(text.slice(start, offset))) return m
+        const labeled = hasContext(text.slice(start, offset)) || hasContext(text.slice(offset + m.length, offset + m.length + BARE_SSN_CONTEXT_WINDOW))
+        if (!labeled) return m
       }
       counts[type] = (counts[type] ?? 0) + 1
       return `[REDACTED:${type}]`
