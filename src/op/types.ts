@@ -18,6 +18,11 @@ export interface SinkOpts { retries?: number; heavy?: boolean; memo?: boolean }
 // gets retries: 0, without composing two separate sink() nodes via pipe.
 export type SinkFanoutTarget = string | { name: string; opts?: SinkOpts }
 export type LeafFn = (input: any, caps: Caps, idempotencyKey?: string) => Promise<any>
+// A saga step's `compensate`, if present, undoes `op`'s effect against `op`'s
+// own output -- e.g. `op` uploads to S3 and `compensate` deletes what it just
+// uploaded. A step with no `compensate` simply has nothing to undo if a later
+// step fails (its own success is left standing).
+export type SagaStep = { op: Op; compensate?: Op }
 export type Op =
   | { tag: 'leaf'; name: string; fn: LeafFn; opts: LeafOpts }
   | { tag: 'pipe'; steps: Op[] }
@@ -27,3 +32,4 @@ export type Op =
   | { tag: 'sink'; targets: SinkFanoutTarget[]; opts?: SinkOpts }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
   | { tag: 'catch'; try: Op; catch: Op }
+  | { tag: 'saga'; steps: SagaStep[] }

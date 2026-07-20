@@ -1,4 +1,4 @@
-import type { Op, LeafFn, LeafOpts, SinkOpts, SinkFanoutTarget, Concurrency } from './types.js'
+import type { Op, LeafFn, LeafOpts, SinkOpts, SinkFanoutTarget, Concurrency, SagaStep } from './types.js'
 import type { ReconcileOpts } from './reconcile.js'
 export const op = (name: string, fn: LeafFn, opts: LeafOpts): Op => ({ tag: 'leaf', name, fn, opts })
 export const pipe = (...steps: Op[]): Op => ({ tag: 'pipe', steps })
@@ -24,3 +24,10 @@ export const ask = (prompt: string, o: { timeout: string; onTimeout: 'proceed' |
 // whole pipe -- closes #183. Named `catchOp`, not `catch`, since `catch` is a reserved word and
 // can't be a const binding -- the Op tag itself is still 'catch'.
 export const catchOp = (tryOp: Op, fallbackOp: Op): Op => ({ tag: 'catch', try: tryOp, catch: fallbackOp })
+// Runs `steps` in order, like pipe -- but if any step throws, runs every
+// already-succeeded step's own `compensate` (if it declared one) in reverse
+// (LIFO) order against that step's output, before the original error
+// propagates -- closes #354: undoing already-succeeded effect steps when a
+// later step in a multi-step pipe fails (e.g. a completed S3 upload gets
+// deleted if a downstream sink write then fails).
+export const saga = (steps: SagaStep[]): Op => ({ tag: 'saga', steps })

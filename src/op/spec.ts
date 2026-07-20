@@ -1,6 +1,6 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, mapField, sink, reconcile, catchOp, ask } from './combinators.js'
+import { op, pipe, map, mapField, sink, reconcile, catchOp, ask, saga } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
@@ -18,6 +18,7 @@ export type OpSpec =
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
+  | { tag: 'saga'; steps: { op: OpSpec; compensate?: OpSpec }[] }
 
 // Exported (not module-private) so mcp.ts's opSpecSchema and op/introspect.ts's
 // describePipelineSchema derive their field-policy/reconcile-mode enums from
@@ -30,7 +31,7 @@ export const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merg
 // run_pipeline tool description, README's tag union prose) from this one
 // array instead of re-enumerating the tag literals, which drifted twice
 // already (#166, #158) before drifting a third time for reconcile/ask (#213).
-export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask'] as const satisfies readonly OpSpec['tag'][]
+export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask', 'saga'] as const satisfies readonly OpSpec['tag'][]
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -368,8 +369,25 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') errors.push({ path, message: 'ask spec\'s `onTimeout` must be "proceed" or "fail"' })
       return
     }
+    case 'saga': {
+      if (!Array.isArray(spec.steps) || !spec.steps.length) {
+        errors.push({ path, message: 'saga spec requires a non-empty `steps` array' })
+        return
+      }
+      spec.steps.forEach((s, i) => {
+        if (!s || typeof s !== 'object' || !s.op) {
+          errors.push({ path: `${path}.steps[${i}]`, message: 'saga step requires an `op`' })
+        } else {
+          collectSpecErrors(s.op, leaves, `${path}.steps[${i}].op`, errors)
+        }
+        if (s && typeof s === 'object' && s.compensate !== undefined) {
+          collectSpecErrors(s.compensate, leaves, `${path}.steps[${i}].compensate`, errors)
+        }
+      })
+      return
+    }
     default:
-      errors.push({ path, message: `unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)` })
+      errors.push({ path, message: `unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask, saga)` })
   }
 }
 
@@ -494,7 +512,15 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') throw new Error('ask spec\'s `onTimeout` must be "proceed" or "fail"')
       return ask(spec.prompt, { timeout: spec.timeout, onTimeout: spec.onTimeout })
     }
+    case 'saga': {
+      if (!Array.isArray(spec.steps) || !spec.steps.length) throw new Error('saga spec requires a non-empty `steps` array')
+      const steps = spec.steps.map((s, i) => {
+        if (!s || typeof s !== 'object' || !s.op) throw new Error(`saga step ${i} requires an \`op\``)
+        return { op: buildOpNode(s.op, leaves), compensate: s.compensate !== undefined ? buildOpNode(s.compensate, leaves) : undefined }
+      })
+      return saga(steps)
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask, saga)`)
   }
 }

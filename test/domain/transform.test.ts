@@ -300,6 +300,16 @@ test('htmlToMarkdown converts headings, lists, links, and code', () => {
   expect(md).toContain('[link](https://x.test)')
 })
 
+test('htmlToMarkdown keeps a nested <ul> as an indented sub-list instead of merging it into the parent item', () => {
+  const md = htmlToMarkdown('<ul><li>Item 1<ul><li>Sub 1</li></ul></li></ul>')
+  expect(md).toBe('- Item 1\n  - Sub 1')
+})
+
+test('htmlToMarkdown keeps sibling items after a nested list intact', () => {
+  const md = htmlToMarkdown('<ul><li>A<ol><li>A.1</li><li>A.2</li></ol></li><li>B</li></ul>')
+  expect(md).toBe('- A\n  1. A.1\n  2. A.2\n- B')
+})
+
 test('htmlToMarkdown does not double-decode doubly-encoded entities inside inline tags', () => {
   expect(dispatchTransform('<strong>&amp;#65;</strong>', 'html', 'markdown')).toBe('**&#65;**')
   expect(dispatchTransform('<p>plain &amp;amp; text</p>', 'html', 'markdown')).toBe('plain &amp; text')

@@ -730,13 +730,88 @@ function inlineToMd(s: string): string {
     .trim()
 }
 
-function listItems(html: string, ordered: boolean): string {
-  const items: string[] = []
-  const re = /<li\b[^>]*>([\s\S]*?)<\/li>/gi
+// Finds the tag boundaries that close a `tag` opened just before `from`,
+// tracking nested same-name tags by depth so a sub-list's/sub-item's own
+// closing tag isn't mistaken for the outer one's (a flat lazy regex stops at
+// the *first* closing tag found, which for `<ul><li>x<ul>...</ul></li></ul>`
+// is the inner list's, corrupting nested <ul>/<ol>/<li> content).
+function findBalancedClose(html: string, tag: string, from: number): { contentEnd: number; tagEnd: number } | null {
+  const re = new RegExp(`<${tag}\\b[^>]*>|<\\/${tag}\\s*>`, 'gi')
+  re.lastIndex = from
+  let depth = 1
   let m: RegExpExecArray | null
+  while ((m = re.exec(html))) {
+    if (m[0].startsWith('</')) {
+      if (--depth === 0) return { contentEnd: m.index, tagEnd: m.index + m[0].length }
+    } else {
+      depth++
+    }
+  }
+  return null
+}
+
+// Converts one <li>'s inner HTML to Markdown, recursing into a nested
+// <ul>/<ol> (if any) as an indented sub-list instead of letting it fall
+// through to inlineToMd's tag-stripping, which would silently discard the
+// sub-list's structure and run its text straight into the parent item's.
+function itemContentToMd(html: string, depth: number): string {
+  const m = /<(ul|ol)\b[^>]*>/i.exec(html)
+  if (!m) return inlineToMd(html)
+  const tag = m[1].toLowerCase()
+  const contentStart = m.index + m[0].length
+  const close = findBalancedClose(html, tag, contentStart)
+  const contentEnd = close ? close.contentEnd : html.length
+  const before = inlineToMd(html.slice(0, m.index))
+  const indent = '  '.repeat(depth + 1)
+  const nested = listItems(html.slice(contentStart, contentEnd), tag === 'ol', depth + 1)
+    .split('\n')
+    .map((l) => `${indent}${l}`)
+    .join('\n')
+  const after = itemContentToMd(html.slice(close ? close.tagEnd : html.length), depth)
+  return [before, nested, after].filter((part, i) => i === 0 || part !== '').join('\n')
+}
+
+function listItems(html: string, ordered: boolean, depth = 0): string {
+  const items: string[] = []
+  const openRe = /<li\b[^>]*>/gi
   let n = 1
-  while ((m = re.exec(html))) items.push(`${ordered ? `${n++}.` : '-'} ${inlineToMd(m[1])}`)
+  let m: RegExpExecArray | null
+  while ((m = openRe.exec(html))) {
+    const contentStart = m.index + m[0].length
+    const close = findBalancedClose(html, 'li', contentStart)
+    const contentEnd = close ? close.contentEnd : html.length
+    items.push(`${ordered ? `${n++}.` : '-'} ${itemContentToMd(html.slice(contentStart, contentEnd), depth)}`)
+    openRe.lastIndex = close ? close.tagEnd : html.length
+  }
   return items.join('\n')
+}
+
+// Replaces each top-level <ul>/<ol> block with its rendered Markdown,
+// finding each block's true closing tag via findBalancedClose rather than a
+// flat regex -- see findBalancedClose's own comment for why that matters.
+function replaceLists(html: string): string {
+  let out = ''
+  let i = 0
+  const openRe = /<(ul|ol)\b[^>]*>/gi
+  while (i < html.length) {
+    openRe.lastIndex = i
+    const m = openRe.exec(html)
+    if (!m) {
+      out += html.slice(i)
+      break
+    }
+    const tag = m[1].toLowerCase()
+    const contentStart = m.index + m[0].length
+    const close = findBalancedClose(html, tag, contentStart)
+    if (!close) {
+      out += html.slice(i)
+      break
+    }
+    out += html.slice(i, m.index)
+    out += `\x00${listItems(html.slice(contentStart, close.contentEnd), tag === 'ol')}\x00`
+    i = close.tagEnd
+  }
+  return out
 }
 
 export function htmlToMarkdown(html: string): string {
@@ -753,8 +828,7 @@ export function htmlToMarkdown(html: string): string {
   s = s.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, txt) =>
     `\x00${inlineToMd(txt).split('\n').map((l: string) => `> ${l}`.trimEnd()).join('\n')}\x00`,
   )
-  s = s.replace(/<ul\b[^>]*>([\s\S]*?)<\/ul>/gi, (_m, txt) => `\x00${listItems(txt, false)}\x00`)
-  s = s.replace(/<ol\b[^>]*>([\s\S]*?)<\/ol>/gi, (_m, txt) => `\x00${listItems(txt, true)}\x00`)
+  s = replaceLists(s)
   s = s.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (_m, txt) => `\x00${inlineToMd(txt)}\x00`)
   s = s
     .split('\x00')

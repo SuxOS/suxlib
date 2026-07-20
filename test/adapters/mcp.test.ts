@@ -238,6 +238,35 @@ describe('mcp adapter', () => {
     expect(parseResult(result)).toEqual({ a: 1 })
   })
 
+  it('run_pipeline: a saga spec reaches buildOp through the MCP tool schema (not silently stripped), compensating an already-succeeded sink write when a later step fails (#354)', async () => {
+    const written: unknown[] = []
+    const sagaServer = new McpServer({ name: 'test-saga', version: '0.0.0' })
+    registerFileopsTools(sagaServer, { opRunSinks: { undo: { name: 'undo', write: async (v) => { written.push(v); return v } } } })
+    const sagaClient = new Client({ name: 'test-saga-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([sagaServer.connect(serverTransport), sagaClient.connect(clientTransport)])
+
+    const result = await sagaClient.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: {
+          tag: 'saga',
+          steps: [
+            { op: { tag: 'sink', targets: ['store'] }, compensate: { tag: 'sink', targets: ['undo'] } },
+            // unwrapHandle throws on a plain object with no `handle` field, forcing the compensation above to run
+            { op: { tag: 'leaf', name: 'unwrapHandle' } },
+          ],
+        },
+        input: { a: 1 },
+      },
+    })
+    expect(result.isError).toBeTruthy()
+    expect(written).toEqual([{ a: 1 }])
+
+    await sagaClient.close()
+    await sagaServer.close()
+  })
+
   it('run_pipeline: an ask spec reaches buildOp through the MCP tool schema (not silently stripped), degrading gracefully with no Ask capability wired (#181)', async () => {
     const result = await client.callTool({
       name: 'run_pipeline',

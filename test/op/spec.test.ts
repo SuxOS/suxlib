@@ -496,6 +496,59 @@ test('buildOp rejects an ask spec missing `prompt`/`timeout` or with a bad `onTi
   expect(() => buildOp({ tag: 'ask', prompt: 'x', timeout: '5m', onTimeout: 'nope' } as unknown as OpSpec)).toThrow(/onTimeout/)
 })
 
+test('buildOp builds a saga node that compensates an already-succeeded step\'s own sink write when a later step fails (#354)', async () => {
+  const { store } = caps()
+  const written: string[] = []
+  const spec: OpSpec = {
+    tag: 'saga',
+    steps: [
+      { op: { tag: 'sink', targets: ['primary'] }, compensate: { tag: 'sink', targets: ['undo'] } },
+      { op: { tag: 'leaf', name: 'nope-always-fails' } },
+    ],
+  }
+  const tree = buildOp(spec, { 'nope-always-fails': async () => { throw new Error('step 2 failed') } })
+  const sinks = {
+    primary: { name: 'primary', write: async (v: any) => { written.push(`primary:${v}`); return v } },
+    undo: { name: 'undo', write: async (v: any) => { written.push(`undo:${v}`); return v } },
+  }
+  await expect(runInline(tree, 'payload', { store, llm: {} as any, clock: { now: () => 0 }, sinks })).rejects.toThrow('step 2 failed')
+  expect(written).toEqual(['primary:payload', 'undo:payload'])
+})
+
+test('buildOp\'s saga node runs no compensation when every step succeeds', async () => {
+  const { store } = caps()
+  let compensated = false
+  const spec: OpSpec = {
+    tag: 'saga',
+    steps: [
+      { op: { tag: 'leaf', name: 'id' }, compensate: { tag: 'leaf', name: 'undo' } },
+    ],
+  }
+  const tree = buildOp(spec, { id: async (v: any) => v, undo: async (v: any) => { compensated = true; return v } })
+  const result = await runInline(tree, 'payload', { store, llm: {} as any, clock: { now: () => 0 }, sinks: {} })
+  expect(result).toBe('payload')
+  expect(compensated).toBe(false)
+})
+
+test('buildOp rejects a saga spec with an empty `steps` array, or a step missing `op`', () => {
+  expect(() => buildOp({ tag: 'saga', steps: [] } as unknown as OpSpec)).toThrow(/non-empty `steps`/)
+  expect(() => buildOp({ tag: 'saga', steps: [{}] } as unknown as OpSpec)).toThrow(/requires an `op`/)
+})
+
+test('validateOpSpec collects saga step errors, including inside a step\'s `op`/`compensate`, without stopping at the first', () => {
+  const spec = {
+    tag: 'saga',
+    steps: [
+      { op: { tag: 'leaf', name: 'nope' }, compensate: { tag: 'leaf', name: 'also-nope' } },
+      {},
+    ],
+  } as unknown as OpSpec
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => /unknown leaf "nope"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /unknown leaf "also-nope"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /requires an `op`/.test(e.message))).toBe(true)
+})
+
 test('validateOpSpec returns an empty array for a well-formed spec, mirroring buildOp not throwing (#208)', () => {
   const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'unzip' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 }] }
   expect(validateOpSpec(spec)).toEqual([])

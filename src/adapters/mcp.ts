@@ -83,6 +83,12 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
   z.object({ tag: z.literal('catch'), try: opSpecSchema, catch: opSpecSchema }),
   z.object({ tag: z.literal('ask'), prompt: z.string(), timeout: z.string(), onTimeout: z.enum(['proceed', 'fail']) }),
+  z.object({
+    tag: z.literal('saga'),
+    // A step's `compensate` undoes that step's own effect (its op's output),
+    // not the saga's original input -- see src/op/types.ts's SagaStep doc.
+    steps: z.array(z.object({ op: opSpecSchema, compensate: opSpecSchema.optional() })).min(1),
+  }),
 ]))
 
 export type RegisterFileopsToolsOptions = {

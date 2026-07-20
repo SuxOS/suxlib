@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
-import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
+import { op, pipe, map, mapField, reconcile, sink, catchOp, saga } from '../../src/op/combinators.js'
 import { fixed } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
@@ -175,6 +175,73 @@ test('runInline\'s catch does not run the fallback when the try branch fails due
   )
   await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
   expect(fallbackRan).toBe(false)
+})
+
+test('runInline runs a saga to completion without compensating anything when every step succeeds (#354)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let compensated = false
+  const tree = saga([
+    { op: op('double', async (n: number) => n * 2, { kind: 'pure' }), compensate: op('undo', async (n: number) => { compensated = true; return n }, { kind: 'pure' }) },
+    { op: op('addOne', async (n: number) => n + 1, { kind: 'pure' }) },
+  ])
+  const result = await runInline(tree, 5, caps)
+  expect(result).toBe(11)
+  expect(compensated).toBe(false)
+})
+
+test('runInline compensates every already-succeeded saga step, in LIFO order, against that step\'s own output, when a later step fails (#354)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const compensations: number[] = []
+  const tree = saga([
+    { op: op('double', async (n: number) => n * 2, { kind: 'pure' }), compensate: op('undoDouble', async (n: number) => { compensations.push(n); return n }, { kind: 'pure' }) },
+    { op: op('addOne', async (n: number) => n + 1, { kind: 'pure' }), compensate: op('undoAddOne', async (n: number) => { compensations.push(n); return n }, { kind: 'pure' }) },
+    { op: op('boom', async () => { throw new Error('step 3 failed') }, { kind: 'pure' }) },
+  ])
+  await expect(runInline(tree, 5, caps)).rejects.toThrow('step 3 failed')
+  expect(compensations).toEqual([11, 10])
+})
+
+test('runInline skips a saga step with no `compensate` while still unwinding its other already-succeeded siblings (#354)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const compensations: number[] = []
+  const tree = saga([
+    { op: op('double', async (n: number) => n * 2, { kind: 'pure' }), compensate: op('undoDouble', async (n: number) => { compensations.push(n); return n }, { kind: 'pure' }) },
+    { op: op('addOne', async (n: number) => n + 1, { kind: 'pure' }) },
+    { op: op('boom', async () => { throw new Error('step 3 failed') }, { kind: 'pure' }) },
+  ])
+  await expect(runInline(tree, 5, caps)).rejects.toThrow('step 3 failed')
+  expect(compensations).toEqual([10])
+})
+
+test('runInline throws an AggregateError bundling the original failure with any compensation that itself failed (#354)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = saga([
+    { op: op('double', async (n: number) => n * 2, { kind: 'pure' }), compensate: op('undoDouble', async () => { throw new Error('compensation failed') }, { kind: 'pure' }) },
+    { op: op('boom', async () => { throw new Error('step 2 failed') }, { kind: 'pure' }) },
+  ])
+  try {
+    await runInline(tree, 5, caps)
+    expect.unreachable()
+  } catch (err) {
+    expect(err).toBeInstanceOf(AggregateError)
+    const agg = err as AggregateError
+    expect(agg.errors).toHaveLength(2)
+    expect(agg.errors.map((e: Error) => e.message)).toEqual(['step 2 failed', 'compensation failed'])
+  }
+})
+
+test('runInline\'s saga does not run any compensation when a later step is stopped by abort before it starts (#354)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  let compensated = false; let thirdStepRan = false
+  const tree = saga([
+    { op: op('double', async (n: number) => n * 2, { kind: 'pure' }), compensate: op('undo', async (n: number) => { compensated = true; return n }, { kind: 'pure' }) },
+    { op: op('abortNext', async (n: number) => { controller.abort(); return n }, { kind: 'pure' }) },
+    { op: op('never', async (n: number) => { thirdStepRan = true; return n }, { kind: 'pure' }) },
+  ])
+  await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(thirdStepRan).toBe(false)
+  expect(compensated).toBe(false)
 })
 
 test('runInline cancels a map item still queued behind a full item-level concurrency limiter once aborted (#301)', async () => {

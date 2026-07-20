@@ -181,5 +181,35 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
           return runInline(node.catch, input, caps, gOpts, childPath(path, 'catch'), runId)
         }
       })
+    case 'saga':
+      return traced('saga', undefined, path, runId, caps, gOpts, async () => {
+        let v = input
+        // Each already-succeeded step's own output, paired with its optional
+        // compensate op -- a compensation undoes *that* step's effect, so it
+        // runs against what the step itself produced, not the saga's original input.
+        const succeeded: { compensate: Op | undefined; output: any }[] = []
+        try {
+          for (let i = 0; i < node.steps.length; i++) {
+            const step = node.steps[i]
+            v = await runInline(step.op, v, caps, gOpts, childPath(path, i), runId)
+            succeeded.push({ compensate: step.compensate, output: v })
+          }
+          return v
+        } catch (err) {
+          // Mirrors 'catch' above: an abort is a control signal from outside
+          // the tree, not an application failure -- it must skip compensation
+          // entirely, not be treated as "a step failed, unwind what succeeded."
+          if (err instanceof OpAbortError) throw err
+          const compensationErrors: unknown[] = []
+          for (let i = succeeded.length - 1; i >= 0; i--) {
+            const { compensate, output } = succeeded[i]
+            if (!compensate) continue
+            try { await runInline(compensate, output, caps, gOpts, childPath(path, `compensate${i}`), runId) }
+            catch (compErr) { compensationErrors.push(compErr) }
+          }
+          if (compensationErrors.length === 0) throw err
+          throw new AggregateError([err, ...compensationErrors], `saga: step failed and ${compensationErrors.length} compensation(s) also failed`)
+        }
+      })
   }
 }
