@@ -119,8 +119,17 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
   const maxBuffered = opts.maxBufferedSpans ?? DEFAULT_MAX_BUFFERED_SPANS
   const serviceName = opts.serviceName ?? 'suxlib-op-engine'
 
-  let traceId = randomHex(16)
-  const open = new Map<string, { spanId: string; startNano: bigint; tag: string; name?: string }>()
+  // Keyed by path, but each value is a *stack* (not a single entry): a path
+  // string is only unique within one runInline call (it's rebuilt from '' at
+  // every call's own root), so two overlapping runInline calls sharing this
+  // exporter instance both produce a node-enter at path '' -- a flat
+  // Map<path, entry> would let the second one's set() silently clobber the
+  // first's still-open entry. Pushing/popping preserves both; traceId is
+  // minted fresh per root entry and inherited by children via the parent's
+  // still-open entry (same lookup parentSpanId already does), not a shared
+  // mutable variable, so a finished span is always stamped with its own
+  // run's traceId even while another run is mid-flight on the same exporter.
+  const open = new Map<string, { spanId: string; startNano: bigint; tag: string; name?: string; traceId: string }[]>()
   const openByName = new Map<string, string[]>()
   const pendingEvents = new Map<string, { name: string; timeUnixNano: string; attributes: Record<string, AttrValue> }[]>()
   const finished: OtelSpan[] = []
@@ -130,36 +139,46 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
     while (finished.length > maxBuffered) finished.shift()
   }
 
+  function peekOpen(path: string) {
+    const stack = open.get(path)
+    return stack && stack.length > 0 ? stack[stack.length - 1] : undefined
+  }
+
   const onTrace: TraceEventHandler = (e: TraceEvent) => {
     if (e.kind === 'node-enter') {
-      if (e.path === '') traceId = randomHex(16)
-      open.set(e.path, { spanId: randomHex(8), startNano: BigInt(Date.now()) * 1_000_000n, tag: e.tag, name: e.name })
+      const pPath = parentPathOf(e.path)
+      const parentEntry = pPath === undefined ? undefined : peekOpen(pPath)
+      const traceId = e.path === '' ? randomHex(16) : (parentEntry?.traceId ?? randomHex(16))
+      const stack = open.get(e.path) ?? []
+      stack.push({ spanId: randomHex(8), startNano: BigInt(Date.now()) * 1_000_000n, tag: e.tag, name: e.name, traceId })
+      open.set(e.path, stack)
       if (e.name) {
-        const stack = openByName.get(e.name) ?? []
-        stack.push(e.path)
-        openByName.set(e.name, stack)
+        const nameStack = openByName.get(e.name) ?? []
+        nameStack.push(e.path)
+        openByName.set(e.name, nameStack)
       }
       return
     }
     // node-exit
-    const entry = open.get(e.path)
+    const stack = open.get(e.path)
+    const entry = stack?.pop()
     if (!entry) return // defensive: an exit with no matching enter should not happen
-    open.delete(e.path)
+    if (stack && stack.length === 0) open.delete(e.path)
     if (e.name) {
-      const stack = openByName.get(e.name)
-      if (stack) {
-        const i = stack.lastIndexOf(e.path)
-        if (i !== -1) stack.splice(i, 1)
-        if (stack.length === 0) openByName.delete(e.name)
+      const nameStack = openByName.get(e.name)
+      if (nameStack) {
+        const i = nameStack.lastIndexOf(e.path)
+        if (i !== -1) nameStack.splice(i, 1)
+        if (nameStack.length === 0) openByName.delete(e.name)
       }
     }
     const pPath = parentPathOf(e.path)
-    const parentSpanId = pPath === undefined ? undefined : open.get(pPath)?.spanId
+    const parentSpanId = pPath === undefined ? undefined : peekOpen(pPath)?.spanId
     const endNano = entry.startNano + BigInt(Math.round(e.durationMs * 1_000_000))
     const events = pendingEvents.get(e.path) ?? []
     pendingEvents.delete(e.path)
     pushFinished({
-      traceId,
+      traceId: entry.traceId,
       spanId: entry.spanId,
       parentSpanId,
       name: e.name ? `${e.tag}:${e.name}` : e.tag,

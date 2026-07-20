@@ -83,6 +83,27 @@ describe('otel exporter', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 
+  it('gives each of two overlapping runInline calls its own traceId, not a shared/overwritten one', async () => {
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      const body = JSON.parse(req.body)
+      const spans = body.resourceSpans[0].scopeSpans[0].spans
+      expect(spans).toHaveLength(2)
+      const slowSpan = spans.find((s: any) => s.name === 'leaf:slow')
+      const fastSpan = spans.find((s: any) => s.name === 'leaf:fast')
+      expect(slowSpan.traceId).not.toBe(fastSpan.traceId)
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelExporter({ endpoint: 'https://x', fetchFn })
+    const slow = op('slow', async (n: number) => { await new Promise((r) => setTimeout(r, 30)); return n }, { kind: 'pure' })
+    const fast = op('fast', async (n: number) => { await new Promise((r) => setTimeout(r, 5)); return n }, { kind: 'pure' })
+    await Promise.all([
+      runInline(slow, 1, clockCaps(), { onTrace: exporter.onTrace }),
+      runInline(fast, 2, clockCaps(), { onTrace: exporter.onTrace }),
+    ])
+    await exporter.flush()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
   it('drops the oldest buffered span once maxBufferedSpans is exceeded', async () => {
     const exporter = createOtelExporter({ endpoint: 'https://x', maxBufferedSpans: 2 })
     for (let i = 0; i < 5; i++) {
