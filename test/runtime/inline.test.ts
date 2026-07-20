@@ -244,6 +244,21 @@ test('runInline\'s saga does not run any compensation when a later step is stopp
   expect(compensated).toBe(false)
 })
 
+test('runInline\'s saga stops running further compensations once aborted mid-unwind, instead of counting the abort as a compensation failure (#354)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  const compensations: string[] = []
+  const tree = saga([
+    { op: op('a', async (n: number) => n, { kind: 'pure' }), compensate: op('undoA', async (n: number) => { compensations.push('a'); return n }, { kind: 'pure' }) },
+    { op: op('b', async (n: number) => n, { kind: 'pure' }), compensate: op('undoB', async (n: number) => { controller.abort(); compensations.push('b'); return n }, { kind: 'pure' }) },
+    { op: op('boom', async () => { throw new Error('step 3 failed') }, { kind: 'pure' }) },
+  ])
+  await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow('step 3 failed')
+  // compensate B runs (aborting mid-flight but still completing its own work),
+  // then compensate A is skipped entirely since the abort is checked before it starts.
+  expect(compensations).toEqual(['b'])
+})
+
 test('runInline cancels a map item still queued behind a full item-level concurrency limiter once aborted (#301)', async () => {
   const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
   const controller = new AbortController()

@@ -205,7 +205,13 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
             const { compensate, output } = succeeded[i]
             if (!compensate) continue
             try { await runInline(compensate, output, caps, gOpts, childPath(path, `compensate${i}`), runId) }
-            catch (compErr) { compensationErrors.push(compErr) }
+            catch (compErr) {
+              // Same control-signal-not-failure treatment as the outer catch:
+              // an abort firing mid-unwind stops further compensations from
+              // starting rather than being counted as a compensation failure.
+              if (compErr instanceof OpAbortError) break
+              compensationErrors.push(compErr)
+            }
           }
           if (compensationErrors.length === 0) throw err
           throw new AggregateError([err, ...compensationErrors], `saga: step failed and ${compensationErrors.length} compensation(s) also failed`)
