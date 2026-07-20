@@ -233,3 +233,168 @@ export function createOtelExporter(opts: OtelExporterOpts): OtelExporter {
 
   return { onTrace, onEvent, flush, pendingCount: () => finished.length }
 }
+
+export interface OtelMetricsExporterOpts {
+  endpoint: string
+  serviceName?: string
+  headers?: Record<string, string>
+  fetchFn?: typeof fetch
+  // Explicit histogram bucket boundaries (ms) for the node-duration
+  // histogram built from onTrace's node-exit durationMs.
+  histogramBoundsMs?: number[]
+}
+
+export interface OtelMetricsExporter {
+  onTrace: TraceEventHandler
+  onEvent: GovernorEventHandler
+  flush(): Promise<void>
+}
+
+const DEFAULT_HISTOGRAM_BOUNDS_MS = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000]
+
+/**
+ * Builds one exporter instance's `onTrace`/`onEvent` pair, aggregating the
+ * Governor event stream (`GovernorEvent`, src/control/events.ts) and node
+ * durations (`TraceEvent`, src/control/trace.ts) into OTLP metric data
+ * points -- the counterpart to `createOtelExporter`'s spans, following #334's
+ * same dependency-light OTLP/HTTP-JSON-over-fetch approach.
+ *
+ * Unlike the span exporter, this one holds cumulative aggregated state (a
+ * handful of counters/gauges/histograms keyed by leaf name, not a growing
+ * list of finished items), so `flush()` just POSTs the current totals with
+ * OTLP's CUMULATIVE aggregation temporality -- there's nothing to drop or
+ * re-buffer on a failed flush, since the next successful flush resends the
+ * (by-then-larger) running totals rather than losing anything.
+ */
+export function createOtelMetricsExporter(opts: OtelMetricsExporterOpts): OtelMetricsExporter {
+  const fetchFn = opts.fetchFn ?? fetch
+  const serviceName = opts.serviceName ?? 'suxlib-op-engine'
+  const bounds = opts.histogramBoundsMs ?? DEFAULT_HISTOGRAM_BOUNDS_MS
+  const startTimeUnixNano = (BigInt(Date.now()) * 1_000_000n).toString()
+
+  // Nested by metric/tag first, then by leaf name (empty string standing in
+  // for "no name") -- deliberately not a single joined string key, since a
+  // leaf name is caller-chosen and could contain whatever separator a joined
+  // key might pick.
+  const counters = new Map<string, Map<string, number>>()
+  const gauges = new Map<string, number>()
+  const histograms = new Map<string, Map<string, { count: number; sum: number; bucketCounts: number[] }>>()
+
+  function bumpCounter(metric: string, name: string | undefined): void {
+    const byName = counters.get(metric) ?? new Map<string, number>()
+    const key = name ?? ''
+    byName.set(key, (byName.get(key) ?? 0) + 1)
+    counters.set(metric, byName)
+  }
+
+  function setGauge(name: string | undefined, value: number): void {
+    gauges.set(name ?? '', value)
+  }
+
+  function recordHistogram(tag: string, name: string | undefined, durationMs: number): void {
+    const byName = histograms.get(tag) ?? new Map<string, { count: number; sum: number; bucketCounts: number[] }>()
+    const key = name ?? ''
+    const h = byName.get(key) ?? { count: 0, sum: 0, bucketCounts: new Array(bounds.length + 1).fill(0) }
+    h.count++
+    h.sum += durationMs
+    const idx = bounds.findIndex((b) => durationMs <= b)
+    h.bucketCounts[idx === -1 ? bounds.length : idx]++
+    byName.set(key, h)
+    histograms.set(tag, byName)
+  }
+
+  const onTrace: TraceEventHandler = (e: TraceEvent) => {
+    if (e.kind !== 'node-exit') return
+    recordHistogram(e.tag, e.name, e.durationMs)
+  }
+
+  const onEvent: GovernorEventHandler = (e: GovernorEvent) => {
+    const name = 'name' in e ? e.name : undefined
+    switch (e.kind) {
+      case 'breaker-open': return bumpCounter('op.breaker_open_total', name)
+      case 'breaker-half-open': return bumpCounter('op.breaker_half_open_total', name)
+      case 'breaker-close': return bumpCounter('op.breaker_close_total', name)
+      case 'aimd-increase': setGauge(name, e.limit); return bumpCounter('op.aimd_increase_total', name)
+      case 'aimd-decrease': setGauge(name, e.limit); return bumpCounter('op.aimd_decrease_total', name)
+      case 'token-wait': return bumpCounter('op.token_wait_total', name)
+      case 'retry-attempt': return bumpCounter('op.retry_attempts_total', name)
+      case 'memo-hit': return bumpCounter('op.memo_hit_total', name)
+      case 'memo-miss': return bumpCounter('op.memo_miss_total', name)
+    }
+  }
+
+  function toOtlpMetrics(): Record<string, unknown>[] {
+    const nowNano = (BigInt(Date.now()) * 1_000_000n).toString()
+    const metrics: Record<string, unknown>[] = []
+    for (const [metric, byName] of counters) {
+      metrics.push({
+        name: metric,
+        sum: {
+          dataPoints: [...byName].map(([name, value]) => ({
+            attributes: name ? attrList({ 'op.name': name }) : [],
+            startTimeUnixNano,
+            timeUnixNano: nowNano,
+            asInt: String(value),
+          })),
+          aggregationTemporality: 2, // AGGREGATION_TEMPORALITY_CUMULATIVE
+          isMonotonic: true,
+        },
+      })
+    }
+    if (gauges.size > 0) {
+      metrics.push({
+        name: 'op.aimd_limit',
+        gauge: {
+          dataPoints: [...gauges].map(([name, value]) => ({
+            attributes: name ? attrList({ 'op.name': name }) : [],
+            timeUnixNano: nowNano,
+            asDouble: value,
+          })),
+        },
+      })
+    }
+    for (const [tag, byName] of histograms) {
+      for (const [name, h] of byName) {
+        metrics.push({
+          name: 'op.node_duration_ms',
+          histogram: {
+            dataPoints: [
+              {
+                attributes: attrList({ 'op.tag': tag, ...(name ? { 'op.name': name } : {}) }),
+                startTimeUnixNano,
+                timeUnixNano: nowNano,
+                count: String(h.count),
+                sum: h.sum,
+                bucketCounts: h.bucketCounts.map(String),
+                explicitBounds: bounds,
+              },
+            ],
+            aggregationTemporality: 2, // AGGREGATION_TEMPORALITY_CUMULATIVE
+          },
+        })
+      }
+    }
+    return metrics
+  }
+
+  async function flush(): Promise<void> {
+    const metrics = toOtlpMetrics()
+    if (metrics.length === 0) return
+    const body = {
+      resourceMetrics: [
+        {
+          resource: { attributes: [{ key: 'service.name', value: { stringValue: serviceName } }] },
+          scopeMetrics: [{ scope: { name: 'suxlib-op-engine' }, metrics }],
+        },
+      ],
+    }
+    const res = await fetchFn(opts.endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...opts.headers },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) throw new Error(`otel metrics exporter flush failed: ${res.status} ${res.statusText}`)
+  }
+
+  return { onTrace, onEvent, flush }
+}

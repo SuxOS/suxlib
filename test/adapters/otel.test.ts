@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createOtelExporter } from '../../src/adapters/otel.js'
+import { createOtelExporter, createOtelMetricsExporter } from '../../src/adapters/otel.js'
 import { op, pipe } from '../../src/op/combinators.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { createGovernor } from '../../src/control/governor.js'
@@ -127,5 +127,81 @@ describe('otel exporter', () => {
     await exporter.flush()
     expect(exporter.pendingCount()).toBe(0)
     expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('otel metrics exporter', () => {
+  it('flush() is a no-op with nothing aggregated', async () => {
+    const fetchFn = vi.fn(async () => new Response(null, { status: 200 }))
+    await createOtelMetricsExporter({ endpoint: 'https://x', fetchFn }).flush()
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('aggregates GovernorEvents into counters and a gauge, tagged by leaf name', async () => {
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      const body = JSON.parse(req.body)
+      const metrics = body.resourceMetrics[0].scopeMetrics[0].metrics
+      const retries = metrics.find((m: any) => m.name === 'op.retry_attempts_total')
+      expect(retries.sum.dataPoints).toHaveLength(1)
+      expect(retries.sum.dataPoints[0].asInt).toBe('2')
+      expect(retries.sum.dataPoints[0].attributes).toEqual([{ key: 'op.name', value: { stringValue: 'flaky' } }])
+      expect(retries.sum.aggregationTemporality).toBe(2)
+      expect(retries.sum.isMonotonic).toBe(true)
+      const breakerOpen = metrics.find((m: any) => m.name === 'op.breaker_open_total')
+      expect(breakerOpen.sum.dataPoints[0].asInt).toBe('1')
+      const gauge = metrics.find((m: any) => m.name === 'op.aimd_limit')
+      expect(gauge.gauge.dataPoints[0].asDouble).toBe(4)
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelMetricsExporter({ endpoint: 'https://x', fetchFn })
+    exporter.onEvent({ kind: 'retry-attempt', name: 'flaky', attempt: 1, delayMs: 0 })
+    exporter.onEvent({ kind: 'retry-attempt', name: 'flaky', attempt: 2, delayMs: 0 })
+    exporter.onEvent({ kind: 'breaker-open', name: 'flaky', nowMs: 0 })
+    exporter.onEvent({ kind: 'aimd-increase', name: 'flaky', limit: 4 })
+    await exporter.flush()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('builds a node-duration histogram from onTrace node-exit events', async () => {
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      const body = JSON.parse(req.body)
+      const metrics = body.resourceMetrics[0].scopeMetrics[0].metrics
+      const hist = metrics.find((m: any) => m.name === 'op.node_duration_ms')
+      const point = hist.histogram.dataPoints[0]
+      expect(point.count).toBe('2')
+      expect(point.attributes).toEqual([{ key: 'op.tag', value: { stringValue: 'leaf' } }, { key: 'op.name', value: { stringValue: 'a' } }])
+      expect(point.bucketCounts.reduce((a: number, b: string) => a + Number(b), 0)).toBe(2)
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelMetricsExporter({ endpoint: 'https://x', fetchFn })
+    const leaf = op('a', async (n: number) => n + 1, { kind: 'pure' })
+    await runInline(leaf, 1, clockCaps(), { onTrace: exporter.onTrace })
+    await runInline(leaf, 2, clockCaps(), { onTrace: exporter.onTrace })
+    await exporter.flush()
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+  })
+
+  it('cumulative counters keep growing across flushes instead of resetting', async () => {
+    const bodies: any[] = []
+    const fetchFn = vi.fn(async (_url: any, req: any) => {
+      bodies.push(JSON.parse(req.body))
+      return new Response(null, { status: 200 })
+    })
+    const exporter = createOtelMetricsExporter({ endpoint: 'https://x', fetchFn })
+    exporter.onEvent({ kind: 'memo-hit', name: 'cached' })
+    await exporter.flush()
+    exporter.onEvent({ kind: 'memo-hit', name: 'cached' })
+    await exporter.flush()
+    const firstCount = bodies[0].resourceMetrics[0].scopeMetrics[0].metrics.find((m: any) => m.name === 'op.memo_hit_total').sum.dataPoints[0].asInt
+    const secondCount = bodies[1].resourceMetrics[0].scopeMetrics[0].metrics.find((m: any) => m.name === 'op.memo_hit_total').sum.dataPoints[0].asInt
+    expect(firstCount).toBe('1')
+    expect(secondCount).toBe('2')
+  })
+
+  it('rejects when the collector responds non-2xx', async () => {
+    const fetchFn = vi.fn(async () => new Response('boom', { status: 500 }))
+    const exporter = createOtelMetricsExporter({ endpoint: 'https://x', fetchFn })
+    exporter.onEvent({ kind: 'memo-miss', name: 'cached' })
+    await expect(exporter.flush()).rejects.toThrow(/flush failed/)
   })
 })
