@@ -437,6 +437,35 @@ test('emits memo-miss then memo-hit events across two calls with identical input
   ])
 })
 
+test('concurrent calls sharing a memo key coalesce into one fn execution (#311)', async () => {
+  let calls = 0
+  let resolveFn!: (v: string) => void
+  const fn = async () => { calls++; return new Promise<string>(r => { resolveFn = r }) }
+  const c = { ...caps(), cache: new MemoryCache() }
+  const events: any[] = []
+  const onEvent = (e: any) => events.push(e)
+  const p1 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, { ...noSleep, onEvent })
+  const p2 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, { ...noSleep, onEvent })
+  await new Promise(r => setTimeout(r, 0))
+  expect(calls).toBe(1)
+  resolveFn('ok')
+  const [r1, r2] = await Promise.all([p1, p2])
+  expect(r1).toBe('ok')
+  expect(r2).toBe('ok')
+  expect(events.filter(e => e.kind === 'memo-coalesced').length).toBe(1)
+  expect(events.filter(e => e.kind === 'memo-miss').length).toBe(1)
+})
+
+test('a memo call after the in-flight call has settled still hits the cache, not a fresh fn call', async () => {
+  let calls = 0
+  const fn = async () => { calls++; return 'ok' }
+  const c = { ...caps(), cache: new MemoryCache() }
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  const result = await runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  expect(calls).toBe(1)
+  expect(result).toBe('ok')
+})
+
 test('a failed attempt is not cached: a later call retries fn', async () => {
   let calls = 0
   const fn = async () => { calls++; throw new Error('boom') }

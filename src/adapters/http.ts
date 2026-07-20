@@ -57,7 +57,7 @@ function errorResponse(e: unknown, status = 400): Response {
 //
 // opRunGOpts: a host-supplied RunGovernedOpts (onEvent, custom backoff/sleep/
 // rand), passed through unchanged to runInline's 4th argument -- the only way
-// to observe retry-attempt/memo-hit/memo-miss GovernorEvents (see op-run.ts's
+// to observe retry-attempt/memo-hit/memo-miss/memo-coalesced GovernorEvents (see op-run.ts's
 // OpRunOpts doc). Omitted entirely, runInline's own defaults apply.
 //
 // opRunAsk: a host-supplied Ask implementation, threaded to runOpSpec's

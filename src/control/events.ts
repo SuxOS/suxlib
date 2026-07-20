@@ -21,5 +21,6 @@ export type GovernorEvent =
   | { kind: 'retry-attempt'; name: string; attempt: number; delayMs: number }
   | { kind: 'memo-hit'; name: string }
   | { kind: 'memo-miss'; name: string }
+  | { kind: 'memo-coalesced'; name: string }
 
 export type GovernorEventHandler = (e: GovernorEvent) => void

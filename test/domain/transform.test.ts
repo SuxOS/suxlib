@@ -259,6 +259,13 @@ test('markdownToHtml sanitizes an unsafe link scheme to a harmless anchor', () =
   expect(html).toContain('href="#"')
 })
 
+test('markdownToHtml preserves a literal paren inside a link URL', () => {
+  const html = markdownToHtml('[wiki](https://en.wikipedia.org/wiki/Foo_(bar))')
+  expect(html).toContain('href="https://en.wikipedia.org/wiki/Foo_(bar)"')
+  expect(html).toContain('<a href="https://en.wikipedia.org/wiki/Foo_(bar)">wiki</a>')
+  expect(html).not.toMatch(/<\/a>\)/)
+})
+
 test('htmlToMarkdown converts headings, lists, links, and code', () => {
   const md = htmlToMarkdown('<h1>Hi</h1><ul><li>one</li><li>two</li></ul><a href="https://x.test">link</a>')
   expect(md).toContain('# Hi')

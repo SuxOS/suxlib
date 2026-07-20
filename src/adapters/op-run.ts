@@ -161,7 +161,7 @@ export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean }
  * through). Omitted entirely, that fallback behavior is unchanged.
  *
  * `gOpts`: passed through unchanged as runInline's 4th argument -- the only
- * way to reach retry-attempt/memo-hit/memo-miss GovernorEvents (runGoverned
+ * way to reach retry-attempt/memo-hit/memo-miss/memo-coalesced GovernorEvents (runGoverned
  * emits those directly from `gOpts.onEvent`, unlike breaker/tokenBucket/
  * concurrency events which are observable via a host-constructed `governors`
  * Governor's own onEvent) or to supply a custom backoff/sleep/rand. Host-only

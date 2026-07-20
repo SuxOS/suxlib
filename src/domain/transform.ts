@@ -738,11 +738,46 @@ function sanitizeUrl(raw: string): string {
   return url.replace(/"/g, '&quot;')
 }
 
+// `[text](href)` link matching can't be done with a single `[^)]*` capture --
+// that stops at the *first* `)`, breaking any href containing a literal paren
+// (e.g. Wikipedia-style `.../Foo_(bar)` URLs). Scanned by hand instead, since
+// a regex alternation can't count arbitrarily-nested balanced parens; this
+// walks paren depth so a `)` inside the href only closes the link once depth
+// returns to zero.
+function replaceLinks(s: string): string {
+  let out = ''
+  let i = 0
+  while (i < s.length) {
+    if (s[i] === '[') {
+      const textEnd = s.indexOf(']', i + 1)
+      if (textEnd !== -1 && s[textEnd + 1] === '(') {
+        let depth = 1
+        let j = textEnd + 2
+        while (j < s.length && depth > 0) {
+          if (s[j] === '(') depth++
+          else if (s[j] === ')') depth--
+          if (depth > 0) j++
+        }
+        if (depth === 0) {
+          const text = s.slice(i + 1, textEnd)
+          const href = s.slice(textEnd + 2, j)
+          out += `<a href="${sanitizeUrl(href)}">${text}</a>`
+          i = j + 1
+          continue
+        }
+      }
+    }
+    out += s[i]
+    i++
+  }
+  return out
+}
+
 function inlineMdToHtml(s: string): string {
   const codes: string[] = []
-  return encodeEntitiesXml(s)
-    .replace(/`([^`]+)`/g, (_m, c) => `\x00${codes.push(`<code>${c}</code>`) - 1}\x00`)
-    .replace(/\[([^\]]*)\]\(([^)]*)\)/g, (_m, txt, href) => `<a href="${sanitizeUrl(href)}">${txt}</a>`)
+  return replaceLinks(
+    encodeEntitiesXml(s).replace(/`([^`]+)`/g, (_m, c) => `\x00${codes.push(`<code>${c}</code>`) - 1}\x00`),
+  )
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/__([^_]+)__/g, '<strong>$1</strong>')
     .replace(/\*([^*]+)\*/g, '<em>$1</em>')

@@ -139,7 +139,7 @@ export type RegisterFileopsToolsOptions = {
    * A host-supplied RunGovernedOpts (onEvent, custom backoff/sleep/rand),
    * passed through unchanged to runInline's 4th argument for every
    * `run_pipeline` call — the only way to observe retry-attempt/memo-hit/
-   * memo-miss GovernorEvents (see op-run.ts's OpRunOpts doc). Omitted
+   * memo-miss/memo-coalesced GovernorEvents (see op-run.ts's OpRunOpts doc). Omitted
    * entirely, runInline's own defaults apply.
    */
   opRunGOpts?: RunGovernedOpts

@@ -1,5 +1,5 @@
 import type { LeafFn, LeafOpts, Caps, Governor } from '../op/types.js'
-import type { Clock } from '../effects/types.js'
+import type { Clock, Cache } from '../effects/types.js'
 import type { GovernorEventHandler } from './events.js'
 import type { TraceEventHandler } from './trace.js'
 import { backoffFullJitter, idempotencyKey } from './retry.js'
@@ -47,6 +47,16 @@ export interface RunGovernedOpts {
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+// Singleflight dedup for runGoverned's memo branch (#311): keyed off the
+// `caps.cache` instance (WeakMap, so unrelated Caps/tests never share
+// in-flight state and entries GC once a cache is no longer referenced), then
+// by memo key. Two concurrent calls that hash to the same (name, input) memo
+// key would otherwise both observe a cache miss and both run a possibly
+// `heavy`/`effect` leaf -- the second call instead awaits the first call's
+// in-flight promise. The entry is removed once that promise settles (success
+// or failure), so a later, non-overlapping call still misses normally.
+const inFlightByCache = new WeakMap<Cache, Map<string, Promise<any>>>()
 
 export type ConcurrencySpec = { kind: 'fixed'; n: number } | { kind: 'aimd'; start?: number; min?: number; max?: number }
 
@@ -111,13 +121,22 @@ export async function runGoverned(
   gOpts: RunGovernedOpts = {},
 ): Promise<any> {
   if (opts.memo && caps.cache) {
+    const cache = caps.cache
     const key = await memoKey(name, input)
-    const cached = await caps.cache.get(key)
+    const cached = await cache.get(key)
     if (cached !== undefined) { gOpts.onEvent?.({ kind: 'memo-hit', name }); return cached }
-    const result = await runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts)
-    await caps.cache.put(key, result)
-    gOpts.onEvent?.({ kind: 'memo-miss', name })
-    return result
+    let inFlight = inFlightByCache.get(cache)
+    if (!inFlight) { inFlight = new Map(); inFlightByCache.set(cache, inFlight) }
+    const joined = inFlight.get(key)
+    if (joined) { gOpts.onEvent?.({ kind: 'memo-coalesced', name }); return joined }
+    const pending = (async () => {
+      const result = await runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts)
+      await cache.put(key, result)
+      gOpts.onEvent?.({ kind: 'memo-miss', name })
+      return result
+    })().finally(() => inFlight!.delete(key))
+    inFlight.set(key, pending)
+    return pending
   }
   const maxRetries = opts.retries ?? 0
   const backoff = gOpts.backoff ?? { base: 200, cap: 10_000 }
