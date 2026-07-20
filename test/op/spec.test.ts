@@ -1,7 +1,7 @@
 import { test, expect } from 'vitest'
 import { zipSync } from 'fflate'
 import { PDFDocument } from 'pdf-lib'
-import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, type OpSpec } from '../../src/op/spec.js'
+import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, MAX_SINK_TARGETS, type OpSpec } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
 import { putBytes, resolve, resolveText } from '../../src/handles/handle.js'
@@ -164,6 +164,11 @@ test('buildOp rejects a sink spec with an empty `targets` array', () => {
 
 test('buildOp rejects a sink spec with a non-string target', () => {
   expect(() => buildOp({ tag: 'sink', targets: [1 as unknown as string] })).toThrow(/targets/)
+})
+
+test('buildOp rejects a sink spec with more than MAX_SINK_TARGETS targets (#307)', () => {
+  const targets = Array.from({ length: MAX_SINK_TARGETS + 1 }, (_, i) => `t${i}`)
+  expect(() => buildOp({ tag: 'sink', targets })).toThrow(/targets/)
 })
 
 test('buildOp rejects an out-of-range sink `opts.retries` (#247)', () => {
@@ -546,4 +551,12 @@ test('validateOpSpec reports an out-of-range sink `opts.retries` the same way bu
   expect(errors).toHaveLength(1)
   expect(errors[0].message).toMatch(/opts\.retries/)
   expect(() => buildOp(spec)).toThrow(/opts\.retries/)
+})
+
+test('validateOpSpec reports a sink spec over MAX_SINK_TARGETS the same way buildOp\'s throw does (#307)', () => {
+  const spec: OpSpec = { tag: 'sink', targets: Array.from({ length: MAX_SINK_TARGETS + 1 }, (_, i) => `t${i}`) }
+  const errors = validateOpSpec(spec)
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(/targets/)
+  expect(() => buildOp(spec)).toThrow(/targets/)
 })

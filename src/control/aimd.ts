@@ -30,6 +30,7 @@ export function fixed(n: number): Concurrency {
   return {
     async acquire(signal?: AbortSignal) { await enqueue(q, pump, signal) },
     release() { inflight--; pump() },
+    releaseNeutral() { inflight--; pump() },
   }
 }
 
@@ -55,5 +56,9 @@ export function aimd(opts: { start?: number; min?: number; max?: number; onEvent
       }
       pump()
     },
+    // Frees the slot without touching limit/successes/onEvent -- the attempt
+    // it belongs to was aborted before it could run, not a real success or
+    // failure (#303).
+    releaseNeutral() { inflight--; pump() },
   }
 }

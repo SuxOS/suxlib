@@ -266,9 +266,9 @@ test('gates an effect leaf through governor.concurrency, never exceeding its lim
 test('a heavy effect leaf is gated through governor.heavyConcurrency instead of governor.concurrency', async () => {
   const normal = fixed(4)
   let heavyAcquireCalls = 0
-  const heavy = { acquire: async () => { heavyAcquireCalls++; await normal.acquire() }, release: (ok: boolean) => normal.release(ok) }
+  const heavy = { acquire: async () => { heavyAcquireCalls++; await normal.acquire() }, release: (ok: boolean) => normal.release(ok), releaseNeutral: () => normal.releaseNeutral() }
   let normalAcquireCalls = 0
-  const spyNormal = { acquire: async () => { normalAcquireCalls++ }, release: () => {} }
+  const spyNormal = { acquire: async () => { normalAcquireCalls++ }, release: () => {}, releaseNeutral: () => {} }
   const fn = async () => 'ok'
   const result = await runGoverned('leaf', { kind: 'effect', heavy: true }, fn, null, caps(), { concurrency: spyNormal, heavyConcurrency: heavy }, noSleep)
   expect(result).toBe('ok')
@@ -279,7 +279,7 @@ test('a heavy effect leaf is gated through governor.heavyConcurrency instead of 
 test('a heavy effect leaf falls back to governor.concurrency when no heavyConcurrency is configured', async () => {
   const limiter = fixed(1)
   let acquireCalls = 0
-  const spy = { acquire: async () => { acquireCalls++; await limiter.acquire() }, release: (ok: boolean) => limiter.release(ok) }
+  const spy = { acquire: async () => { acquireCalls++; await limiter.acquire() }, release: (ok: boolean) => limiter.release(ok), releaseNeutral: () => limiter.releaseNeutral() }
   const fn = async () => 'ok'
   const result = await runGoverned('leaf', { kind: 'effect', heavy: true }, fn, null, caps(), { concurrency: spy }, noSleep)
   expect(result).toBe('ok')
@@ -288,7 +288,7 @@ test('a heavy effect leaf falls back to governor.concurrency when no heavyConcur
 
 test('a non-heavy effect leaf is not consulted against governor.heavyConcurrency', async () => {
   let heavyAcquireCalls = 0
-  const heavy = { acquire: async () => { heavyAcquireCalls++ }, release: () => {} }
+  const heavy = { acquire: async () => { heavyAcquireCalls++ }, release: () => {}, releaseNeutral: () => {} }
   const fn = async () => 'ok'
   const result = await runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { heavyConcurrency: heavy }, noSleep)
   expect(result).toBe('ok')
@@ -298,7 +298,7 @@ test('a non-heavy effect leaf is not consulted against governor.heavyConcurrency
 test('concurrency is not consulted for pure leaves', async () => {
   const limiter = fixed(1)
   let acquireCalls = 0
-  const spy = { acquire: async () => { acquireCalls++; await limiter.acquire() }, release: (ok: boolean) => limiter.release(ok) }
+  const spy = { acquire: async () => { acquireCalls++; await limiter.acquire() }, release: (ok: boolean) => limiter.release(ok), releaseNeutral: () => limiter.releaseNeutral() }
   const fn = async () => 'ok'
   const result = await runGoverned('leaf', { kind: 'pure' }, fn, null, caps(), { concurrency: spy }, noSleep)
   expect(result).toBe('ok')
@@ -317,7 +317,7 @@ test('reports failure to an AIMD concurrency limiter on a rejected attempt, halv
 test('releases the concurrency slot when the token bucket throws, without ever acquiring it', async () => {
   const limiter = fixed(1)
   let acquireCalls = 0
-  const spy = { acquire: async () => { acquireCalls++; await limiter.acquire() }, release: (ok: boolean) => limiter.release(ok) }
+  const spy = { acquire: async () => { acquireCalls++; await limiter.acquire() }, release: (ok: boolean) => limiter.release(ok), releaseNeutral: () => limiter.releaseNeutral() }
   const throwingBucket = { take: async () => { throw new Error('rate limiter unavailable') } }
   const fn = async () => 'should not run'
   await expect(
@@ -451,6 +451,7 @@ test('a throw from post-success bookkeeping (e.g. breaker onSuccess -> onEvent) 
   const concurrency = {
     async acquire() {},
     release(ok: boolean) { releases.push(ok) },
+    releaseNeutral() {},
   }
   const breaker = circuitBreaker({
     failureThreshold: 1,
@@ -536,7 +537,7 @@ test('aborting while queued behind a full concurrency limiter rejects immediatel
 })
 
 test('a throw from post-success bookkeeping does not permanently strand the half-open probe reservation (#290)', async () => {
-  const concurrency = { async acquire() {}, release() {} }
+  const concurrency = { async acquire() {}, release() {}, releaseNeutral() {} }
   const breaker = circuitBreaker({
     failureThreshold: 1,
     cooldownMs: 100,

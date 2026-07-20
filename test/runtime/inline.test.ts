@@ -1,7 +1,7 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
 import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
-import { fixed } from '../../src/control/aimd.js'
+import { fixed, aimd } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { createGovernor, OpAbortError } from '../../src/control/governor.js'
@@ -147,6 +147,34 @@ test('runInline cancels a map item still queued behind a full item-level concurr
   }, { kind: 'pure' }), { concurrency: fixed(1) })
   await expect(runInline(tree, [1, 2], caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
   expect(secondRan).toBe(false)
+})
+
+test('runInline does not charge an aimd limiter\'s failure bookkeeping for map items aborted after already acquiring their slot (#303)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  // start: 2 so both items acquire their slot synchronously (no queueing) --
+  // aborting right after kicking off the run, before any item's own op has
+  // had a chance to execute, means every item hits the traced() checkpoint
+  // (#279) *after* it already holds its slot, exercising release()'s
+  // abort-vs-failure distinction rather than acquire()'s own cancellation
+  // (#301, already covered by the test above).
+  const limiter = aimd({ start: 2, min: 1 })
+  const tree = map(op('id', async (n: number) => n, { kind: 'pure' }), { concurrency: limiter })
+  const run = runInline(tree, [1, 2], caps, { signal: controller.signal })
+  controller.abort()
+  await expect(run).rejects.toThrow(OpAbortError)
+  expect(limiter.limit).toBe(2)
+})
+
+test('runInline does not charge an aimd limiter\'s failure bookkeeping for mapField items aborted after already acquiring their slot (#303)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  const limiter = aimd({ start: 2, min: 1 })
+  const tree = mapField('entries', 'n', op('id', async (n: number) => n, { kind: 'pure' }), { concurrency: limiter })
+  const run = runInline(tree, { entries: [{ n: 1 }, { n: 2 }] }, caps, { signal: controller.signal })
+  controller.abort()
+  await expect(run).rejects.toThrow(OpAbortError)
+  expect(limiter.limit).toBe(2)
 })
 
 test('runInline cancels a mapField item still queued behind a full item-level concurrency limiter once aborted (#301)', async () => {

@@ -5,7 +5,13 @@ import type { CircuitBreaker } from '../control/circuit-breaker.js'
 export interface SinkTarget { name: string; write(input: any, caps: Caps): Promise<any> }
 export interface Governor { tokenBucket?: TokenBucket; circuitBreaker?: CircuitBreaker; concurrency?: Concurrency; heavyConcurrency?: Concurrency }
 export interface Caps { store: Store; llm: Llm; clock: Clock; sinks: Record<string, SinkTarget>; governors?: Record<string, Governor>; ask?: Ask; cache?: Cache }
-export interface Concurrency { acquire(signal?: AbortSignal): Promise<void>; release(ok: boolean): void }
+// release(ok) reports a real attempt outcome, driving an adaptive limiter's
+// success/failure bookkeeping (e.g. aimd()'s multiplicative-decrease on
+// false). releaseNeutral() is for the third case -- the attempt never really
+// ran (a cooperative abort, #303) -- and must free the slot without charging
+// either outcome; release(false) would falsely halve an aimd limit for work
+// that was simply never attempted, and release(true) would falsely reward it.
+export interface Concurrency { acquire(signal?: AbortSignal): Promise<void>; release(ok: boolean): void; releaseNeutral(): void }
 export interface LeafOpts { kind: 'pure' | 'effect'; retries?: number; heavy?: boolean; memo?: boolean }
 // A sink write is always I/O (there's no 'pure' sink), so unlike LeafOpts
 // there's no `kind` to declare -- runGoverned gates it the same way it gates

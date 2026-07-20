@@ -13,7 +13,7 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, validateOpSpec, type OpSpec } from '../op/spec.js'
+import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, MAX_SINK_TARGETS, validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
 import type { Cache, Store, Llm, Ask } from '../effects/types.js'
@@ -77,7 +77,7 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
     tag: z.literal('sink'),
     // A bare name falls back to the sink spec's own `opts`; a `{ name, opts }`
     // pair overrides per-field (#251) -- mirrors src/op/spec.ts's OpSpecSinkTarget.
-    targets: z.array(z.union([z.string(), z.object({ name: z.string(), opts: opSpecSinkOptsSchema })])).min(1),
+    targets: z.array(z.union([z.string(), z.object({ name: z.string(), opts: opSpecSinkOptsSchema })])).min(1).max(MAX_SINK_TARGETS),
     opts: opSpecSinkOptsSchema,
   }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),

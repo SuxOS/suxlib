@@ -57,7 +57,12 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         const results = await Promise.allSettled(items.map(async (it, i) => {
           await node.concurrency.acquire(gOpts?.signal)
           try { out[i] = await runInline(node.op, it, caps, gOpts, childPath(path, i)); node.concurrency.release(true) }
-          catch (e) { node.concurrency.release(false); throw e }
+          // An abort (#279) means this item's run never really happened -- it's
+          // not a leaf failure, so it must not charge an aimd limiter's
+          // failure bookkeeping (#303); release(false) would misclassify a
+          // cancelled run as unreliable work and needlessly halve throughput
+          // for every other item/future run sharing this Concurrency instance.
+          catch (e) { if (e instanceof OpAbortError) node.concurrency.releaseNeutral(); else node.concurrency.release(false); throw e }
         }))
         const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
         if (failed) throw failed.reason
@@ -74,7 +79,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
             const value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts, childPath(path, i))
             out[i] = { ...(it as Record<string, unknown>), [node.elementField]: value }
             node.concurrency.release(true)
-          } catch (e) { node.concurrency.release(false); throw e }
+          } catch (e) { if (e instanceof OpAbortError) node.concurrency.releaseNeutral(); else node.concurrency.release(false); throw e } // see the 'map' case above for why (#303)
         }))
         const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')
         if (failed) throw failed.reason

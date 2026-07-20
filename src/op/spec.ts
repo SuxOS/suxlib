@@ -37,6 +37,11 @@ export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconci
 // into an unbounded retry storm or a huge fan-out.
 export const MAX_LEAF_RETRIES = 5
 export const MAX_MAP_CONCURRENCY = 32
+// sink.fanout runs every target fully concurrently (Promise.allSettled, no
+// limiter unlike map/mapField's MAX_MAP_CONCURRENCY-bounded Concurrency) --
+// this caps the array width itself so a caller-supplied spec can't turn one
+// request into an unbounded number of concurrent effect calls (#307).
+export const MAX_SINK_TARGETS = 32
 
 function shapeLabel(s: LeafShape): string {
   if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
@@ -306,8 +311,8 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       return
     }
     case 'sink': {
-      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
-        errors.push({ path, message: 'sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES })
+      if (!Array.isArray(spec.targets) || !spec.targets.length || spec.targets.length > MAX_SINK_TARGETS || !spec.targets.every(isValidSinkTarget)) {
+        errors.push({ path, message: `sink spec requires a \`targets\` array of 1 to ${MAX_SINK_TARGETS} entries, each a non-empty string or \`{ name, opts? }\` with \`opts.retries\` (if present) an integer between 0 and ${MAX_LEAF_RETRIES}` })
       }
       const so = spec.opts?.retries
       if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
@@ -425,8 +430,8 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       return mapField(spec.arrayField, spec.elementField, buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency), renameTo: spec.renameTo })
     }
     case 'sink': {
-      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
-        throw new Error('sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES)
+      if (!Array.isArray(spec.targets) || !spec.targets.length || spec.targets.length > MAX_SINK_TARGETS || !spec.targets.every(isValidSinkTarget)) {
+        throw new Error(`sink spec requires a \`targets\` array of 1 to ${MAX_SINK_TARGETS} entries, each a non-empty string or \`{ name, opts? }\` with \`opts.retries\` (if present) an integer between 0 and ${MAX_LEAF_RETRIES}`)
       }
       const so = spec.opts?.retries
       if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
