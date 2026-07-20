@@ -264,9 +264,69 @@ function crc32(bytes: Uint8Array): number {
 }
 
 /**
+ * Read the Orientation tag (0x0112) out of a raw TIFF-structured buffer —
+ * shared shape between a PNG eXIf chunk's payload (no prefix) and a JPEG
+ * APP1's post-"Exif\0\0" bytes. Returns null when the buffer isn't a valid
+ * TIFF header, has no Orientation entry, or the value is 1 (normal — nothing
+ * to preserve).
+ */
+function readTiffOrientation(tiff: Uint8Array): number | null {
+  if (tiff.length < 8) return null
+  const little = tiff[0] === 0x49 && tiff[1] === 0x49
+  const big = tiff[0] === 0x4d && tiff[1] === 0x4d
+  if (!little && !big) return null
+  const u16 = (o: number) => (little ? tiff[o] | (tiff[o + 1] << 8) : (tiff[o] << 8) | tiff[o + 1])
+  const u32 = (o: number) => (little ? (tiff[o] | (tiff[o + 1] << 8) | (tiff[o + 2] << 16) | (tiff[o + 3] << 24)) >>> 0 : ((tiff[o] << 24) | (tiff[o + 1] << 16) | (tiff[o + 2] << 8) | tiff[o + 3]) >>> 0)
+  if (u16(2) !== 42) return null
+  const ifdOffset = u32(4)
+  if (ifdOffset + 2 > tiff.length) return null
+  const count = u16(ifdOffset)
+  const entriesEnd = ifdOffset + 2 + count * 12
+  if (entriesEnd > tiff.length) return null
+  for (let e = 0; e < count; e++) {
+    const entryOffset = ifdOffset + 2 + e * 12
+    const tag = u16(entryOffset)
+    if (tag === 0x0112) {
+      const value = u16(entryOffset + 8)
+      return value === 1 ? null : value
+    }
+  }
+  return null
+}
+
+/** Build a minimal PNG eXIf chunk carrying only a single-entry IFD0 (the
+ *  Orientation tag) — length + 'eXIf' + 26-byte TIFF payload + fresh CRC-32. */
+function buildOrientationEXif(orientation: number): number[] {
+  const payload = [
+    0x49, 0x49, // 'II' — little-endian
+    0x2a, 0x00, // TIFF magic 42
+    0x08, 0x00, 0x00, 0x00, // offset to IFD0
+    0x01, 0x00, // IFD0 entry count = 1
+    0x12, 0x01, // tag 0x0112 (Orientation)
+    0x03, 0x00, // type 3 (SHORT)
+    0x01, 0x00, 0x00, 0x00, // count = 1
+    orientation & 0xff, (orientation >> 8) & 0xff, 0x00, 0x00, // value + padding
+    0x00, 0x00, 0x00, 0x00, // next IFD offset = 0
+  ]
+  const len = payload.length
+  const typeBytes = [0x65, 0x58, 0x49, 0x66] // 'eXIf'
+  const crc = crc32(Uint8Array.from([...typeBytes, ...payload]))
+  return [
+    (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff,
+    ...typeBytes,
+    ...payload,
+    (crc >>> 24) & 0xff, (crc >>> 16) & 0xff, (crc >>> 8) & 0xff, crc & 0xff,
+  ]
+}
+
+/**
  * Strip PNG ancillary metadata chunks (tEXt, zTXt, iTXt free-text/XMP, eXIf,
  * time). Critical chunks (IHDR, PLTE, IDAT, IEND) and color-management chunks
- * (gAMA, cHRM, sRGB, iCCP) needed to render correctly are kept.
+ * (gAMA, cHRM, sRGB, iCCP) needed to render correctly are kept. eXIf is
+ * dropped like the rest, except when it carries a non-default Orientation —
+ * that tag alone is preserved in a rebuilt minimal chunk so a sanitized
+ * portrait PNG doesn't silently render sideways (same fix shape as
+ * stripJpegMetadata's APP1 EXIF Orientation handling).
  */
 function stripPngMetadata(bytes: Uint8Array): Uint8Array {
   for (let i = 0; i < 8; i++) if (bytes[i] !== PNG_SIGNATURE[i]) throw new Error('not a PNG (bad signature)')
@@ -295,7 +355,10 @@ function stripPngMetadata(bytes: Uint8Array): Uint8Array {
     if (chunkEnd > bytes.length) {
       throw new Error(`malformed PNG: chunk '${type}' at offset ${i} declares length ${len}, runs past end of file`)
     }
-    if (!DROP.has(type)) {
+    if (type === 'eXIf') {
+      const orientation = readTiffOrientation(bytes.subarray(i + 8, i + 8 + len))
+      if (orientation !== null) out.push(...buildOrientationEXif(orientation))
+    } else if (!DROP.has(type)) {
       for (let j = i; j < chunkEnd; j++) out.push(bytes[j])
     }
     i = chunkEnd
