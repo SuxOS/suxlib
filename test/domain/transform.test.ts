@@ -51,6 +51,11 @@ test('toYaml/parseYaml round-trip a nested array whose inner arrays contain obje
   expect(parseYaml(toYaml(obj))).toEqual(obj)
 })
 
+test('toYaml/parseYaml round-trip an array mixing empty and non-empty nested arrays', () => {
+  const obj = { a: [[], [1, 2], [3]] }
+  expect(parseYaml(toYaml(obj))).toEqual(obj)
+})
+
 test('parseYaml strips a trailing comment without over-protecting a plain scalar containing an apostrophe (#329)', () => {
   expect(parseYaml("note: it's great # trailing comment")).toEqual({ note: "it's great" })
 })
