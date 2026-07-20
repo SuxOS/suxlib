@@ -427,7 +427,18 @@ There is no linter in this repo. Run both locally before pushing.
   the offending issue `hold`/`needs-human` is the actual fix, since both
   labels are already an EXPAND exclusion signal this task's own instructions
   honor, so the low-tier dispatcher almost certainly does too. Labelled
-  both `needs-human` this batch rather than dropping a seventh time.
+  both `needs-human` this batch rather than dropping a seventh time. Update
+  (2026-07-20, batch building #351/#350/#352): #242/#309 re-checked yet again
+  — `gh pr checks 241`/`308` both still fail `security-review` on the
+  identical `.suxos-ci/scripts/classify-security-noverdict.sh: No such file
+  or directory` error, and `grep -rn "snapshotValue\|releaseCancelled" src/`
+  is still empty on real `origin/main`. Nearly got fooled the same way this
+  note already warns about: `git log --oneline --all | grep <name>` (the
+  `--all` walks every ref, not just `main`) surfaced `3f7ecaa` looking like
+  landed `releaseCancelled` code — `git merge-base --is-ancestor 3f7ecaa
+  origin/main` (exit 1) caught that it's only on the stale, closed-unmerged
+  `bot/issue-build-29707704140` branch. Dropped both again, unbuilt, not
+  superseded.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than

@@ -17,6 +17,7 @@ import {
   archiveExtract,
   safeExtractPath,
   ARCHIVE_MIME,
+  type ArchiveFormat,
 } from '../../src/domain/archive.js'
 
 test('unzip expands a zip handle into per-file handles', async () => {
@@ -353,6 +354,12 @@ test('archiveCreate/archiveExtract dispatch by format, and ARCHIVE_MIME covers e
   }
   const gz = archiveCreate('gzip', [{ name: 'x', data: strToU8('X') }])
   expect(archiveExtract('gzip', gz).entries[0].text).toBe('X')
+})
+
+test('archiveCreate/archiveExtract throw on an unrecognized format instead of returning undefined (#350)', () => {
+  const bogus = 'bogus' as unknown as ArchiveFormat
+  expect(() => archiveCreate(bogus, [{ name: 'x', data: strToU8('X') }])).toThrow(/unknown archive format/)
+  expect(() => archiveExtract(bogus, strToU8('X'))).toThrow(/unknown archive format/)
 })
 
 test('tar.gz round-trips multiple files through gzipCreate(tarCreate(files))', () => {

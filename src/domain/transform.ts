@@ -191,29 +191,63 @@ export function parseYaml(text: string): unknown {
   }
   function parseSeq(minIndent: number, depth: number): unknown[] {
     const arr: unknown[] = []
+    let seqIndent: number | undefined
     while (i < lines.length) {
       const line = lines[i]
       const ind = indentOf(line)
       if (ind < minIndent || !/^\s*-(\s|$)/.test(line)) break
+      // A sibling item of THIS array must sit at the same column as the
+      // array's first item -- a deeper-indented "-" line instead belongs to
+      // a nested sequence (see parseNestedSeq below), not a new sibling.
+      // Using `minIndent` itself (a floor, not the array's actual column)
+      // here was the root cause of #352: "- - 1\n    - 2\n  - - 3\n    - 4"
+      // silently misread its deeper-indented continuation lines as more
+      // top-level siblings.
+      if (seqIndent === undefined) seqIndent = ind
+      else if (ind !== seqIndent) break
       const rest = line.slice(ind + 1).replace(/^\s*/, '')
       i++
-      if (rest === '') {
-        arr.push(parseBlock(ind + 1, depth + 1))
-      } else if (/^[^"'\[{][^:]*:(\s|$)/.test(rest)) {
-        const m = rest.match(/^([^:]+):\s*(.*)$/)!
-        const obj: Record<string, unknown> = {}
-        const childIndent = ind + 2
-        const key = m[1].trim()
-        const dangerous = key === '__proto__' || key === 'constructor' || key === 'prototype'
-        if (m[2].trim() === '') {
-          const block = parseBlock(childIndent, depth + 1)
-          if (!dangerous) obj[key] = block
-        } else if (!dangerous) obj[key] = parseScalar(m[2])
-        mergeMap(obj, childIndent, depth + 1)
-        arr.push(obj)
-      } else {
-        arr.push(parseScalar(rest))
-      }
+      arr.push(parseSeqItem(rest, ind, depth))
+    }
+    return arr
+  }
+  // One sequence element's value, factored out of parseSeq's loop body so the
+  // same logic parses both a real physical line and (via parseNestedSeq) a
+  // nested sequence's synthetic first element.
+  function parseSeqItem(rest: string, ind: number, depth: number): unknown {
+    if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
+    if (rest === '') return parseBlock(ind + 1, depth + 1)
+    if (/^-(\s|$)/.test(rest)) return parseNestedSeq(rest, ind + 2, depth + 1)
+    if (/^[^"'\[{][^:]*:(\s|$)/.test(rest)) {
+      const m = rest.match(/^([^:]+):\s*(.*)$/)!
+      const obj: Record<string, unknown> = {}
+      const childIndent = ind + 2
+      const key = m[1].trim()
+      const dangerous = key === '__proto__' || key === 'constructor' || key === 'prototype'
+      if (m[2].trim() === '') {
+        const block = parseBlock(childIndent, depth + 1)
+        if (!dangerous) obj[key] = block
+      } else if (!dangerous) obj[key] = parseScalar(m[2])
+      mergeMap(obj, childIndent, depth + 1)
+      return obj
+    }
+    return parseScalar(rest)
+  }
+  // toYaml renders a nested array's first item inline on the outer item's own
+  // dash line ("- - 1", not "- \n  - 1") -- see toYaml's array branch, which
+  // overlays a bare "pad + '-'" onto the child block's own leading indent.
+  // `indent` is the column the inner dashes sit at (the outer item's `ind +
+  // 2`); every further sibling of this nested array must match it exactly,
+  // the same invariant parseSeq enforces via `seqIndent` above.
+  function parseNestedSeq(firstRest: string, indent: number, depth: number): unknown[] {
+    const arr: unknown[] = [parseSeqItem(firstRest.slice(1).replace(/^\s*/, ''), indent, depth)]
+    while (i < lines.length) {
+      const line = lines[i]
+      const ind = indentOf(line)
+      if (ind !== indent || !/^\s*-(\s|$)/.test(line)) break
+      const rest = line.slice(ind + 1).replace(/^\s*/, '')
+      i++
+      arr.push(parseSeqItem(rest, indent, depth))
     }
     return arr
   }
