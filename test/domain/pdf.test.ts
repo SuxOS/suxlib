@@ -49,6 +49,55 @@ test('pdfShrink clears a catalog XMP /Metadata stream, not just the Info dict', 
   expect(out.catalog.get(PDFName.of('Metadata'))).toBeUndefined()
 })
 
+// Builds a fixture with page-level and XObject-level XMP /Metadata streams --
+// the two carriers #351's catalog-only fix (issue #359) missed. The XObject
+// (a fake Image XObject) is wired into the page's /Resources/XObject dict,
+// mirroring how a placed image commonly carries its own XMP packet.
+async function pdfWithPageAndXObjectXmp(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create()
+  const page = doc.addPage([300, 400])
+
+  const xmpFor = (creator: string) =>
+    '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>' +
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">' +
+    `<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>${creator}</dc:creator></rdf:Description>` +
+    '</rdf:RDF></x:xmpmeta><?xpacket end="w"?>'
+
+  const pageStream = doc.context.stream(xmpFor('Page Author'), { Type: 'Metadata', Subtype: 'XML' })
+  const pageMetadataRef = doc.context.register(pageStream)
+  page.node.set(PDFName.of('Metadata'), pageMetadataRef)
+
+  const xobjStream = doc.context.stream(xmpFor('Image Author'), { Type: 'Metadata', Subtype: 'XML' })
+  const xobjMetadataRef = doc.context.register(xobjStream)
+  const imageXObject = doc.context.stream('fake-image-bytes', {
+    Type: 'XObject',
+    Subtype: 'Image',
+    Width: 1,
+    Height: 1,
+    Metadata: xobjMetadataRef,
+  })
+  const imageRef = doc.context.register(imageXObject)
+  page.node.set(PDFName.of('Resources'), doc.context.obj({ XObject: { Im0: imageRef } }))
+
+  return doc.save()
+}
+
+test('pdfShrink clears page-level and XObject-level XMP /Metadata streams, not just the catalog one', async () => {
+  const input = await pdfWithPageAndXObjectXmp()
+  const inputText = new TextDecoder('latin1').decode(input)
+  expect(inputText).toContain('Page Author')
+  expect(inputText).toContain('Image Author')
+
+  const result = await pdfShrink(input, { stripMetadata: true })
+  const outText = new TextDecoder('latin1').decode(result.bytes)
+  expect(outText).not.toContain('Page Author')
+  expect(outText).not.toContain('Image Author')
+
+  const out = await PDFDocument.load(result.bytes)
+  const [outPage] = out.getPages()
+  expect(outPage.node.get(PDFName.of('Metadata'))).toBeUndefined()
+})
+
 test('pdfShrink keeps metadata when stripMetadata is false', async () => {
   const input = await blankPdf(1)
   const result = await pdfShrink(input, { stripMetadata: false })

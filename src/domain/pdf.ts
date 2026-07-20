@@ -5,7 +5,7 @@
 // many source kinds and is out of the fileops-absorption boundary; it reuses
 // loadBoundedPdf below for its own bomb-guarded PDFDocument.load() call).
 
-import { PDFDocument, PDFName, PDFRef } from 'pdf-lib'
+import { PDFDocument, PDFName, PDFRef, PDFDict, PDFStream } from 'pdf-lib'
 import type { LeafFn } from '../op/types.js'
 import type { Handle } from '../effects/types.js'
 import { resolve, putBytes } from '../handles/handle.js'
@@ -125,18 +125,27 @@ export async function pdfShrink(input: Uint8Array, opts: PdfShrinkOptions = {}):
     doc.setCreator('')
 
     // setTitle/etc. above only clear the classic /Info dict -- a document's
-    // catalog can separately reference an XMP /Metadata stream (loadBoundedPdf
-    // passes { updateMetadata: false }, so pdf-lib never syncs the two) that
-    // still carries the original dc:title/dc:creator verbatim. Deleting the
-    // catalog's /Metadata key alone isn't enough either: PDFWriter.serializeToBuffer
-    // serializes every object in context.enumerateIndirectObjects() regardless
-    // of reachability from the trailer, so an unreferenced stream's bytes
-    // would still round-trip into the output. Drop the underlying indirect
-    // object from the context too so the XMP bytes never get written at all.
+    // catalog, individual pages, and XObjects (e.g. embedded images) can each
+    // separately carry their own XMP /Metadata stream (loadBoundedPdf passes
+    // { updateMetadata: false }, so pdf-lib never syncs any of these into the
+    // /Info dict) that still carries the original dc:title/dc:creator/GPS/etc
+    // verbatim -- Adobe/InDesign/Illustrator exports commonly populate
+    // per-image XMP packets this way when an image is placed into a PDF.
+    // Deleting a dict's /Metadata key alone isn't enough either:
+    // PDFWriter.serializeToBuffer serializes every object in
+    // context.enumerateIndirectObjects() regardless of reachability from the
+    // trailer, so an unreferenced stream's bytes would still round-trip into
+    // the output. So this walks every indirect object -- catalog, pages,
+    // XObjects alike -- and for each dict (or stream's own dict) carrying a
+    // /Metadata key, drops both the reference and the underlying indirect
+    // object from the context.
     const metadataKey = PDFName.of('Metadata')
-    const metadataRef = doc.catalog.get(metadataKey)
-    if (metadataRef !== undefined) {
-      doc.catalog.delete(metadataKey)
+    for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+      const dict = obj instanceof PDFDict ? obj : obj instanceof PDFStream ? obj.dict : undefined
+      if (!dict) continue
+      const metadataRef = dict.get(metadataKey)
+      if (metadataRef === undefined) continue
+      dict.delete(metadataKey)
       if (metadataRef instanceof PDFRef) doc.context.delete(metadataRef)
     }
   }
