@@ -70,6 +70,25 @@ export const LEAF_SHAPES: Readonly<Record<string, { input: LeafShape; output: Le
 })
 
 /**
+ * Per-leaf declared capability usage beyond `store`/`clock` (load-bearing for
+ * every leaf, so not worth flagging) -- currently just which leaves touch
+ * `caps.llm` (text.ts's `extract`/`summarize`, the only two LLM-`effect`
+ * leaves in LEAF_REGISTRY, see CLAUDE.md's domain-layout note). Used by
+ * src/op/plan.ts's planOpSpec (#361) to report which optional Caps fields a
+ * spec will actually reach -- `ask`/`sinks`/`cache` are all visible directly
+ * on an OpSpec's own shape and don't need a table like this one. A name
+ * absent here (any leaf not listed, including a host-registered extraLeaves
+ * leaf) is assumed to touch no capability beyond store/clock, the same
+ * permissive-default pattern LEAF_SHAPES uses for shape; keep this in sync
+ * with LEAF_REGISTRY by hand, same drift-risk tradeoff CLAUDE.md's
+ * LEAF_SHAPES/LEAF_REGISTRY note already flags for shape.
+ */
+export const LEAF_CAPS: Readonly<Record<string, readonly 'llm'[]>> = Object.freeze({
+  extract: ['llm'],
+  summarize: ['llm'],
+})
+
+/**
  * Merges host-supplied leaves onto LEAF_REGISTRY, same override order as
  * SINK_REGISTRY's host-overrides-built-in merge (src/adapters/op-run.ts's
  * `Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks)`).

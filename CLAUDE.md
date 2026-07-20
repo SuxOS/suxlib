@@ -661,3 +661,19 @@ There is no linter in this repo. Run both locally before pushing.
   argument to stay attributable — don't reach for `createGovernor`'s
   construction-time tagging for it, that pattern only fits values that are
   stable for a primitive's whole lifetime.
+- `src/op/plan.ts`'s `planOpSpec` (#361) is a third non-executing structural
+  sibling to `validateOpSpec`/`describePipelineSchema` (`src/op/spec.ts`,
+  `src/op/introspect.ts`) — its `maxRetryMultiplier` (Σ(retries+1)) sums over
+  every `leaf` *regardless of `opts.kind`*, not just `'effect'` leaves: per
+  the Governor convention note above, `LeafOpts.retries` applies to any leaf
+  kind, so a `'pure'` leaf's retries still burn real attempts even though
+  it's never gated by a breaker/bucket. Its capability-reachability fields
+  (`usesLlm`/`llmLeaves`) read a new `LEAF_CAPS` table in `src/op/registry.ts`
+  (parallel to `LEAF_SHAPES`, same by-hand sync-drift risk) rather than
+  inventing shape-inference for it — `ask`/`sinks`/`cache` don't need a table
+  since they're already visible directly on an `OpSpec` node's own shape.
+  Fan-out width (`maxConcurrency`) only ever reports each `map`/`mapField`'s
+  declared `concurrency` bound, never a total invocation count — how many
+  items an array-shaped input actually holds at run time (e.g. past
+  `unzip`'s `handle[]` output) is runtime data no structural pass can see, so
+  `planOpSpec` deliberately refuses to estimate it rather than guess.

@@ -329,4 +329,22 @@ describe('http adapter', () => {
     const res = await post('op/validate', { spec: { tag: 'leaf', name: 'shout' } }, {}, env)
     expect(await res.json()).toEqual({ valid: true, errors: [] })
   })
+
+  it('POST /op/plan: reports a non-executing cost/capability audit (#361)', async () => {
+    const res = await post('op/plan', {
+      spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'summarize', opts: { retries: 1 } }, { tag: 'sink', targets: ['store'] }] },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { nodeCount: number; maxRetryMultiplier: number; usesLlm: boolean; llmLeaves: string[]; sinkTargets: string[] }
+    expect(body.nodeCount).toBe(3)
+    expect(body.maxRetryMultiplier).toBe(2 + 1) // summarize retries:1 -> 2, sink default -> 1
+    expect(body.usesLlm).toBe(true)
+    expect(body.llmLeaves).toEqual(['summarize'])
+    expect(body.sinkTargets).toEqual(['store'])
+  })
+
+  it('POST /op/plan: a missing `spec` surfaces a 400', async () => {
+    const res = await post('op/plan', {})
+    expect(res.status).toBe(400)
+  })
 })
