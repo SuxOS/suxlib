@@ -13,7 +13,7 @@
 // it finds back into base64 -- the caller never sees or invents a Store key
 // itself.
 
-import type { Handle, Llm, Cache, Store, Ask } from '../effects/types.js'
+import type { Handle, Llm, Cache, Store, Ask, Checkpoint } from '../effects/types.js'
 import { MemoryStore } from '../effects/types.js'
 import type { Caps, Governor, SinkTarget, LeafFn } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
@@ -120,8 +120,18 @@ const llmUnavailable: Llm = {
  * `opts.gOpts.onTrace` still fires alongside the collector when both are
  * present -- `trace: true` doesn't replace a live callback, it adds a
  * buffered one.
+ *
+ * `runId`: opt-in, for a caller that wants to *resume* a previously
+ * checkpointed run (#396) -- pass back the `runId` a prior call returned (see
+ * `OpRunOpts.checkpoint` below) to share that run's `(runId, path)`
+ * checkpoint ledger, letting already-completed nodes short-circuit instead of
+ * re-executing. Omitted, runOpSpec mints a fresh one via
+ * `crypto.randomUUID()` itself (rather than letting `runInline` default it
+ * internally) specifically so it can hand the minted id back to the caller --
+ * `runInline`'s own internal default is otherwise unobservable from outside
+ * the call.
  */
-export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean }
+export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean; runId?: string }
 
 /**
  * Governors/cache/store a host wants shared across calls (createGovernor per
@@ -179,8 +189,17 @@ export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean }
  * config (carries function callbacks), same as governors/cache/store/leaves
  * above -- never JSON-caller-supplied. Omitted entirely, runInline's own
  * defaults apply as before.
+ *
+ * `checkpoint`: a host-supplied Checkpoint implementation (#390), threaded to
+ * `caps.checkpoint` the same way `store`/`cache`/`llm` are -- lets a
+ * `runId`-sharing pair of `runOpSpec` calls resume a crashed run instead of
+ * re-executing every node from scratch. Omitted entirely, `caps.checkpoint`
+ * stays undefined and every node runs unconditionally, same as before #390.
+ * Supplying `checkpoint` without also supplying a long-lived `store` has the
+ * same footgun as `cache` above -- a checkpointed node's Handle-shaped result
+ * won't resolve against a fresh per-call MemoryStore on a resumed call.
  */
-export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn>; ask?: Ask; gOpts?: RunGovernedOpts }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn>; ask?: Ask; gOpts?: RunGovernedOpts; checkpoint?: Checkpoint }
 
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
@@ -192,11 +211,22 @@ export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; s
  * reliability primitives they gate (breaker trip state, token-bucket fill,
  * memoized results, handle data) actually persist across requests instead of
  * resetting on every stateless HTTP route / MCP tool call.
+ *
+ * When `opts.checkpoint` is supplied, the return value always carries the
+ * `runId` this call ran under (minted fresh via `crypto.randomUUID()` when
+ * the request didn't supply one) alongside `result`/`trace` -- a caller
+ * without a checkpoint capability configured keeps getting the pre-#396
+ * bare-result (or `{ result, trace }`) shape unchanged, since it has no way
+ * to make use of a `runId` anyway.
  */
-export async function runOpSpec({ spec, input, trace }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
+export async function runOpSpec({ spec, input, trace, runId }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
   const store = opts.store ?? new MemoryStore()
   const sinks = Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks) as Record<string, SinkTarget>
-  const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache, ask: opts.ask }
+  const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache, ask: opts.ask, checkpoint: opts.checkpoint }
+  // Mint the runId here (rather than letting runInline default it
+  // internally) so it can be handed back to the caller -- runInline's own
+  // internal default would otherwise be unobservable from outside the call.
+  const effectiveRunId = runId ?? crypto.randomUUID()
   const tree = buildOp(spec, opts.leaves)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
   let gOpts = opts.gOpts
@@ -220,7 +250,10 @@ export async function runOpSpec({ spec, input, trace }: OpRunRequest, opts: OpRu
       },
     }
   }
-  const result = await runInline(tree, hydrated, caps, gOpts)
+  const result = await runInline(tree, hydrated, caps, gOpts, '', effectiveRunId)
   const dehydrated = await dehydrate(store, result)
+  if (opts.checkpoint) {
+    return trace ? { result: dehydrated, trace: events, runId: effectiveRunId } : { result: dehydrated, runId: effectiveRunId }
+  }
   return trace ? { result: dehydrated, trace: events } : dehydrated
 }
