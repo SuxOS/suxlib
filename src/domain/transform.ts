@@ -175,9 +175,14 @@ function stripYamlComment(line: string): string {
 }
 
 export function parseYaml(text: string): unknown {
+  // Blank lines are kept (as '') rather than filtered out here -- a block
+  // scalar's body can contain an intentional blank line (#392), and only
+  // readBlockScalar knows whether a given blank belongs to the scalar it's
+  // reading. Every other consumer (parseBlock/parseSeq/parseNestedSeq/
+  // mergeMap) explicitly skips blank lines itself instead.
   const lines = text
     .split(/\r?\n/)
-    .filter((l) => l.trim() !== '' && !/^\s*#/.test(l))
+    .filter((l) => !/^\s*#/.test(l))
     .map(stripYamlComment)
     .map((l) => l.replace(/\s+$/, ''))
 
@@ -201,15 +206,22 @@ export function parseYaml(text: string): unknown {
   // Consumes every following line indented at least `minIndent` (the block's
   // content columns are auto-detected from the first such line unless the
   // header gave an explicit indent) as this block scalar's body, applying
-  // literal/folded joining and chomping. Note: parseYaml's line filter above
-  // already drops blank lines from `lines` entirely, so this -- like the rest
-  // of this deliberately non-spec-complete "YAMLish" parser -- can't preserve
-  // blank lines embedded inside a block scalar's body.
+  // literal/folded joining and chomping. A blank line never terminates the
+  // block on its own (only a subsequent non-blank line dedented past
+  // `minIndent` does) and is kept as an empty content line, so blank lines
+  // embedded in the middle of a literal/folded body round-trip (#392);
+  // leading/trailing blanks around that (which don't count as content) are
+  // trimmed back off before chomping is applied.
   function readBlockScalar(header: NonNullable<ReturnType<typeof parseBlockScalarHeader>>, minIndent: number): string {
     const contentLines: string[] = []
     let indent = header.indent !== undefined ? minIndent - 1 + header.indent : undefined
     while (i < lines.length) {
       const line = lines[i]
+      if (line === '') {
+        contentLines.push('')
+        i++
+        continue
+      }
       const ind = indentOf(line)
       if (ind < minIndent) break
       if (indent === undefined) indent = ind
@@ -217,14 +229,22 @@ export function parseYaml(text: string): unknown {
       contentLines.push(line.slice(indent))
       i++
     }
+    while (contentLines.length && contentLines[contentLines.length - 1] === '') contentLines.pop()
+    while (contentLines.length && contentLines[0] === '') contentLines.shift()
     if (contentLines.length === 0) return ''
-    const text = header.folded ? contentLines.join(' ') : contentLines.join('\n')
+    // Folded style: a run of blank lines between content lines becomes that
+    // many newlines instead of the usual space-joined "fold"; a lone
+    // newline between two non-blank lines still folds to a single space.
+    const text = header.folded
+      ? contentLines.reduce((acc, l, k) => (k === 0 ? l : acc + (l === '' || contentLines[k - 1] === '' ? '\n' : ' ') + l))
+      : contentLines.join('\n')
     if (header.chomp === 'strip') return text
-    return text + '\n' // 'clip' and 'keep' -- indistinguishable here since blank trailing lines are already filtered out
+    return text + '\n' // 'clip' and 'keep' -- indistinguishable here since trailing blank lines are trimmed off above
   }
 
   function parseBlock(minIndent: number, depth = 0): unknown {
     if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
+    while (lines[i] === '') i++
     const first = lines[i]
     if (first === undefined) return null
     if (/^\s*-(\s|$)/.test(first)) return parseSeq(minIndent, depth)
@@ -244,6 +264,7 @@ export function parseYaml(text: string): unknown {
     const arr: unknown[] = []
     let seqIndent: number | undefined
     while (i < lines.length) {
+      if (lines[i] === '') { i++; continue }
       const line = lines[i]
       const ind = indentOf(line)
       if (ind < minIndent || !/^\s*-(\s|$)/.test(line)) break
@@ -299,6 +320,7 @@ export function parseYaml(text: string): unknown {
   function parseNestedSeq(firstRest: string, indent: number, depth: number): unknown[] {
     const arr: unknown[] = [parseSeqItem(firstRest.slice(1).replace(/^\s*/, ''), indent, depth)]
     while (i < lines.length) {
+      if (lines[i] === '') { i++; continue }
       const line = lines[i]
       const ind = indentOf(line)
       if (ind !== indent || !/^\s*-(\s|$)/.test(line)) break
@@ -334,6 +356,7 @@ export function parseYaml(text: string): unknown {
   }
   function mergeMap(obj: Record<string, unknown>, minIndent: number, depth: number) {
     while (i < lines.length) {
+      if (lines[i] === '') { i++; continue }
       const line = lines[i]
       const ind = indentOf(line)
       if (ind < minIndent || /^\s*-(\s|$)/.test(line.slice(ind))) break
@@ -346,6 +369,7 @@ export function parseYaml(text: string): unknown {
       // parse the value (to consume its lines) but drop the assignment.
       const dangerous = key === '__proto__' || key === 'constructor' || key === 'prototype'
       if (kv.rest.trim() === '') {
+        while (lines[i] === '') i++
         const next = lines[i]
         const seqAtKeyIndent = next !== undefined && indentOf(next) === ind && /^\s*-(\s|$)/.test(next)
         const block = parseBlock(seqAtKeyIndent ? ind : ind + 1, depth + 1)
