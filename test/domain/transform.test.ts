@@ -121,6 +121,16 @@ test('parseYaml does not truncate a block scalar body line at a "#" preceded by 
     .toEqual({ note: 'value # trailing\nline2\n', key: 'value' })
 })
 
+test('parseYaml opens a block scalar on a mapping line whose key is quoted and contains a colon (#401)', () => {
+  expect(parseYaml('"a: b": |\n  line with # not a comment\n  more text\n'))
+    .toEqual({ 'a: b': 'line with # not a comment\nmore text\n' })
+})
+
+test('parseYaml opens a block scalar on a sequence item whose inline key is quoted and contains a colon (#401)', () => {
+  expect(parseYaml('items:\n  - "a: b": |\n      line with # not a comment\n      more text\n'))
+    .toEqual({ items: [{ 'a: b': 'line with # not a comment\nmore text\n' }] })
+})
+
 test('parseYaml skips a blank line between sibling map keys and between sequence items', () => {
   expect(parseYaml('a: 1\n\nb: 2\n')).toEqual({ a: 1, b: 2 })
   expect(parseYaml('- 1\n\n- 2\n')).toEqual([1, 2])
