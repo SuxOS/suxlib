@@ -354,6 +354,13 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       return traced('race', undefined, path, runId, runSig, caps, gOpts, input, async () => {
         const need = node.need ?? 1
         const total = node.ops.length
+        // buildOp/validateOpSpec (src/op/spec.ts) already reject `need >
+        // ops.length` for anything built from an OpSpec, but a hand-built Op
+        // tree (a host calling the `race()` combinator directly) skips that
+        // check -- without this, every branch succeeding would still never
+        // reach `wins.length >= need`, and nothing else here would ever
+        // settle this node's promise, hanging forever.
+        if (need > total) throw new Error(`race: \`need\` (${need}) exceeds its \`ops\` array's length (${total})`)
         // Cooperative-cancellation signal for the losing branches (#279's
         // contract, same as everywhere else in this file): aborting this
         // only stops a branch from *starting* its next step once the race
