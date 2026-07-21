@@ -3,10 +3,16 @@ import { op, pipe, map, mapField, sink, catchOp } from '../../src/op/combinators
 import { fixed } from '../../src/control/aimd.js'
 import { runInline } from '../../src/runtime/inline.js'
 import type { TraceEvent } from '../../src/control/trace.js'
+import { MemoryStore } from '../../src/effects/types.js'
 
 function clockCaps(sinks: Record<string, any> = {}) {
   let now = 0
   return { store: {}, llm: {}, clock: { now: () => now++ }, sinks } as any
+}
+
+function storeCaps(sinks: Record<string, any> = {}) {
+  let now = 0
+  return { store: new MemoryStore(), llm: {}, clock: { now: () => now++ }, sinks } as any
 }
 
 test('runInline emits no trace events when gOpts.onTrace is not supplied', async () => {
@@ -183,4 +189,40 @@ test('runInline\'s onTrace and gOpts.onEvent are independent streams: supplying 
     { kind: 'node-enter', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String), callId: expect.any(String) },
     { kind: 'node-exit', tag: 'leaf', name: 'flaky', path: '', runId: expect.any(String), callId: expect.any(String), durationMs: expect.any(Number), ok: true },
   ])
+})
+
+test('runInline: gOpts.traceSnapshots attaches inputRef/outputRef Handles snapshotting the actual value flowing through a leaf', async () => {
+  const leaf = op('double', async (n: number) => n * 2, { kind: 'pure' })
+  const caps = storeCaps()
+  const trace: TraceEvent[] = []
+  const result = await runInline(leaf, 21, caps, { onTrace: (e) => trace.push(e), traceSnapshots: true })
+  expect(result).toBe(42)
+  const enter = trace.find((e) => e.kind === 'node-enter') as Extract<TraceEvent, { kind: 'node-enter' }>
+  const exit = trace.find((e) => e.kind === 'node-exit') as Extract<TraceEvent, { kind: 'node-exit' }>
+  expect(enter.inputRef).toBeDefined()
+  expect(exit.outputRef).toBeDefined()
+  expect(JSON.parse(new TextDecoder().decode(await caps.store.get(enter.inputRef!)))).toBe(21)
+  expect(JSON.parse(new TextDecoder().decode(await caps.store.get(exit.outputRef!)))).toBe(42)
+})
+
+test('runInline: a failing node snapshots only its inputRef -- there is no output to snapshot', async () => {
+  const leaf = op('boom', async () => { throw new Error('kaboom') }, { kind: 'pure' })
+  const caps = storeCaps()
+  const trace: TraceEvent[] = []
+  await expect(runInline(leaf, 5, caps, { onTrace: (e) => trace.push(e), traceSnapshots: true })).rejects.toThrow('kaboom')
+  const enter = trace.find((e) => e.kind === 'node-enter') as Extract<TraceEvent, { kind: 'node-enter' }>
+  const exit = trace.find((e) => e.kind === 'node-exit') as Extract<TraceEvent, { kind: 'node-exit' }>
+  expect(enter.inputRef).toBeDefined()
+  expect(exit.outputRef).toBeUndefined()
+})
+
+test('runInline: without traceSnapshots, no inputRef/outputRef is attached even when onTrace is supplied', async () => {
+  const leaf = op('double', async (n: number) => n * 2, { kind: 'pure' })
+  const caps = storeCaps()
+  const trace: TraceEvent[] = []
+  await runInline(leaf, 21, caps, { onTrace: (e) => trace.push(e) })
+  for (const e of trace) {
+    expect((e as any).inputRef).toBeUndefined()
+    expect((e as any).outputRef).toBeUndefined()
+  }
 })

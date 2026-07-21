@@ -376,6 +376,24 @@ test('markdownToHtml sanitizes an unsafe link scheme to a harmless anchor', () =
   expect(html).toContain('href="#"')
 })
 
+test('markdownToHtml keeps a literal ")" inside a link href instead of truncating it there (#310)', () => {
+  const html = markdownToHtml('[wiki](https://en.wikipedia.org/wiki/Foo_(bar)) trailing text')
+  expect(html).toContain('<a href="https://en.wikipedia.org/wiki/Foo_(bar)">wiki</a>')
+  expect(html).toContain('</a> trailing text')
+})
+
+test('markdownToHtml handles two separate links, one with a parenthesized href, without corrupting the other', () => {
+  const html = markdownToHtml('[a](http://x.test/Foo_(bar)) and [b](http://y.test)')
+  expect(html).toContain('<a href="http://x.test/Foo_(bar)">a</a>')
+  expect(html).toContain('<a href="http://y.test">b</a>')
+})
+
+test('markdownToHtml leaves an unterminated link href as literal text instead of matching past end of string', () => {
+  const html = markdownToHtml('[broken](http://example.com/foo')
+  expect(html).not.toContain('<a ')
+  expect(html).toContain('[broken](http://example.com/foo')
+})
+
 test('markdownToHtml does not let emphasis regexes corrupt an underscore/asterisk in a link href', () => {
   const html = markdownToHtml('[click here](http://example.com/foo_bar_baz)')
   expect(html).toContain('<a href="http://example.com/foo_bar_baz">click here</a>')

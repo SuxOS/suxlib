@@ -248,7 +248,7 @@ const routes: Route[] = [
     handle: async (rawBody, env, signal) => {
       const body = rawBody as { spec?: unknown; input?: unknown; trace?: unknown; runId?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const trace = body.trace === true
+      const trace = body.trace === 'full' ? 'full' as const : body.trace === true
       const runId = typeof body.runId === 'string' ? body.runId : undefined
       // The request's own AbortSignal wires into cooperative cancellation
       // (#279) unless a host-supplied opRunGOpts already declares one.

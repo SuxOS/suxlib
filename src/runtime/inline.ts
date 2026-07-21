@@ -1,6 +1,7 @@
 import type { Op, Caps, Concurrency, CondPredicate } from '../op/types.js'
 import { runReconcile } from '../op/reconcile.js'
 import { runGoverned, OpAbortError, type RunGovernedOpts } from '../control/governor.js'
+import { snapshotValue } from '../control/trace.js'
 
 export class AskTimeoutError extends Error {
   constructor(readonly prompt: string) {
@@ -95,7 +96,13 @@ let traceCallSeq = 0
 // buildOp's mergeParams closes a leaf spec's `params` over the piped value,
 // so those params never appear as an enumerable field on the built tree) and
 // root input.
-async function traced<T>(tag: string, name: string | undefined, path: string, runId: string, runSig: string, caps: Caps, gOpts: RunGovernedOpts | undefined, fn: (callId: string) => Promise<T>): Promise<T> {
+//
+// `input` (#234) is the node's own input value, passed in explicitly (not
+// just captured inside `fn`'s closure) so that, when gOpts.traceSnapshots is
+// also set, it can be handed to snapshotValue alongside `fn`'s result -- a
+// second, separately-gated cost layered on top of the timing/ok/error trace
+// (see trace.ts's header comment).
+async function traced<T>(tag: string, name: string | undefined, path: string, runId: string, runSig: string, caps: Caps, gOpts: RunGovernedOpts | undefined, input: unknown, fn: (callId: string) => Promise<T>): Promise<T> {
   // Cooperative-cancellation checkpoint (#279): every node runInline
   // dispatches -- leaf, pipe step, map/mapField item, reconcile, sink
   // fanout/target, ask, catch's try -- passes through here before it starts,
@@ -120,10 +127,12 @@ async function traced<T>(tag: string, name: string | undefined, path: string, ru
   const onTrace = gOpts?.onTrace
   if (!onTrace) return run()
   const t0 = caps.clock.now()
-  onTrace({ kind: 'node-enter', tag, name, path, runId, callId })
+  const inputRef = gOpts?.traceSnapshots ? await snapshotValue(caps.store, input) : undefined
+  onTrace({ kind: 'node-enter', tag, name, path, runId, callId, ...(inputRef ? { inputRef } : {}) })
   try {
     const result = await run()
-    onTrace({ kind: 'node-exit', tag, name, path, runId, callId, durationMs: caps.clock.now() - t0, ok: true })
+    const outputRef = gOpts?.traceSnapshots ? await snapshotValue(caps.store, result) : undefined
+    onTrace({ kind: 'node-exit', tag, name, path, runId, callId, durationMs: caps.clock.now() - t0, ok: true, ...(outputRef ? { outputRef } : {}) })
     return result
   } catch (err) {
     onTrace({ kind: 'node-exit', tag, name, path, runId, callId, durationMs: caps.clock.now() - t0, ok: false, error: err instanceof Error ? err.message : String(err) })
@@ -144,16 +153,16 @@ async function traced<T>(tag: string, name: string | undefined, path: string, ru
 export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGovernedOpts, path = '', runId: string = crypto.randomUUID(), runSig = ''): Promise<any> {
   switch (node.tag) {
     case 'leaf':
-      return traced('leaf', node.name, path, runId, runSig, caps, gOpts, (callId) =>
+      return traced('leaf', node.name, path, runId, runSig, caps, gOpts, input, (callId) =>
         runGoverned(node.name, node.opts, node.fn, input, caps, caps.governors?.[node.name], gOpts, runId, callId))
     case 'pipe':
-      return traced('pipe', undefined, path, runId, runSig, caps, gOpts, async () => {
+      return traced('pipe', undefined, path, runId, runSig, caps, gOpts, input, async () => {
         let v = input
         for (let i = 0; i < node.steps.length; i++) v = await runInline(node.steps[i], v, caps, gOpts, childPath(path, i), runId, runSig)
         return v
       })
     case 'map':
-      return traced('map', undefined, path, runId, runSig, caps, gOpts, async (callId) => {
+      return traced('map', undefined, path, runId, runSig, caps, gOpts, input, async (callId) => {
         const items: any[] = input; const out = new Array(items.length)
         // Promise.allSettled, not Promise.all -- see the 'sink' case below for
         // why: an item's own runInline call may still be mid-flight (e.g.
@@ -176,7 +185,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         return out
       })
     case 'mapField':
-      return traced('mapField', undefined, path, runId, runSig, caps, gOpts, async (callId) => {
+      return traced('mapField', undefined, path, runId, runSig, caps, gOpts, input, async (callId) => {
         const obj = input as Record<string, unknown>
         const items = obj[node.arrayField] as any[]
         const out = new Array(items.length)
@@ -201,7 +210,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         return { ...rest, [targetField]: out }
       })
     case 'reconcile':
-      return traced('reconcile', undefined, path, runId, runSig, caps, gOpts, () => runReconcile(node.opts, input, caps.store))
+      return traced('reconcile', undefined, path, runId, runSig, caps, gOpts, input, () => runReconcile(node.opts, input, caps.store))
     case 'sink':
       // Traced per-target, not just once for the whole fanout: Promise.allSettled
       // (not Promise.all -- which would resolve as soon as the first target
@@ -211,7 +220,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       // gives every target's write equal opportunity to fail independently and
       // guarantees every target's node-exit has landed before this node decides
       // success/failure.
-      return traced('sink', undefined, path, runId, runSig, caps, gOpts, async () => {
+      return traced('sink', undefined, path, runId, runSig, caps, gOpts, input, async () => {
         const results = await Promise.allSettled(node.targets.map(t => {
           // A bare string target falls back entirely to the fanout call's own
           // `opts`; a `{ name, opts }` pair overrides per-field, per-target
@@ -219,7 +228,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
           // retries by declaring its own `opts: { retries: 0 }`.
           const name = typeof t === 'string' ? t : t.name
           const targetOpts = typeof t === 'string' ? undefined : t.opts
-          return traced('sink-target', name, childPath(path, name), runId, runSig, caps, gOpts, async (callId) => {
+          return traced('sink-target', name, childPath(path, name), runId, runSig, caps, gOpts, input, async (callId) => {
             const s = caps.sinks[name]
             if (!s) throw new Error(`unknown sink "${name}" (registered: ${Object.keys(caps.sinks).join(', ')})`)
             // Each write runs through runGoverned exactly like an 'effect' leaf's
@@ -240,7 +249,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         return input
       })
     case 'ask':
-      return traced('ask', undefined, path, runId, runSig, caps, gOpts, async () => {
+      return traced('ask', undefined, path, runId, runSig, caps, gOpts, input, async () => {
         // No Ask capability: there is no way to pause for a human answer, so an
         // immediate "timeout" is the honest default -- honor onTimeout rather than
         // silently overriding a caller's explicit 'fail' contract with 'proceed'.
@@ -258,7 +267,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       // and the discarded error's message -- that's what answers "why did the
       // fallback fire" when a caller supplies onTrace; this case itself still
       // only needs the error to decide whether to run the fallback.
-      return traced('catch', undefined, path, runId, runSig, caps, gOpts, async () => {
+      return traced('catch', undefined, path, runId, runSig, caps, gOpts, input, async () => {
         try { return await runInline(node.try, input, caps, gOpts, childPath(path, 'try'), runId, runSig) }
         catch (err) {
           // An abort is a control signal from outside the tree, not an
@@ -269,7 +278,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         }
       })
     case 'cond':
-      return traced('cond', undefined, path, runId, runSig, caps, gOpts, async () => {
+      return traced('cond', undefined, path, runId, runSig, caps, gOpts, input, async () => {
         for (let i = 0; i < node.cases.length; i++) {
           if (evalCondPredicate(node.cases[i].when, input)) {
             return runInline(node.cases[i].then, input, caps, gOpts, childPath(path, i), runId, runSig)
