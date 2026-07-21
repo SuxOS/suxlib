@@ -140,6 +140,14 @@ There is no linter in this repo. Run both locally before pushing.
   stays fixed once you go looking; re-check via `gh pr list --search
   "<issue>" --state all` rather than trusting a previously-recorded PR
   number.
+- **A suxbot-filed issue about the low-tier dispatcher re-selecting the same
+  stuck issue over and over (#313's pattern) is usually fixable from suxlib
+  alone, without touching `SuxOS/.github`'s reusable `issue-build.yml`**: run
+  `gh issue edit <offending-issue> --add-label hold` (or `needs-human`) on the
+  issue the dispatcher keeps re-selecting. Both labels are already an EXPAND
+  exclusion signal this task's own instructions honor, so the dispatcher
+  almost certainly treats them as an exclusion signal too (#314) — check this
+  before assuming the fix requires a cross-repo change this repo can't make.
 
 ## Consumers
 

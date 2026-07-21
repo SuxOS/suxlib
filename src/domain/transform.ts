@@ -965,6 +965,25 @@ function replaceTopLevelTags(html: string, tagNames: string[], render: (tagName:
   return out
 }
 
+// Recurses into any nested <blockquote> found inside `inner` (same
+// placeholder-pool trick renderListItem uses for nested <ul>/<ol>), so a
+// nested quote renders as its own `> ` block instead of the outer replace's
+// old lazy regex swallowing the inner tag's own close and merging both
+// levels' text with no separator (#411, the blockquote sibling of #353's
+// <ul>/<ol>/<li> nesting bug).
+function renderBlockquote(inner: string): string {
+  const nested: string[] = []
+  const withPlaceholders = replaceTopLevelTags(inner, ['blockquote'], (_tag, content) => {
+    nested.push(renderBlockquote(content))
+    return `\x01${nested.length - 1}\x01`
+  })
+  let text = inlineToMd(withPlaceholders)
+  nested.forEach((block, i) => {
+    text = text.replace(`\x01${i}\x01`, block ? `\n${block}\n` : '')
+  })
+  return text.trim().split('\n').map((l) => `> ${l}`.trimEnd()).join('\n')
+}
+
 function renderListItem(inner: string, indent: string, marker: string): string {
   const nested: string[] = []
   const withPlaceholders = replaceTopLevelTags(inner, ['ul', 'ol'], (tag, content) => {
@@ -1007,9 +1026,7 @@ export function htmlToMarkdown(html: string): string {
     const fence = '`'.repeat(Math.max(3, longestBacktickRun(inner) + 1))
     return `\x00${fence}\n${inner}\n${fence}\x00`
   })
-  s = s.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, txt) =>
-    `\x00${inlineToMd(txt).split('\n').map((l: string) => `> ${l}`.trimEnd()).join('\n')}\x00`,
-  )
+  s = replaceTopLevelTags(s, ['blockquote'], (_tag, inner) => `\x00${renderBlockquote(inner)}\x00`)
   s = replaceTopLevelTags(s, ['ul', 'ol'], (tag, inner) => `\x00${listItems(inner, tag === 'ol')}\x00`)
   s = s.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (_m, txt) => `\x00${inlineToMd(txt)}\x00`)
   s = s

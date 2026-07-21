@@ -37,6 +37,26 @@ function stripProducedAt(v: unknown, stack: Set<object> = new Set()): unknown {
 }
 
 /**
+ * The pre-hash string memoKey() below digests -- factored out and exported
+ * synchronously so runGoverned's singleflight in-flight map (#311,
+ * src/control/governor.ts) can compute a dedup key for two concurrent calls
+ * without waiting on memoKey's own `await crypto.subtle.digest(...)`. That
+ * await matters: registering the in-flight entry only *after* awaiting the
+ * real (hashed) memoKey leaves a window where a fast-settling call (e.g. a
+ * `pure` leaf with no retries) can register and already be cleaned up again
+ * before a second concurrent caller's own memoKey digest has even resolved,
+ * silently defeating the dedup it's there to provide. This material string
+ * never needs to be a hash itself -- it's only ever used as an in-process Map
+ * key, never persisted or compared across processes -- so computing it
+ * synchronously (no crypto) closes that window entirely: every concurrently-
+ * launched call reaches the in-flight check before any of them can possibly
+ * have finished running the leaf.
+ */
+export function memoKeyMaterial(name: string, input: unknown): string {
+  return `memo:${name}:${JSON.stringify(canonicalize(stripProducedAt(input)))}`
+}
+
+/**
  * Deterministic cache key for memoizing a leaf's *output* across separate
  * calls/runs -- leaf name plus the fully canonicalized `input` (a LeafFn's
  * single `input` param already carries both its Handle arg(s), whose sha256
@@ -48,7 +68,6 @@ function stripProducedAt(v: unknown, stack: Set<object> = new Set()): unknown {
  * even though both reuse the same canonicalize().
  */
 export async function memoKey(name: string, input: unknown): Promise<string> {
-  const stable = JSON.stringify(canonicalize(stripProducedAt(input)))
-  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`memo:${name}:${stable}`))
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(memoKeyMaterial(name, input)))
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('')
 }

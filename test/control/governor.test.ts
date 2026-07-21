@@ -430,6 +430,35 @@ test('a memo leaf calls fn once for repeated identical input, serving later call
   expect(second).toEqual(first)
 })
 
+test('two concurrent calls sharing a memo key coalesce onto one in-flight fn call instead of both running it (#311)', async () => {
+  let calls = 0
+  const fn = async (input: any) => { calls++; return { handle: input } }
+  const c = { ...caps(), cache: new MemoryCache() }
+  // Launched without awaiting between them, racing the exact miss-before-
+  // either-finishes window #311 describes.
+  const [a, b] = await Promise.all([
+    runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep),
+    runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep),
+  ])
+  expect(calls).toBe(1)
+  expect(b).toEqual(a)
+})
+
+test('a rejected in-flight memo call is shared by a concurrent joiner, then a later call misses and retries', async () => {
+  let calls = 0
+  const fn = async () => { calls++; throw new Error('boom') }
+  const c = { ...caps(), cache: new MemoryCache() }
+  const [firstResult, secondResult] = await Promise.allSettled([
+    runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, noSleep),
+    runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, noSleep),
+  ])
+  expect(calls).toBe(1)
+  expect(firstResult.status).toBe('rejected')
+  expect(secondResult.status).toBe('rejected')
+  await expect(runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, noSleep)).rejects.toThrow('boom')
+  expect(calls).toBe(2)
+})
+
 test('a memo leaf recomputes for a different input, keeping both results cached', async () => {
   let calls = 0
   const fn = async (input: any) => { calls++; return { handle: input } }

@@ -1,9 +1,9 @@
 import type { LeafFn, LeafOpts, Caps, Governor } from '../op/types.js'
-import type { Clock } from '../effects/types.js'
+import type { Cache, Clock } from '../effects/types.js'
 import type { GovernorEventHandler } from './events.js'
 import type { TraceEventHandler } from './trace.js'
 import { backoffFullJitter, idempotencyKey } from './retry.js'
-import { memoKey } from './memo.js'
+import { memoKey, memoKeyMaterial } from './memo.js'
 import { circuitBreaker } from './circuit-breaker.js'
 import { tokenBucket } from './token-bucket.js'
 import { fixed, aimd } from './aimd.js'
@@ -47,6 +47,33 @@ export interface RunGovernedOpts {
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+// Singleflight dedup for runGoverned's memo branch (#311): keyed per-Cache-
+// instance (a WeakMap, not a module-level Map) so two unrelated Caps sharing
+// this module don't coalesce calls against each other's cache. A concurrent
+// second call for the same memoKeyMaterial (src/control/memo.ts) joins the
+// first call's already-running promise instead of re-invoking `fn` --
+// without this, two fan-out items (map/mapField's Promise.allSettled) with
+// identical input both see a cache miss before either has finished and both
+// run the leaf. The entry is deleted once the first call settles (success or
+// failure), so a later, non-overlapping call still misses normally and
+// re-checks the cache itself.
+//
+// Keyed by the synchronous memoKeyMaterial string, not the async (hashed)
+// memoKey -- registering only after awaiting memoKey leaves a real window
+// where a fast-settling call (e.g. a `pure` leaf with no retries) can
+// register *and* already be cleaned up again before a second concurrent
+// caller's own memoKey digest has even resolved, silently defeating the
+// dedup. Every concurrently-launched call computes memoKeyMaterial
+// synchronously and reaches this check before any of them can possibly have
+// finished running the leaf, so there is no such window here.
+const memoInFlight = new WeakMap<Cache, Map<string, Promise<any>>>()
+
+function memoInFlightMap(cache: Cache): Map<string, Promise<any>> {
+  let m = memoInFlight.get(cache)
+  if (!m) { m = new Map(); memoInFlight.set(cache, m) }
+  return m
+}
 
 export type ConcurrencySpec = { kind: 'fixed'; n: number } | { kind: 'aimd'; start?: number; min?: number; max?: number }
 
@@ -99,7 +126,12 @@ export function createGovernor(name: string, spec: GovernorSpec, onEvent?: Gover
  * Requires `caps.cache`; with none supplied, memoization is silently a no-op
  * (same graceful-degradation pattern as `caps.ask` being optional) rather
  * than an error, so a leaf declaring `memo: true` still runs fine against a
- * Caps that hasn't wired a Cache yet.
+ * Caps that hasn't wired a Cache yet. Two concurrent calls that hash to the
+ * same memo key (e.g. duplicate items in one map/mapField fan-out) coalesce
+ * onto a single in-flight run via `memoInFlightMap` above instead of each
+ * independently executing `fn` (#311) -- the second caller emits its own
+ * `memo-hit` and awaits the first caller's result/rejection rather than
+ * re-running a possibly-`heavy`/`effect` leaf a second time.
  *
  * `runId` (#348) is the calling runInline call's own id (see inline.ts's
  * header comment on why it's minted once per top-level call and passed
@@ -131,13 +163,32 @@ export async function runGoverned(
   callId?: string,
 ): Promise<any> {
   if (opts.memo && caps.cache) {
-    const key = await memoKey(name, input)
-    const cached = await caps.cache.get(key)
-    if (cached !== undefined) { gOpts.onEvent?.({ kind: 'memo-hit', name, runId, callId }); return cached }
-    const result = await runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts, runId, callId)
-    await caps.cache.put(key, result)
-    gOpts.onEvent?.({ kind: 'memo-miss', name, runId, callId })
-    return result
+    const cache = caps.cache
+    // Join an already-in-flight call for this exact key instead of racing it.
+    // This check-and-register step runs with no `await` before it (the real,
+    // hashed memoKey is only computed below, inside the async IIFE) so every
+    // concurrently-launched call reaches it before any of them can possibly
+    // have finished running the leaf -- see memoInFlight's own header comment
+    // for why gating this on the async memoKey instead is unsafe.
+    const inFlightKey = memoKeyMaterial(name, input)
+    const inFlight = memoInFlightMap(cache)
+    const existing = inFlight.get(inFlightKey)
+    if (existing) { gOpts.onEvent?.({ kind: 'memo-hit', name, runId, callId }); return existing }
+    const runPromise = (async () => {
+      const key = await memoKey(name, input)
+      const cached = await cache.get(key)
+      if (cached !== undefined) { gOpts.onEvent?.({ kind: 'memo-hit', name, runId, callId }); return cached }
+      const result = await runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts, runId, callId)
+      await cache.put(key, result)
+      gOpts.onEvent?.({ kind: 'memo-miss', name, runId, callId })
+      return result
+    })()
+    inFlight.set(inFlightKey, runPromise)
+    try {
+      return await runPromise
+    } finally {
+      inFlight.delete(inFlightKey)
+    }
   }
   const maxRetries = opts.retries ?? 0
   const backoff = gOpts.backoff ?? { base: 200, cap: 10_000 }
