@@ -122,7 +122,11 @@ function stepLabel(s: OpSpec): string {
  * sensible shallow merge target. `__proto__`/`constructor`/`prototype` are
  * skipped the same way op-run.ts's hydrate() and reconcile.ts's fieldMerge
  * already guard untrusted JSON keys -- `params` comes from the same
- * caller-supplied spec JSON they do.
+ * caller-supplied spec JSON they do. Callers never reach this merge target
+ * for a bare-`handle` leaf (buildOpNode's 'leaf' case rejects `params` before
+ * building the pipe) -- otherwise this would happily overwrite a Handle's own
+ * `r2Key`/`sha256` identity fields, letting a caller point a leaf at an
+ * arbitrary Store entry it never legitimately produced or received (#172).
  */
 function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return input
@@ -394,6 +398,10 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         throw new Error(`leaf "${spec.name}": \`params\` must be an object`)
+      }
+      const inputShape = LEAF_SHAPES[spec.name]?.input
+      if (spec.params !== undefined && (inputShape === 'handle' || inputShape === 'handle[]')) {
+        throw new Error(`leaf "${spec.name}": \`params\` cannot be used on a bare-Handle input -- merging onto a Handle's own fields (r2Key/sha256/...) would let a caller overwrite its identity/location and read arbitrary Store entries (#172)`)
       }
       const opts: LeafOpts = { kind: o.kind ?? 'effect', retries: o.retries ?? 0, heavy: o.heavy, memo: o.memo }
       const params = spec.params
