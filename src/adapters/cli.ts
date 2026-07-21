@@ -14,7 +14,9 @@ import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../dom
 import { dispatchTransform, type Format } from '../domain/transform.js'
 import { runOpSpec, type OpRunOpts } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
-import type { OpSpec } from '../op/spec.js'
+import { validateOpSpec, type OpSpec } from '../op/spec.js'
+import { describePipelineSchema } from '../op/introspect.js'
+import { planOpSpec } from '../op/plan.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 const program = new Command()
@@ -31,24 +33,44 @@ program.name('suxlib-fileops').description('Shared file-ops CLI: archive, saniti
 
 // ---------- archive ----------
 
-const archiveCmd = program.command('archive').description('Create or extract zip/tar/gzip archives')
+const archiveCmd = program.command('archive').description('Create or extract zip/tar/gzip/tar.gz archives')
 
 archiveCmd
   .command('create')
   .description('Pack one or more files into an archive')
   .argument('<files...>', 'files to pack')
   .requiredOption('-o, --output <path>', 'output archive path')
-  .option('-f, --format <format>', 'zip | tar | gzip (gzip supports exactly one input file)', 'zip')
-  .option('-m, --mtime <epoch-ms>', "override every packed file's mtime (default: each input file's own filesystem mtime)")
+  .option('-f, --format <format>', 'zip | tar | gzip | tar.gz (gzip supports exactly one input file)', 'zip')
+  .option('-m, --mtime <epoch-ms-or-pairs>', "override packed file mtime(s): a bare epoch-ms value applies to every file, or 'name=epoch-ms[,name=epoch-ms...]' to override specific files by their basename (default: each input file's own filesystem mtime)")
   .action((files: string[], opts: { output: string; format: string; mtime?: string }) => {
     const format = opts.format as ArchiveFormat
-    if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, or gzip (got '${format}')`)
+    if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, gzip, or tar.gz (got '${format}')`)
     let mtimeOverride: number | undefined
+    let perFileMtime: Map<string, number> | undefined
     if (opts.mtime !== undefined) {
-      mtimeOverride = Number(opts.mtime)
-      if (Number.isNaN(mtimeOverride)) throw new Error(`--mtime must be a numeric epoch-ms value (got '${opts.mtime}')`)
+      if (opts.mtime.includes('=')) {
+        perFileMtime = new Map()
+        for (const pair of opts.mtime.split(',')) {
+          const eq = pair.indexOf('=')
+          const name = eq === -1 ? '' : pair.slice(0, eq)
+          const v = Number(pair.slice(eq + 1))
+          if (!name || Number.isNaN(v)) throw new Error(`--mtime per-file entries must be 'name=epoch-ms' with a numeric value (got '${pair}')`)
+          perFileMtime.set(name, v)
+        }
+        const basenames = new Set(files.map((f) => basename(f)))
+        for (const name of perFileMtime.keys()) {
+          if (!basenames.has(name)) throw new Error(`--mtime references unknown file '${name}' (packed files: ${[...basenames].join(', ')})`)
+        }
+      } else {
+        mtimeOverride = Number(opts.mtime)
+        if (Number.isNaN(mtimeOverride)) throw new Error(`--mtime must be a numeric epoch-ms value or 'name=epoch-ms[,name=epoch-ms...]' (got '${opts.mtime}')`)
+      }
     }
-    const entries = files.map((f) => ({ name: basename(f), data: new Uint8Array(readFileSync(f)), mtime: mtimeOverride ?? statSync(f).mtimeMs }))
+    const entries = files.map((f) => {
+      const name = basename(f)
+      const mtime = perFileMtime?.get(name) ?? mtimeOverride ?? statSync(f).mtimeMs
+      return { name, data: new Uint8Array(readFileSync(f)), mtime }
+    })
     const out = archiveCreate(format, entries)
     writeFileSync(opts.output, out)
     console.log(`wrote ${opts.output} (${out.length} bytes, ${ARCHIVE_MIME[format]}, ${entries.length} file(s))`)
@@ -56,13 +78,22 @@ archiveCmd
 
 archiveCmd
   .command('extract')
-  .description("Extract an archive's entries to a directory")
+  .description("Extract an archive's entries to a directory, or list them without writing to disk when -o is omitted")
   .argument('<archive>', 'archive file to extract')
-  .requiredOption('-o, --output <dir>', 'output directory')
-  .option('-f, --format <format>', 'zip | tar | gzip (default: inferred from extension)')
-  .action((archivePath: string, opts: { output: string; format?: string }) => {
+  .option('-o, --output <dir>', 'output directory; when omitted, prints each entry (name/bytes/text/base64/mtime) as JSON to stdout instead of extracting')
+  .option('-f, --format <format>', 'zip | tar | gzip | tar.gz (default: inferred from extension)')
+  .action((archivePath: string, opts: { output?: string; format?: string }) => {
     const format = (opts.format as ArchiveFormat) ?? inferArchiveFormat(archivePath)
+    if (!ARCHIVE_FORMATS.includes(format)) throw new Error(`--format must be zip, tar, gzip, or tar.gz (got '${format}')`)
     const bytes = new Uint8Array(readFileSync(archivePath))
+    if (!opts.output) {
+      const { entries, skipped } = archiveExtract(format, bytes)
+      console.log(JSON.stringify({
+        entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, mtime: e.mtime, base64: bytesToB64(e.data) })),
+        ...(skipped?.length ? { skipped } : {}),
+      }, null, 2))
+      return
+    }
     const { written, skipped } = extractArchiveTo(format, bytes, opts.output)
     console.log(`extracted ${written} entr${written === 1 ? 'y' : 'ies'} to ${opts.output}`)
     if (skipped.length) {
@@ -72,6 +103,7 @@ archiveCmd
 
 function inferArchiveFormat(path: string): ArchiveFormat {
   if (path.endsWith('.zip')) return 'zip'
+  if (path.endsWith('.tar.gz') || path.endsWith('.tgz')) return 'tar.gz'
   if (path.endsWith('.tar')) return 'tar'
   if (path.endsWith('.gz') || path.endsWith('.gzip')) return 'gzip'
   throw new Error(`Cannot infer archive format from '${path}'. Pass --format explicitly.`)
@@ -248,7 +280,11 @@ function extractHandleFiles(value: unknown, files: Array<{ name: string; bytes: 
   }
   if (Array.isArray(value)) return value.map((v) => extractHandleFiles(v, files))
   if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {}
+    // Object.create(null), not {}: mirrors resolveFileRefs' guard above — a
+    // result key literally named "__proto__" assigned onto a plain {}
+    // accumulator would hit the inherited Annex-B setter instead of becoming
+    // an ordinary own property.
+    const out: Record<string, unknown> = Object.create(null)
     for (const [k, v] of Object.entries(value)) out[k] = extractHandleFiles(v, files)
     return out
   }
@@ -299,22 +335,73 @@ export const pipelineRunCmd = pipelineCmd
   .argument('<spec-file>', 'JSON file: { spec: OpSpec, input }. Input values shaped { "$file": "<path>", "type"?: "<mime>" } are read off disk and marshalled into Handle refs.')
   .option('-o, --output <dir>', 'write Handle-shaped result value(s) to files in this directory instead of inlining base64 in the printed JSON')
   .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- llm/store/cache/governors/sinks for this run, the shell CLI\'s equivalent of a programmatic caller\'s main(argv, opRunOpts)')
-  .action(async (specFile: string, opts: { output?: string; config?: string }) => {
+  .option('--trace', 'include a TraceEvent[] execution trace alongside the result')
+  .action(async (specFile: string, opts: { output?: string; config?: string; trace?: boolean }) => {
     const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown; input?: unknown }
     if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
     const input = resolveFileRefs(parsed.input, dirname(resolve(specFile)))
     const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
-    const result = await runOpSpec({ spec: parsed.spec as OpSpec, input }, runOpts)
+    const outcome = await runOpSpec({ spec: parsed.spec as OpSpec, input, trace: !!opts.trace }, runOpts)
+    const result = opts.trace ? (outcome as { result: unknown }).result : outcome
     if (opts.output) {
       const files: Array<{ name: string; bytes: Uint8Array }> = []
       const shaped = extractHandleFiles(result, files)
       mkdirSync(opts.output, { recursive: true })
       for (const f of files) writeFileSync(join(opts.output, f.name), f.bytes)
-      console.log(JSON.stringify(shaped, null, 2))
+      const printed = opts.trace ? { result: shaped, trace: (outcome as { trace: unknown }).trace } : shaped
+      console.log(JSON.stringify(printed, null, 2))
       if (files.length) console.log(`wrote ${files.length} handle result(s) to ${opts.output}`)
     } else {
-      console.log(JSON.stringify(result))
+      console.log(JSON.stringify(opts.trace ? { result, trace: (outcome as { trace: unknown }).trace } : result))
     }
+  })
+
+/** Prints the same leaf/sink/reconcile-mode/field-policy schema `describe_pipeline`
+ * (mcp.ts) and `GET /op/schema` (http.ts) expose, so a caller building a
+ * `pipeline run` spec file can discover the current op-tree grammar without
+ * digging through source (#187). `--config` mirrors `pipeline run`'s own flag,
+ * so host-registered leaves/sinks show up here too, not just the built-ins. */
+pipelineCmd
+  .command('describe')
+  .description('Print the op-tree pipeline schema (leaves, sinks, reconcile modes, field-merge policies) as JSON')
+  .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- same as `pipeline run --config`, for host-registered leaves/sinks')
+  .action(async (opts: { config?: string }) => {
+    const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
+    console.log(JSON.stringify(describePipelineSchema(runOpts.leaves, runOpts.sinks)))
+  })
+
+/** Checks a spec file's `spec` against the same structural rules `pipeline run`
+ * would enforce via buildOp, but collects every error into one report instead
+ * of throwing on the first (#208) -- mirrors `pipeline describe`'s `--config`
+ * handling so host-registered leaves validate correctly too. Exits non-zero
+ * when the spec is invalid, so this is scriptable as a pre-flight lint step. */
+pipelineCmd
+  .command('validate')
+  .description('Check a JSON op-tree spec for structural errors without running it; prints every error found, not just the first')
+  .argument('<spec-file>', 'JSON file: { spec: OpSpec }')
+  .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- same as `pipeline run --config`, for host-registered leaves')
+  .action(async (specFile: string, opts: { config?: string }) => {
+    const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown }
+    if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
+    const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
+    const errors = validateOpSpec(parsed.spec as OpSpec, runOpts.leaves)
+    console.log(JSON.stringify({ valid: errors.length === 0, errors }, null, 2))
+    if (errors.length) process.exitCode = 1
+  })
+
+/** Non-executing cost/capability audit (#361) -- reports node count, worst-case
+ * map/mapField concurrency, worst-case Σ(retries+1) retry multiplier, and which
+ * optional Caps fields (ask/cache/llm/sink targets) the spec will reach if run,
+ * without touching caps.store/llm/sinks or building the actual Op tree. See
+ * src/op/plan.ts's planOpSpec doc for the full breakdown. */
+pipelineCmd
+  .command('plan')
+  .description('Report a non-executing cost/capability audit for a JSON op-tree spec (node count, worst-case concurrency/retries, Caps reachability)')
+  .argument('<spec-file>', 'JSON file: { spec: OpSpec }')
+  .action(async (specFile: string) => {
+    const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown }
+    if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
+    console.log(JSON.stringify(planOpSpec(parsed.spec as OpSpec), null, 2))
   })
 
 /** Re-exported for tests: the actual dispatch logic is `dispatchTransform` in
@@ -327,10 +414,26 @@ export const transform = dispatchTransform
  * `opRunOpts` lets a programmatic caller (not the bin script, which has no
  * way to construct a live JS object from argv) supply `pipeline run` the
  * same host-configurable governors/cache/store/sinks/llm HTTP's Env and
- * MCP's RegisterFileopsToolsOptions already offer runOpSpec. */
-export async function main(argv: string[] = process.argv, opRunOpts: OpRunOpts = {}): Promise<void> {
+ * MCP's RegisterFileopsToolsOptions already offer runOpSpec. `allowCommands`
+ * restricts the exposed top-level command tree (e.g. `['transform',
+ * 'sanitize']`) to that subset, mirroring MCP's `RegisterFileopsToolsOptions
+ * .allow` / HTTP's `Env.allowRoutes` -- every command is available when
+ * omitted. Re-applied fresh on every call against the full command list
+ * captured at module load, so one call's subset never leaks into the next
+ * call's default. */
+export async function main(argv: string[] = process.argv, opRunOpts: OpRunOpts = {}, allowCommands?: string[]): Promise<void> {
   cliOpRunOpts = opRunOpts
   pipelineRunCmd.description(pipelineRunDescription(mergeLeaves(opRunOpts.leaves)))
+  // argv[2] is the top-level subcommand name (archive/pdf/sanitize/transform/pipeline)
+  // for every invocation shape this CLI supports -- checked ahead of commander's own
+  // parsing rather than by mutating `program.commands` (a readonly-typed array on the
+  // module-level singleton Command; reassigning/splicing it would also need resetting
+  // back to the full set on every call to avoid one call's subset leaking into the next).
+  if (allowCommands && argv[2] !== undefined && !allowCommands.includes(argv[2]) && argv[2] !== '--help' && argv[2] !== '-h') {
+    console.error(`error: unknown command '${argv[2]}' (allowed: ${allowCommands.join(', ')})`)
+    process.exitCode = 1
+    return
+  }
   try {
     await program.parseAsync(argv)
   } catch (e) {

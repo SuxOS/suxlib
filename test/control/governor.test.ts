@@ -1,5 +1,5 @@
 import { test, expect } from 'vitest'
-import { runGoverned, createGovernor, CircuitOpenError } from '../../src/control/governor.js'
+import { runGoverned, createGovernor, CircuitOpenError, OpAbortError } from '../../src/control/governor.js'
 import { tokenBucket } from '../../src/control/token-bucket.js'
 import { circuitBreaker } from '../../src/control/circuit-breaker.js'
 import { fixed, aimd } from '../../src/control/aimd.js'
@@ -33,6 +33,38 @@ test('emits a retry-attempt event before each backoff sleep', async () => {
   expect(events).toEqual([
     { kind: 'retry-attempt', name: 'leaf', attempt: 0, delayMs: expect.any(Number) },
     { kind: 'retry-attempt', name: 'leaf', attempt: 1, delayMs: expect.any(Number) },
+  ])
+})
+
+test('threads a caller-supplied runId (#348) onto every GovernorEvent kind runGoverned can emit', async () => {
+  let calls = 0
+  const fn = async () => { calls++; if (calls === 1) throw new Error('flaky'); return 'ok' }
+  const events: any[] = []
+  // createGovernor tags every primitive event with the leaf `name` at
+  // construction time (see its own JSDoc) -- runId is threaded separately, by
+  // runGoverned, as a per-call argument to each primitive's gating method.
+  const governor = createGovernor('leaf', { circuitBreaker: { failureThreshold: 5, cooldownMs: 1000, halfOpenSuccesses: 1 }, concurrency: { kind: 'aimd', start: 1, max: 1 } }, (e) => events.push(e))
+  const result = await runGoverned(
+    'leaf', { kind: 'effect', retries: 1 }, fn, null, caps(), governor,
+    { ...noSleep, onEvent: (e) => events.push(e) },
+    'run-xyz',
+  )
+  expect(result).toBe('ok')
+  expect(events.length).toBeGreaterThan(0)
+  expect(events.every((e) => e.runId === 'run-xyz')).toBe(true)
+  expect(events.some((e) => e.kind === 'retry-attempt')).toBe(true)
+  expect(events.some((e) => e.kind === 'aimd-increase')).toBe(true)
+})
+
+test('threads runId through memo-hit/memo-miss events', async () => {
+  const fn = async (v: any) => v
+  const c = { ...caps(), cache: new MemoryCache() }
+  const events: any[] = []
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, { ...noSleep, onEvent: e => events.push(e) }, 'run-abc')
+  await runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, { ...noSleep, onEvent: e => events.push(e) }, 'run-abc')
+  expect(events).toEqual([
+    { kind: 'memo-miss', name: 'shrink', runId: 'run-abc' },
+    { kind: 'memo-hit', name: 'shrink', runId: 'run-abc' },
   ])
 })
 
@@ -174,6 +206,30 @@ test('releases the half-open probe slot after a failed attempt, so a subsequent 
   expect(breaker.state).toBe('closed')
 })
 
+test('releases the half-open probe slot before the retry backoff sleep, not after it', async () => {
+  const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
+  breaker.onFailure(0) // -> open
+  breaker.allow(100)   // cooldown elapsed -> half-open
+
+  let releaseSleep!: () => void
+  const blockingSleep = () => new Promise<void>(resolve => { releaseSleep = resolve })
+  const failing = async () => { throw new Error('still down') }
+
+  const run = runGoverned('leaf', { kind: 'effect', retries: 1 }, failing, null, caps(100), { circuitBreaker: breaker }, { sleep: blockingSleep })
+  await new Promise(resolve => setTimeout(resolve, 0)) // let the probe fail and reach the backoff sleep
+
+  // The probe already failed and released its slot -- a concurrent call should be able to
+  // reserve a new probe immediately, without waiting for the sleeping attempt to finish.
+  expect(breaker.reserveHalfOpenProbe()).toBe(true)
+  breaker.releaseHalfOpenProbe()
+
+  releaseSleep()
+  // The retry attempt after the sleep re-checks the breaker at the same clock time as the
+  // failed probe, so it's immediately circuit-open again -- not the point under test, which
+  // is that the probe slot was already free *during* the sleep, above.
+  await expect(run).rejects.toThrow(CircuitOpenError)
+})
+
 test('releases the half-open probe slot when the token bucket throws, so a subsequent call can probe again', async () => {
   const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
   breaker.onFailure(0) // -> open
@@ -212,6 +268,13 @@ test('does not compute an idempotencyKey for pure leaves', async () => {
   let seenKey: string | undefined = 'not-called'
   const fn = async (_input: any, _caps: any, idemKey?: string) => { seenKey = idemKey; return 'ok' }
   await runGoverned('leaf', { kind: 'pure' }, fn, { a: 1 }, caps(), undefined, noSleep)
+  expect(seenKey).toBeUndefined()
+})
+
+test('does not compute an idempotencyKey for an effect leaf with no retries -- nothing to dedupe', async () => {
+  let seenKey: string | undefined = 'not-called'
+  const fn = async (_input: any, _caps: any, idemKey?: string) => { seenKey = idemKey; return 'ok' }
+  await runGoverned('leaf', { kind: 'effect' }, fn, { a: 1 }, caps(), undefined, noSleep)
   expect(seenKey).toBeUndefined()
 })
 
@@ -413,4 +476,141 @@ test('a failed attempt is not cached: a later call retries fn', async () => {
   await expect(runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, noSleep)).rejects.toThrow('boom')
   await expect(runGoverned('shrink', { kind: 'pure', memo: true }, fn, null, c, undefined, noSleep)).rejects.toThrow('boom')
   expect(calls).toBe(2)
+})
+
+test('a throw from post-success bookkeeping (e.g. breaker onSuccess -> onEvent) propagates without double-releasing the concurrency slot or reopening the breaker (#275)', async () => {
+  const releases: boolean[] = []
+  const concurrency = {
+    async acquire() {},
+    release(ok: boolean) { releases.push(ok) },
+  }
+  const breaker = circuitBreaker({
+    failureThreshold: 1,
+    cooldownMs: 100,
+    halfOpenSuccesses: 1,
+    onEvent: (e) => { if (e.kind === 'breaker-close') throw new Error('host onEvent boom') },
+  })
+  breaker.onFailure(0) // -> open
+  breaker.allow(100)   // cooldown elapsed -> half-open
+  const fn = async () => 'ok'
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(100), { circuitBreaker: breaker, concurrency }, noSleep),
+  ).rejects.toThrow('host onEvent boom')
+  // The leaf itself succeeded and the breaker legitimately closed -- the throw
+  // came from bookkeeping *after* that, so it must not be reclassified as a
+  // leaf failure: exactly one release (the success release), not a second
+  // failure release, and the breaker must stay closed, not reopen.
+  expect(releases).toEqual([true])
+  expect(breaker.state).toBe('closed')
+})
+
+test('an already-aborted signal rejects with OpAbortError before fn is ever called (#279)', async () => {
+  let calls = 0
+  const fn = async () => { calls++; return 'ok' }
+  const controller = new AbortController()
+  controller.abort()
+  await expect(
+    runGoverned('leaf', { kind: 'effect', retries: 3 }, fn, null, caps(), undefined, { ...noSleep, signal: controller.signal }),
+  ).rejects.toThrow(OpAbortError)
+  expect(calls).toBe(0)
+})
+
+test('aborting mid-retry stops a subsequent attempt from starting', async () => {
+  let calls = 0
+  const fn = async () => { calls++; throw new Error('flaky') }
+  const controller = new AbortController()
+  const sleep = async () => { controller.abort() } // fires between the first failed attempt and its retry
+  await expect(
+    runGoverned('leaf', { kind: 'effect', retries: 5 }, fn, null, caps(), undefined, { rand: () => 0, sleep, signal: controller.signal }),
+  ).rejects.toThrow(OpAbortError)
+  expect(calls).toBe(1)
+})
+
+test('aborting during the backoff sleep rejects immediately, without waiting out the full delay', async () => {
+  const fn = async () => { throw new Error('flaky') }
+  const controller = new AbortController()
+  const blockingSleep = () => new Promise<void>(() => {}) // never resolves on its own
+  const run = runGoverned('leaf', { kind: 'effect', retries: 5 }, fn, null, caps(), undefined, { rand: () => 0, sleep: blockingSleep, signal: controller.signal })
+  await new Promise(resolve => setTimeout(resolve, 0)) // let the first attempt fail and reach the backoff sleep
+  controller.abort()
+  await expect(run).rejects.toThrow(OpAbortError)
+})
+
+test('aborting while queued behind a starved token bucket rejects immediately (#297)', async () => {
+  let calls = 0
+  const fn = async () => { calls++; return 'ok' }
+  const bucket = tokenBucket({ capacity: 1, refillPerMs: 0, clock: { now: () => 0 } })
+  bucket.tryTake(1, 0) // drain it, so the leaf's own take() must wait
+  const controller = new AbortController()
+  const blockingSleep = () => new Promise<void>(() => {}) // never resolves on its own
+  const run = runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { tokenBucket: bucket }, { sleep: blockingSleep, signal: controller.signal })
+  await Promise.resolve()
+  controller.abort()
+  await expect(run).rejects.toThrow(OpAbortError)
+  expect(calls).toBe(0)
+})
+
+test('aborting while queued behind a full concurrency limiter rejects immediately, without polluting the breaker or emitting a retry-attempt event (#297)', async () => {
+  let calls = 0
+  const fn = async () => { calls++; return 'ok' }
+  const concurrency = fixed(1)
+  await concurrency.acquire() // hold the only slot so the leaf's own acquire() must wait
+  const breaker = circuitBreaker({ failureThreshold: 1, cooldownMs: 100, halfOpenSuccesses: 1 })
+  const events: any[] = []
+  const controller = new AbortController()
+  const run = runGoverned('leaf', { kind: 'effect', retries: 5 }, fn, null, caps(), { circuitBreaker: breaker, concurrency }, { rand: () => 0, onEvent: (e) => events.push(e), signal: controller.signal })
+  await Promise.resolve()
+  controller.abort()
+  await expect(run).rejects.toThrow(OpAbortError)
+  expect(calls).toBe(0)
+  expect(events).toEqual([])           // no spurious retry-attempt event
+  expect(breaker.state).toBe('closed') // abort must not be misclassified as a leaf failure
+})
+
+test('an abort-aware fn throwing OpAbortError after acquiring a concurrency slot releases it neutrally, not as a failure (#309)', async () => {
+  const limiter = aimd({ start: 8, min: 1 })
+  const fn = async () => { throw new OpAbortError() }
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency: limiter }, noSleep),
+  ).rejects.toThrow(OpAbortError)
+  expect(limiter.limit).toBe(8) // unchanged -- a real failure would have halved it to 4
+})
+
+test('falls back to a plain release(true) when a Concurrency implementation has no releaseNeutral (#309)', async () => {
+  const releases: boolean[] = []
+  const concurrency = { async acquire() {}, release: (ok: boolean) => { releases.push(ok) } }
+  const fn = async () => { throw new OpAbortError() }
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency }, noSleep),
+  ).rejects.toThrow(OpAbortError)
+  expect(releases).toEqual([true])
+})
+
+test('a throw from post-success bookkeeping does not permanently strand the half-open probe reservation (#290)', async () => {
+  const concurrency = { async acquire() {}, release() {} }
+  const breaker = circuitBreaker({
+    failureThreshold: 1,
+    cooldownMs: 100,
+    halfOpenSuccesses: 1,
+    onEvent: (e) => { if (e.kind === 'breaker-close') throw new Error('host onEvent boom') },
+  })
+  breaker.onFailure(0) // -> open
+  breaker.allow(100)   // cooldown elapsed -> half-open
+  const fn = async () => 'ok'
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(100), { circuitBreaker: breaker, concurrency }, noSleep),
+  ).rejects.toThrow('host onEvent boom')
+  expect(breaker.state).toBe('closed')
+  // Drive the breaker open and back into half-open again -- if the earlier
+  // throw had skipped releaseHalfOpenProbe(), reserveHalfOpenProbe() would
+  // return false forever and every future call would throw CircuitOpenError
+  // immediately, even once cooldown has legitimately elapsed.
+  breaker.onFailure(200) // -> open
+  breaker.allow(300)     // cooldown elapsed -> half-open
+  // If the probe reservation were stranded, this would throw CircuitOpenError
+  // (from reserveHalfOpenProbe() returning false) before fn ever runs, instead
+  // of the host onEvent's own throw from the *second* legitimate close.
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(300), { circuitBreaker: breaker, concurrency }, noSleep),
+  ).rejects.toThrow('host onEvent boom')
 })

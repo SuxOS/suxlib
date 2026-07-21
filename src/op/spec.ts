@@ -1,25 +1,42 @@
 import type { Op, LeafFn, LeafOpts } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, sink, reconcile } from './combinators.js'
+import { op, pipe, map, mapField, sink, reconcile, catchOp, ask } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
+export type OpSpecSinkOpts = { retries?: number; heavy?: boolean; memo?: boolean }
+// Mirrors src/op/types.ts's SinkFanoutTarget -- a bare name falls back to the
+// sink spec's own `opts`, a `{ name, opts }` pair overrides per-field (#251).
+export type OpSpecSinkTarget = string | { name: string; opts?: OpSpecSinkOpts }
 export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
   | { tag: 'map'; op: OpSpec; concurrency: number }
-  | { tag: 'sink'; targets: string[] }
+  | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: number; renameTo?: string }
+  | { tag: 'sink'; targets: OpSpecSinkTarget[]; opts?: OpSpecSinkOpts }
   | { tag: 'reconcile'; opts: ReconcileOpts }
+  | { tag: 'catch'; try: OpSpec; catch: OpSpec }
+  | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
 
-const FIELD_POLICIES: FieldPolicy[] = ['last-write-wins', 'union', 'keep-first']
-const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge']
+// Exported (not module-private) so mcp.ts's opSpecSchema and op/introspect.ts's
+// describePipelineSchema derive their field-policy/reconcile-mode enums from
+// this one array instead of hand-duplicating the literal strings -- the
+// concrete drift CLAUDE.md's OpSpec-validation footgun note warns about (#187).
+export const FIELD_POLICIES = ['last-write-wins', 'union', 'keep-first'] as const satisfies readonly FieldPolicy[]
+export const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merge'] as const satisfies readonly ReconcileOpts['mode'][]
+
+// Same reasoning: derive any hand-written list of OpSpec tags (mcp.ts's
+// run_pipeline tool description, README's tag union prose) from this one
+// array instead of re-enumerating the tag literals, which drifted twice
+// already (#166, #158) before drifting a third time for reconcile/ask (#213).
+export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask'] as const satisfies readonly OpSpec['tag'][]
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
 // into an unbounded retry storm or a huge fan-out.
-const MAX_LEAF_RETRIES = 5
-const MAX_MAP_CONCURRENCY = 32
+export const MAX_LEAF_RETRIES = 5
+export const MAX_MAP_CONCURRENCY = 32
 
 function shapeLabel(s: LeafShape): string {
   if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
@@ -47,6 +64,10 @@ function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
   return Object.entries(input.object).every(([k, v]) => fieldCompatible(output.object[k], v))
 }
 
+function shapesEqual(a: LeafShape, b: LeafShape): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
 /**
  * A pipe step's declared shape. `leaf` reads straight from LEAF_SHAPES. `map`
  * derives its own boundary from its inner op's shape, one array level up
@@ -55,15 +76,35 @@ function shapeCompatible(output: LeafShape, input: LeafShape): boolean {
  * representable array shape this scheme has. Anything else the inner op's
  * shape resolves to (including 'unknown', or 'handle[]' which would need a
  * two-level array this scheme can't represent) makes the map's own boundary
- * 'unknown' too, rather than guessing. A nested `pipe`/`sink` step composing
- * multiple leaves has no single input/output shape without walking further
- * than a single adjacent-step comparison needs to, so those still read as
- * 'unknown' on both sides.
+ * 'unknown' too, rather than guessing. `mapField` derives its boundary the
+ * same way, one level narrower: its inner op's shape becomes the *element
+ * field*'s shape (only representable when the inner op's side is a bare
+ * `handle` -- anything else collapses to 'unknown', same rule as an
+ * `arrayObject` field elsewhere in this scheme), nested under the array
+ * field's own name (`arrayField` on the input side, `renameTo ?? arrayField`
+ * on the output side, since that's the one field name `mapField` actually
+ * changes). A nested `pipe`/`sink` step composing multiple leaves has no
+ * single input/output shape without walking further than a single
+ * adjacent-step comparison needs to, so those still read as 'unknown' on
+ * both sides. A `catch` step's own boundary is only representable when its
+ * `try`/`catch` branches agree on a shape (shapesEqual) -- since either
+ * branch could run at runtime, a mismatched pair collapses to 'unknown'
+ * rather than guessing which branch a downstream step should be checked
+ * against, same permissive fallback as an unrepresentable map/mapField case.
  */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (!s || typeof s !== 'object') return 'unknown'
   if (s.tag === 'leaf') return LEAF_SHAPES[s.name]?.[side] ?? 'unknown'
   if (s.tag === 'map') return stepShape(s.op, side) === 'handle' ? 'handle[]' : 'unknown'
+  if (s.tag === 'mapField') {
+    const field: LeafFieldShape = stepShape(s.op, side) === 'handle' ? 'handle' : 'unknown'
+    const arrayField = side === 'output' ? (s.renameTo ?? s.arrayField) : s.arrayField
+    return { object: { [arrayField]: { arrayObject: { [s.elementField]: field } } } }
+  }
+  if (s.tag === 'catch') {
+    const tryShape = stepShape(s.try, side); const catchShape = stepShape(s.catch, side)
+    return shapesEqual(tryShape, catchShape) ? tryShape : 'unknown'
+  }
   return 'unknown'
 }
 
@@ -96,15 +137,32 @@ function mergeParams(input: unknown, params: Record<string, unknown>): unknown {
 /**
  * Builds a real Op tree from a caller-supplied JSON description, resolving
  * every leaf name against the registry -- a spec can never carry a live `fn`,
- * only a name. Supports `leaf`/`pipe`/`map`/`sink`: a `sink` spec only carries
- * target *names*, resolved against Caps.sinks at run time (runInline's `case
- * 'sink'`) the same way it already works for an in-process caller -- see
- * SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks (../adapters/op-run.ts) for
- * where those names come from. `reconcile` only needs `caps.store` (already
- * supplied by every adapter call, see runInline's `case 'reconcile'`), so it's
- * expressible directly as an OpSpec variant. `ask` still depends on a live Ask
- * capability a stateless adapter call has no way to supply, so composing that
- * still requires building an Op tree in-process.
+ * only a name. Supports `leaf`/`pipe`/`map`/`mapField`/`sink`: a `sink` spec
+ * carries target *names*, resolved against Caps.sinks at run time
+ * (runInline's `case 'sink'`) the same way it already works for an in-process
+ * caller -- see SINK_REGISTRY (./sinks.ts) and OpRunOpts.sinks
+ * (../adapters/op-run.ts) for where those names come from. A `sink` spec's
+ * optional `opts` (retries/heavy/memo, #247) threads each target's write
+ * through runGoverned exactly like an 'effect' leaf's `fn`, gated by
+ * `caps.governors["sink:<target>"]` -- a `sink:` prefix keeps a sink
+ * target's governor entry from colliding with a same-named leaf's own. `mapField` (#168)
+ * runs its inner op over one named field of each element of a named array
+ * field, reattaching the untouched rest of each element and optionally
+ * renaming the array field itself -- e.g. bridging unpack's `entries` into
+ * pack's `files` while transforming each entry's `handle` in between, which
+ * `map` alone can't do since it only replaces a whole array element, never
+ * reshapes/renames the array's own field. `reconcile` only needs
+ * `caps.store` (already supplied by every adapter call, see runInline's
+ * `case 'reconcile'`), so it's expressible directly as an OpSpec variant.
+ * `ask` is a straight pass-through to the `ask()` combinator -- `runInline`
+ * already degrades gracefully with no `Ask` capability supplied (throws on
+ * `onTimeout: 'fail'`, proceeds with the piped value on `'proceed'`), so no
+ * extra validation is needed here beyond the tagged-union shape check. `catch`
+ * (#183) runs its `try` branch and, on any thrown error
+ * (retries exhausted, `CircuitOpenError`, `AskTimeoutError`, or a plain leaf
+ * throw), re-runs its `catch` branch against the *original* input instead of
+ * aborting the whole pipe -- e.g. "try the primary `sink`, fall back to a
+ * secondary one".
  *
  * `extraLeaves`, when supplied, merges host-registered leaves onto
  * LEAF_REGISTRY (mergeLeaves, ./registry.ts) once per top-level buildOp call
@@ -126,6 +184,195 @@ export function buildOp(spec: OpSpec, extraLeaves?: Record<string, LeafFn>): Op 
   return buildOpNode(spec, mergeLeaves(extraLeaves))
 }
 
+export type OpSpecError = { path: string; message: string }
+
+const isBadFieldName = (f: unknown): boolean => typeof f !== 'string' || !f || f === '__proto__' || f === 'constructor' || f === 'prototype'
+
+// A sink target is either a bare non-empty name, or a `{ name, opts? }` pair
+// whose own opts.retries (if present) is range-checked the same way the
+// fanout-level opts.retries already is (#251) -- mirrored by buildOpNode's
+// sink case below, same one-source-of-truth tradeoff this file's other
+// buildOp/validateOpSpec pairs already accept (see collectSpecErrors's doc).
+const isValidSinkTarget = (t: unknown): boolean => {
+  if (typeof t === 'string') return !!t
+  if (!t || typeof t !== 'object' || Array.isArray(t)) return false
+  const o = t as { name?: unknown; opts?: unknown }
+  if (typeof o.name !== 'string' || !o.name) return false
+  if (o.opts === undefined) return true
+  if (typeof o.opts !== 'object' || o.opts === null || Array.isArray(o.opts)) return false
+  const targetOpts = o.opts as OpSpecSinkOpts
+  const r = targetOpts.retries
+  if (r !== undefined && !(Number.isInteger(r) && r >= 0 && r <= MAX_LEAF_RETRIES)) return false
+  if (targetOpts.heavy !== undefined && typeof targetOpts.heavy !== 'boolean') return false
+  if (targetOpts.memo !== undefined && typeof targetOpts.memo !== 'boolean') return false
+  return true
+}
+
+/**
+ * Validates a caller-supplied OpSpec against the same rules buildOp enforces
+ * (leaf existence, retries/concurrency ranges, ask/reconcile/mapField field
+ * shapes, pipe-adjacency shape compatibility, ...) without throwing on the
+ * first problem it finds -- it walks the whole tree and collects every
+ * structural error into an array, so a caller composing a nontrivial spec
+ * (especially an LLM, per introspect.ts's own framing) can fix every mistake
+ * from one round-trip instead of resubmitting once per buildOp throw (#208).
+ * Never builds the actual Op tree or touches caps.store/llm/sinks -- purely
+ * structural, spec-shape checking, safe to call before any of those exist.
+ *
+ * Mirrors buildOpNode's per-tag checks one-for-one (same conditions, same
+ * MAX_LEAF_RETRIES/MAX_MAP_CONCURRENCY caps), but keeps descending into a
+ * node's children even after that node itself has an error, wherever the
+ * child spec is still reachable -- e.g. a bad `retries` on a leaf doesn't
+ * stop a `pipe` from also checking that leaf's shape-adjacency against its
+ * neighbor. There's no single source of truth these two functions share
+ * beyond the small predicates factored out below (isBadFieldName,
+ * shapeCompatible, stepShape, MAX_LEAF_RETRIES/MAX_MAP_CONCURRENCY) --
+ * a future change to buildOpNode's validation rules must be mirrored here
+ * too, same tradeoff CLAUDE.md's LEAF_SHAPES/LEAF_REGISTRY sync note already
+ * flags for a different table.
+ */
+export function validateOpSpec(spec: OpSpec, extraLeaves?: Record<string, LeafFn>): OpSpecError[] {
+  const errors: OpSpecError[] = []
+  collectSpecErrors(spec, mergeLeaves(extraLeaves), '$', errors)
+  return errors
+}
+
+function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>, path: string, errors: OpSpecError[]): void {
+  if (!spec || typeof spec !== 'object') {
+    errors.push({ path, message: 'op spec must be an object' })
+    return
+  }
+  switch (spec.tag) {
+    case 'leaf': {
+      if (typeof spec.name !== 'string' || !spec.name) {
+        errors.push({ path, message: 'leaf spec requires a `name`' })
+      } else {
+        try {
+          resolveLeaf(spec.name, leaves)
+        } catch (e) {
+          errors.push({ path, message: (e as Error).message })
+        }
+      }
+      const o = spec.opts ?? {}
+      if (o.retries !== undefined && (!Number.isInteger(o.retries) || o.retries < 0 || o.retries > MAX_LEAF_RETRIES)) {
+        errors.push({ path, message: `leaf "${spec.name}": \`retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}` })
+      }
+      if (o.kind !== undefined && o.kind !== 'pure' && o.kind !== 'effect') {
+        errors.push({ path, message: `leaf "${spec.name}": \`opts.kind\` must be "pure" or "effect"` })
+      }
+      if (o.heavy !== undefined && typeof o.heavy !== 'boolean') {
+        errors.push({ path, message: `leaf "${spec.name}": \`opts.heavy\` must be a boolean` })
+      }
+      if (o.memo !== undefined && typeof o.memo !== 'boolean') {
+        errors.push({ path, message: `leaf "${spec.name}": \`opts.memo\` must be a boolean` })
+      }
+      if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
+        errors.push({ path, message: `leaf "${spec.name}": \`params\` must be an object` })
+      }
+      return
+    }
+    case 'pipe': {
+      if (!Array.isArray(spec.steps) || !spec.steps.length) {
+        errors.push({ path, message: 'pipe spec requires a non-empty `steps` array' })
+        return
+      }
+      spec.steps.forEach((s, i) => collectSpecErrors(s, leaves, `${path}.steps[${i}]`, errors))
+      for (let i = 0; i + 1 < spec.steps.length; i++) {
+        const prev = spec.steps[i]; const next = spec.steps[i + 1]
+        const output = stepShape(prev, 'output'); const input = stepShape(next, 'input')
+        if (!shapeCompatible(output, input)) {
+          errors.push({
+            path: `${path}.steps[${i + 1}]`,
+            message: `pipe step ${i + 1} ("${stepLabel(next)}") expects ${shapeLabel(input)} input, but step ${i} ` +
+              `("${stepLabel(prev)}") produces ${shapeLabel(output)}`,
+          })
+        }
+      }
+      return
+    }
+    case 'map': {
+      if (!spec.op) errors.push({ path, message: 'map spec requires an `op`' })
+      else collectSpecErrors(spec.op, leaves, `${path}.op`, errors)
+      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
+        errors.push({ path, message: `map spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}` })
+      }
+      return
+    }
+    case 'mapField': {
+      if (isBadFieldName(spec.arrayField)) {
+        errors.push({ path, message: 'mapField spec\'s `arrayField` must be a non-empty string (not `__proto__`/`constructor`/`prototype`)' })
+      }
+      if (isBadFieldName(spec.elementField)) {
+        errors.push({ path, message: 'mapField spec\'s `elementField` must be a non-empty string (not `__proto__`/`constructor`/`prototype`)' })
+      }
+      if (spec.renameTo !== undefined && isBadFieldName(spec.renameTo)) {
+        errors.push({ path, message: 'mapField spec\'s `renameTo`, if present, must be a non-empty string (not `__proto__`/`constructor`/`prototype`)' })
+      }
+      if (!spec.op) errors.push({ path, message: 'mapField spec requires an `op`' })
+      else collectSpecErrors(spec.op, leaves, `${path}.op`, errors)
+      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
+        errors.push({ path, message: `mapField spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}` })
+      }
+      return
+    }
+    case 'sink': {
+      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
+        errors.push({ path, message: 'sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES })
+      }
+      const so = spec.opts?.retries
+      if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
+        errors.push({ path, message: `sink: \`opts.retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}` })
+      }
+      if (spec.opts?.heavy !== undefined && typeof spec.opts.heavy !== 'boolean') {
+        errors.push({ path, message: 'sink: `opts.heavy` must be a boolean' })
+      }
+      if (spec.opts?.memo !== undefined && typeof spec.opts.memo !== 'boolean') {
+        errors.push({ path, message: 'sink: `opts.memo` must be a boolean' })
+      }
+      return
+    }
+    case 'reconcile': {
+      const o = spec.opts
+      if (!o || typeof o !== 'object' || !RECONCILE_MODES.includes(o.mode)) {
+        errors.push({ path, message: `reconcile spec's \`opts.mode\` must be one of: ${RECONCILE_MODES.join(', ')}` })
+      }
+      if (o && typeof o === 'object' && o.mode === 'field-merge') {
+        if (o.defaultPolicy !== undefined && !FIELD_POLICIES.includes(o.defaultPolicy)) {
+          errors.push({ path, message: `reconcile spec's \`opts.defaultPolicy\` must be one of: ${FIELD_POLICIES.join(', ')}` })
+        }
+        if (o.policy !== undefined) {
+          if (typeof o.policy !== 'object' || o.policy === null || Array.isArray(o.policy)) {
+            errors.push({ path, message: 'reconcile spec\'s `opts.policy` must be an object' })
+          } else {
+            for (const [k, v] of Object.entries(o.policy)) {
+              if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
+              if (!FIELD_POLICIES.includes(v as FieldPolicy)) {
+                errors.push({ path, message: `reconcile spec's \`opts.policy["${k}"]\` must be one of: ${FIELD_POLICIES.join(', ')}` })
+              }
+            }
+          }
+        }
+      }
+      return
+    }
+    case 'catch': {
+      if (!spec.try) errors.push({ path, message: 'catch spec requires a `try`' })
+      else collectSpecErrors(spec.try, leaves, `${path}.try`, errors)
+      if (!spec.catch) errors.push({ path, message: 'catch spec requires a `catch`' })
+      else collectSpecErrors(spec.catch, leaves, `${path}.catch`, errors)
+      return
+    }
+    case 'ask': {
+      if (typeof spec.prompt !== 'string' || !spec.prompt) errors.push({ path, message: 'ask spec requires a non-empty `prompt`' })
+      if (typeof spec.timeout !== 'string' || !spec.timeout) errors.push({ path, message: 'ask spec requires a non-empty `timeout`' })
+      if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') errors.push({ path, message: 'ask spec\'s `onTimeout` must be "proceed" or "fail"' })
+      return
+    }
+    default:
+      errors.push({ path, message: `unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)` })
+  }
+}
+
 function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op {
   if (!spec || typeof spec !== 'object') throw new Error('op spec must be an object')
   switch (spec.tag) {
@@ -135,6 +382,15 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       const o = spec.opts ?? {}
       if (o.retries !== undefined && (!Number.isInteger(o.retries) || o.retries < 0 || o.retries > MAX_LEAF_RETRIES)) {
         throw new Error(`leaf "${spec.name}": \`retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}`)
+      }
+      if (o.kind !== undefined && o.kind !== 'pure' && o.kind !== 'effect') {
+        throw new Error(`leaf "${spec.name}": \`opts.kind\` must be "pure" or "effect"`)
+      }
+      if (o.heavy !== undefined && typeof o.heavy !== 'boolean') {
+        throw new Error(`leaf "${spec.name}": \`opts.heavy\` must be a boolean`)
+      }
+      if (o.memo !== undefined && typeof o.memo !== 'boolean') {
+        throw new Error(`leaf "${spec.name}": \`opts.memo\` must be a boolean`)
       }
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         throw new Error(`leaf "${spec.name}": \`params\` must be an object`)
@@ -173,15 +429,42 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       return map(buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency) })
     }
-    case 'sink': {
-      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every((t) => typeof t === 'string' && t)) {
-        throw new Error('sink spec requires a non-empty `targets` array of non-empty strings')
+    case 'mapField': {
+      if (!spec.op) throw new Error('mapField spec requires an `op`')
+      const isBadFieldName = (f: unknown) => typeof f !== 'string' || !f || f === '__proto__' || f === 'constructor' || f === 'prototype'
+      if (isBadFieldName(spec.arrayField)) {
+        throw new Error('mapField spec\'s `arrayField` must be a non-empty string (not `__proto__`/`constructor`/`prototype`)')
       }
-      return sink.fanout(...spec.targets)
+      if (isBadFieldName(spec.elementField)) {
+        throw new Error('mapField spec\'s `elementField` must be a non-empty string (not `__proto__`/`constructor`/`prototype`)')
+      }
+      if (spec.renameTo !== undefined && isBadFieldName(spec.renameTo)) {
+        throw new Error('mapField spec\'s `renameTo`, if present, must be a non-empty string (not `__proto__`/`constructor`/`prototype`)')
+      }
+      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
+        throw new Error(`mapField spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
+      }
+      return mapField(spec.arrayField, spec.elementField, buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency), renameTo: spec.renameTo })
+    }
+    case 'sink': {
+      if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
+        throw new Error('sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES)
+      }
+      const so = spec.opts?.retries
+      if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
+        throw new Error(`sink: \`opts.retries\` must be an integer between 0 and ${MAX_LEAF_RETRIES}`)
+      }
+      if (spec.opts?.heavy !== undefined && typeof spec.opts.heavy !== 'boolean') {
+        throw new Error('sink: `opts.heavy` must be a boolean')
+      }
+      if (spec.opts?.memo !== undefined && typeof spec.opts.memo !== 'boolean') {
+        throw new Error('sink: `opts.memo` must be a boolean')
+      }
+      return sink.fanout(spec.targets, spec.opts)
     }
     case 'reconcile': {
       const o = spec.opts
-      if (!o || typeof o !== 'object' || !RECONCILE_MODES.includes(o.mode as string)) {
+      if (!o || typeof o !== 'object' || !RECONCILE_MODES.includes(o.mode)) {
         throw new Error(`reconcile spec's \`opts.mode\` must be one of: ${RECONCILE_MODES.join(', ')}`)
       }
       if (o.mode === 'field-merge') {
@@ -200,7 +483,18 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       }
       return reconcile(o)
     }
+    case 'catch': {
+      if (!spec.try) throw new Error('catch spec requires a `try`')
+      if (!spec.catch) throw new Error('catch spec requires a `catch`')
+      return catchOp(buildOpNode(spec.try, leaves), buildOpNode(spec.catch, leaves))
+    }
+    case 'ask': {
+      if (typeof spec.prompt !== 'string' || !spec.prompt) throw new Error('ask spec requires a non-empty `prompt`')
+      if (typeof spec.timeout !== 'string' || !spec.timeout) throw new Error('ask spec requires a non-empty `timeout`')
+      if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') throw new Error('ask spec\'s `onTimeout` must be "proceed" or "fail"')
+      return ask(spec.prompt, { timeout: spec.timeout, onTimeout: spec.onTimeout })
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, sink, reconcile)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)`)
   }
 }

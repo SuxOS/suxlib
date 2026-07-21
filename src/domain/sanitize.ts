@@ -69,7 +69,7 @@ export function redactText(text: string, types?: RedactType[]): RedactResult {
   if (text.length > MAX_TEXT_INPUT_BYTES) {
     throw new Error(`text input is larger than ${MAX_TEXT_INPUT_BYTES} bytes (bomb guard).`)
   }
-  const want = types && types.length ? new Set(types) : null
+  const want = types ? new Set(types) : null
   const counts: Record<string, number> = {}
   for (const { type, re, bare } of PATTERNS) {
     if (want && !want.has(type)) continue
@@ -78,7 +78,10 @@ export function redactText(text: string, types?: RedactType[]): RedactResult {
       if (type === 'ip' && !ipv4Ok(m)) return m
       if (bare) {
         const start = Math.max(0, offset - BARE_SSN_CONTEXT_WINDOW)
-        if (!BARE_SSN_CONTEXT_RE.test(text.slice(start, offset))) return m
+        const end = offset + m.length + BARE_SSN_CONTEXT_WINDOW
+        const before = BARE_SSN_CONTEXT_RE.test(text.slice(start, offset))
+        const after = BARE_SSN_CONTEXT_RE.test(text.slice(offset + m.length, end))
+        if (!before && !after) return m
       }
       counts[type] = (counts[type] ?? 0) + 1
       return `[REDACTED:${type}]`
@@ -125,13 +128,27 @@ function findValidIccApp2Offsets(bytes: Uint8Array): Set<number> {
     }
     if (i + 3 >= bytes.length) break
     const len = (bytes[i + 2] << 8) | bytes[i + 3]
-    if (marker === 0xda || len < 2 || i + 2 + len > bytes.length) break
+    if (len < 2 || i + 2 + len > bytes.length) break
     if (marker === 0xe2 && len >= 2 + ICC_PROFILE_TAG.length + 2 && ICC_PROFILE_TAG.every((b, k) => bytes[i + 4 + k] === b)) {
       const seq = bytes[i + 4 + ICC_PROFILE_TAG.length]
       const total = bytes[i + 4 + ICC_PROFILE_TAG.length + 1]
       candidates.push({ offset: i, seq, total })
     }
     i += 2 + len
+    if (marker === 0xda) {
+      // SOS header consumed above -- skip past its entropy-coded scan data
+      // byte-by-byte (mirroring stripJpegMetadata's own main loop) instead of
+      // stopping the scan here, so an ICC APP2 in a later scan of a
+      // progressive JPEG is still found rather than silently dropped as
+      // ordinary metadata.
+      while (i < bytes.length) {
+        const b = bytes[i]
+        if (b !== 0xff) { i++; continue }
+        const next = bytes[i + 1]
+        if (next === 0x00 || (next !== undefined && next >= 0xd0 && next <= 0xd7)) { i += 2; continue }
+        break
+      }
+    }
   }
   if (!candidates.length) return new Set()
   // A single APP2 carrying the tag is the common (small-profile) case — keep it
@@ -144,6 +161,107 @@ function findValidIccApp2Offsets(bytes: Uint8Array): Set<number> {
   return valid ? new Set(candidates.map((c) => c.offset)) : new Set()
 }
 
+const EXIF_PREFIX = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00] // "Exif\0\0"
+const EXIF_ORIENTATION_TAG = 0x0112
+
+/**
+ * Read the EXIF Orientation tag (IFD0, tag 0x0112, type SHORT, count 1) out of
+ * an EXIF APP1 payload (the bytes *after* the "Exif\0\0" prefix, i.e. starting
+ * at the TIFF header). Returns the raw 1-8 orientation value if present and
+ * well-formed, else null — malformed/truncated/absent-tag EXIF is not an
+ * error here, just "nothing worth preserving."
+ */
+function readExifOrientation(payload: Uint8Array): number | null {
+  if (payload.length < 8) return null
+  let little: boolean
+  if (payload[0] === 0x49 && payload[1] === 0x49) little = true
+  else if (payload[0] === 0x4d && payload[1] === 0x4d) little = false
+  else return null
+  const u16 = (o: number) => (little ? payload[o] | (payload[o + 1] << 8) : (payload[o] << 8) | payload[o + 1])
+  const u32 = (o: number) =>
+    little
+      ? (payload[o] | (payload[o + 1] << 8) | (payload[o + 2] << 16) | (payload[o + 3] << 24)) >>> 0
+      : ((payload[o] << 24) | (payload[o + 1] << 16) | (payload[o + 2] << 8) | payload[o + 3]) >>> 0
+  if (payload.length < 8 || u16(2) !== 0x2a) return null
+  const ifd0Offset = u32(4)
+  if (ifd0Offset + 2 > payload.length) return null
+  const count = u16(ifd0Offset)
+  const entriesStart = ifd0Offset + 2
+  if (entriesStart + count * 12 > payload.length) return null
+  for (let k = 0; k < count; k++) {
+    const entryOff = entriesStart + k * 12
+    if (u16(entryOff) !== EXIF_ORIENTATION_TAG) continue
+    if (u16(entryOff + 2) !== 3 || u32(entryOff + 4) !== 1) return null // type must be SHORT, count 1
+    const value = u16(entryOff + 8)
+    return value >= 1 && value <= 8 ? value : null
+  }
+  return null
+}
+
+/**
+ * Find EXIF (APP1, "Exif\0\0"-prefixed) segments carrying a non-default
+ * Orientation value, mapping segment offset -> orientation (2-8; orientation
+ * 1 is "normal", nothing to preserve). Mirrors findValidIccApp2Offsets's
+ * traversal (including continuing past SOS for a progressive JPEG's later
+ * scans) so both scanners stay consistent about where a marker can appear.
+ */
+function findExifOrientationOffsets(bytes: Uint8Array): Map<number, number> {
+  const offsets = new Map<number, number>()
+  let i = 2
+  while (i + 3 < bytes.length && bytes[i] === 0xff) {
+    const marker = bytes[i + 1]
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
+      i += 2
+      if (marker === 0xd9) break
+      continue
+    }
+    if (i + 3 >= bytes.length) break
+    const len = (bytes[i + 2] << 8) | bytes[i + 3]
+    if (len < 2 || i + 2 + len > bytes.length) break
+    if (marker === 0xe1 && len >= 2 + EXIF_PREFIX.length && EXIF_PREFIX.every((b, k) => bytes[i + 4 + k] === b)) {
+      const payload = bytes.subarray(i + 4 + EXIF_PREFIX.length, i + 2 + len)
+      const orientation = readExifOrientation(payload)
+      if (orientation !== null && orientation !== 1) offsets.set(i, orientation)
+    }
+    i += 2 + len
+    if (marker === 0xda) {
+      while (i < bytes.length) {
+        const b = bytes[i]
+        if (b !== 0xff) { i++; continue }
+        const next = bytes[i + 1]
+        if (next === 0x00 || (next !== undefined && next >= 0xd0 && next <= 0xd7)) { i += 2; continue }
+        break
+      }
+    }
+  }
+  return offsets
+}
+
+/**
+ * Build a minimal synthetic EXIF APP1 segment carrying nothing but the
+ * Orientation tag — TIFF header + a single-entry IFD0 + no next-IFD. Used in
+ * place of dropping an Orientation-bearing EXIF segment outright: this
+ * sanitizer rebuilds JPEGs segment-by-segment without decoding pixel data
+ * (CLAUDE.md), so it can't bake a non-default orientation into the pixels
+ * themselves — but it can still avoid the #360 bug (a portrait photo's pixel
+ * data, stored landscape-orientation with an Orientation tag telling viewers
+ * to rotate on display, rendering sideways once that tag is silently
+ * stripped) by keeping just the one tag a viewer needs, the same "keep only
+ * what's needed to render correctly" treatment ICC APP2/PNG's gAMA/cHRM/sRGB
+ * already get.
+ */
+function buildOrientationApp1(orientation: number): number[] {
+  const tiff = [
+    0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // "II" (little-endian), 42, IFD0 offset = 8
+    0x01, 0x00, // IFD0 entry count = 1
+    0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, orientation & 0xff, 0x00, 0x00, 0x00, // tag 0x0112, SHORT, count 1, value
+    0x00, 0x00, 0x00, 0x00, // next IFD offset = 0 (none)
+  ]
+  const payload = [...EXIF_PREFIX, ...tiff]
+  const len = payload.length + 2
+  return [0xff, 0xe1, (len >> 8) & 0xff, len & 0xff, ...payload]
+}
+
 /**
  * Strip JPEG APPn metadata markers (APP0 kept — it's the JFIF header most
  * decoders expect; APP1 EXIF/XMP, APP13 Photoshop IPTC, COM comments are
@@ -152,13 +270,18 @@ function findValidIccApp2Offsets(bytes: Uint8Array): Set<number> {
  * consistent sequence/total across all of a profile's segments, see
  * findValidIccApp2Offsets) — an ICC profile is rendering data, not privacy
  * metadata, matching stripPngMetadata's treatment of iCCP/sRGB/gAMA/cHRM as
- * data to preserve. Non-ICC APP2 is still dropped. Segment-level rebuild:
- * walk markers, drop the ones that carry metadata, keep SOS and the
+ * data to preserve. Non-ICC APP2 is still dropped. An EXIF APP1 carrying a
+ * non-default Orientation tag (#360) is replaced with a minimal synthetic
+ * APP1 holding just that tag (buildOrientationApp1) instead of being dropped
+ * outright, so a portrait phone photo doesn't silently render sideways once
+ * the rest of its EXIF (GPS, camera model, ...) is stripped. Segment-level
+ * rebuild: walk markers, drop the ones that carry metadata, keep SOS and the
  * entropy-coded scan data verbatim.
  */
 function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('not a JPEG (missing SOI marker)')
   const iccOffsets = findValidIccApp2Offsets(bytes)
+  const exifOrientationOffsets = findExifOrientationOffsets(bytes)
   const out: number[] = [0xff, 0xd8]
   let i = 2
   let terminated = false
@@ -190,22 +313,45 @@ function stripJpegMetadata(bytes: Uint8Array): Uint8Array {
     }
     if (i + 3 >= bytes.length) throw new Error('malformed/truncated JPEG: segment length field runs past end of file')
     const len = (bytes[i + 2] << 8) | bytes[i + 3]
-    if (marker === 0xda) {
-      // Start of Scan: header + all remaining bytes (entropy data) verbatim.
-      for (let j = i; j < bytes.length; j++) out.push(bytes[j])
-      terminated = true
-      break
-    }
     // `len` includes the 2 length bytes themselves, so it can never legally be < 2;
     // and the segment it declares must fit inside the buffer — otherwise this is a
     // truncated/malformed file and must fail loudly rather than silently copy garbage.
     if (len < 2 || i + 2 + len > bytes.length) {
       throw new Error(`malformed/truncated JPEG: segment at offset ${i} declares length ${len}, runs past end of file`)
     }
+    if (marker === 0xda) {
+      // Start of Scan header (fixed-structure, not the entropy data) copied verbatim.
+      for (let j = i; j < i + 2 + len; j++) out.push(bytes[j])
+      i += 2 + len
+      // Scan the entropy-coded data byte-by-byte until the next *real* marker,
+      // skipping byte-stuffed 0xFF00 and in-scan RST markers (0xD0-0xD7) — both
+      // are legitimate entropy-stream content, not segment boundaries — so a
+      // progressive JPEG's later scans/segments (or trailing EOI) are still
+      // inspected by the outer loop instead of being copied through as opaque
+      // trailer data.
+      while (i < bytes.length) {
+        const b = bytes[i]
+        if (b !== 0xff) {
+          out.push(b)
+          i++
+          continue
+        }
+        const next = bytes[i + 1]
+        if (next === 0x00 || (next !== undefined && next >= 0xd0 && next <= 0xd7)) {
+          out.push(b, next)
+          i += 2
+          continue
+        }
+        break
+      }
+      continue
+    }
     const isIccApp2 = marker === 0xe2 && iccOffsets.has(i)
     const isMetadata = ((marker >= 0xe1 && marker <= 0xef) || marker === 0xfe) && !isIccApp2 // APP1-APP15, COM (ICC-bearing APP2 kept)
     if (!isMetadata) {
       for (let j = i; j < i + 2 + len; j++) out.push(bytes[j])
+    } else if (marker === 0xe1 && exifOrientationOffsets.has(i)) {
+      out.push(...buildOrientationApp1(exifOrientationOffsets.get(i)!))
     }
     i += 2 + len
   }
@@ -229,9 +375,71 @@ function crc32(bytes: Uint8Array): number {
 }
 
 /**
+ * Read the Orientation tag (0x0112) out of a raw TIFF-structured buffer —
+ * shared shape between a PNG eXIf chunk's payload (no prefix) and a JPEG
+ * APP1's post-"Exif\0\0" bytes. Returns null when the buffer isn't a valid
+ * TIFF header, has no Orientation entry, or the value is 1 (normal — nothing
+ * to preserve).
+ */
+function readTiffOrientation(tiff: Uint8Array): number | null {
+  if (tiff.length < 8) return null
+  const little = tiff[0] === 0x49 && tiff[1] === 0x49
+  const big = tiff[0] === 0x4d && tiff[1] === 0x4d
+  if (!little && !big) return null
+  const u16 = (o: number) => (little ? tiff[o] | (tiff[o + 1] << 8) : (tiff[o] << 8) | tiff[o + 1])
+  const u32 = (o: number) => (little ? (tiff[o] | (tiff[o + 1] << 8) | (tiff[o + 2] << 16) | (tiff[o + 3] << 24)) >>> 0 : ((tiff[o] << 24) | (tiff[o + 1] << 16) | (tiff[o + 2] << 8) | tiff[o + 3]) >>> 0)
+  if (u16(2) !== 42) return null
+  const ifdOffset = u32(4)
+  if (ifdOffset + 2 > tiff.length) return null
+  const count = u16(ifdOffset)
+  const entriesEnd = ifdOffset + 2 + count * 12
+  if (entriesEnd > tiff.length) return null
+  for (let e = 0; e < count; e++) {
+    const entryOffset = ifdOffset + 2 + e * 12
+    const tag = u16(entryOffset)
+    if (tag === 0x0112) {
+      if (u16(entryOffset + 2) !== 3 || u32(entryOffset + 4) !== 1) return null // type must be SHORT, count 1
+      const value = u16(entryOffset + 8)
+      if (value < 1 || value > 8) return null
+      return value === 1 ? null : value
+    }
+  }
+  return null
+}
+
+/** Build a minimal PNG eXIf chunk carrying only a single-entry IFD0 (the
+ *  Orientation tag) — length + 'eXIf' + 26-byte TIFF payload + fresh CRC-32. */
+function buildOrientationEXif(orientation: number): number[] {
+  const payload = [
+    0x49, 0x49, // 'II' — little-endian
+    0x2a, 0x00, // TIFF magic 42
+    0x08, 0x00, 0x00, 0x00, // offset to IFD0
+    0x01, 0x00, // IFD0 entry count = 1
+    0x12, 0x01, // tag 0x0112 (Orientation)
+    0x03, 0x00, // type 3 (SHORT)
+    0x01, 0x00, 0x00, 0x00, // count = 1
+    orientation & 0xff, (orientation >> 8) & 0xff, 0x00, 0x00, // value + padding
+    0x00, 0x00, 0x00, 0x00, // next IFD offset = 0
+  ]
+  const len = payload.length
+  const typeBytes = [0x65, 0x58, 0x49, 0x66] // 'eXIf'
+  const crc = crc32(Uint8Array.from([...typeBytes, ...payload]))
+  return [
+    (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff,
+    ...typeBytes,
+    ...payload,
+    (crc >>> 24) & 0xff, (crc >>> 16) & 0xff, (crc >>> 8) & 0xff, crc & 0xff,
+  ]
+}
+
+/**
  * Strip PNG ancillary metadata chunks (tEXt, zTXt, iTXt free-text/XMP, eXIf,
  * time). Critical chunks (IHDR, PLTE, IDAT, IEND) and color-management chunks
- * (gAMA, cHRM, sRGB, iCCP) needed to render correctly are kept.
+ * (gAMA, cHRM, sRGB, iCCP) needed to render correctly are kept. eXIf is
+ * dropped like the rest, except when it carries a non-default Orientation —
+ * that tag alone is preserved in a rebuilt minimal chunk so a sanitized
+ * portrait PNG doesn't silently render sideways (same fix shape as
+ * stripJpegMetadata's APP1 EXIF Orientation handling).
  */
 function stripPngMetadata(bytes: Uint8Array): Uint8Array {
   for (let i = 0; i < 8; i++) if (bytes[i] !== PNG_SIGNATURE[i]) throw new Error('not a PNG (bad signature)')
@@ -260,7 +468,10 @@ function stripPngMetadata(bytes: Uint8Array): Uint8Array {
     if (chunkEnd > bytes.length) {
       throw new Error(`malformed PNG: chunk '${type}' at offset ${i} declares length ${len}, runs past end of file`)
     }
-    if (!DROP.has(type)) {
+    if (type === 'eXIf') {
+      const orientation = readTiffOrientation(bytes.subarray(i + 8, i + 8 + len))
+      if (orientation !== null) out.push(...buildOrientationEXif(orientation))
+    } else if (!DROP.has(type)) {
       for (let j = i; j < chunkEnd; j++) out.push(bytes[j])
     }
     i = chunkEnd

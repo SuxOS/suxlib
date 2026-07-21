@@ -29,6 +29,19 @@ describe('http adapter', () => {
     expect(res.status).toBe(404)
   })
 
+  it('env.allowRoutes restricts both GET / listing and routing to the given subset', async () => {
+    const env: Env = { allowRoutes: ['/transform'] }
+    const list = await handler.fetch(new Request('https://fileops.example/'), env)
+    const body = (await list.json()) as { routes: string[] }
+    expect(body.routes).toEqual(['POST /transform'])
+
+    const allowed = await post('transform', { data: '{"a":1}', to: 'yaml' }, {}, env)
+    expect(allowed.status).toBe(200)
+
+    const blocked = await post('sanitize/text', { text: 'a@b.com' }, {}, env)
+    expect(blocked.status).toBe(404)
+  })
+
   it('POST /transform: happy path json -> yaml', async () => {
     const res = await post('transform', { data: '{"a":1}', to: 'yaml' })
     expect(res.status).toBe(200)
@@ -72,10 +85,25 @@ describe('http adapter', () => {
     expect(extracted.entries[0].mtime).toBe(mtime)
   })
 
+  it('POST /archive/create + /archive/extract: happy-path round trip for tar.gz', async () => {
+    const createRes = await post('archive/create', { format: 'tar.gz', files: [{ name: 'a.txt', base64: b64('hello') }] })
+    expect(createRes.status).toBe(200)
+    const created = (await createRes.json()) as { base64: string }
+    const extractRes = await post('archive/extract', { format: 'tar.gz', base64: created.base64 })
+    const extracted = (await extractRes.json()) as { entries: Array<{ name: string; text?: string }> }
+    expect(extracted.entries[0]).toMatchObject({ name: 'a.txt', text: 'hello' })
+  })
+
   it('POST /archive/create: duplicate entry names surface a clean 400, not a 500', async () => {
     const res = await post('archive/create', { format: 'zip', files: [{ name: 'dup.txt', base64: b64('1') }, { name: 'dup.txt', base64: b64('2') }] })
     expect(res.status).toBe(400)
     expect(((await res.json()) as { error: string }).error).toMatch(/duplicate/i)
+  })
+
+  it('POST /archive/create: a non-numeric mtime surfaces a clean 400, not a corrupted archive', async () => {
+    const res = await post('archive/create', { format: 'zip', files: [{ name: 'a.txt', base64: b64('hi'), mtime: 'oops' }] })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toMatch(/mtime/i)
   })
 
   it('POST /pdf/shrink: happy path round-trips a valid PDF as base64', async () => {
@@ -152,6 +180,18 @@ describe('http adapter', () => {
     expect(atob(body.result.base64)).toBe('a: 1')
   })
 
+  it('POST /op/run: trace: true returns a TraceEvent[] trace alongside result', async () => {
+    const res = await post('op/run', {
+      spec: { tag: 'leaf', name: 'convert' },
+      input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+      trace: true,
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: { base64: string }; trace: Array<{ kind: string }> }
+    expect(atob(body.result.base64)).toBe('a: 1')
+    expect(body.trace.map((e) => e.kind)).toEqual(['node-enter', 'node-exit'])
+  })
+
   it('POST /op/run: an unknown leaf name in the spec surfaces a 400, not a 500', async () => {
     const res = await post('op/run', { spec: { tag: 'leaf', name: 'nope' }, input: null })
     expect(res.status).toBe(400)
@@ -216,11 +256,101 @@ describe('http adapter', () => {
     expect(body.result.abstract).toBe('summary of the full text')
   })
 
+  it('POST /op/run: env.opRunAsk wires a real Ask capability through to an ask step', async () => {
+    const env: Env = { opRunAsk: { request: async () => ({ answered: true, value: 'human answer' }) } }
+    const res = await post('op/run', { spec: { tag: 'ask', prompt: 'pick one', timeout: '10s', onTimeout: 'fail' }, input: 'default' }, {}, env)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { result: string }
+    expect(body.result).toBe('human answer')
+  })
+
   it('POST /op/run: env.opRunLeaves lets a host register a custom leaf a spec can name', async () => {
     const env: Env = { opRunLeaves: { shout: async (input) => ({ shouted: input }) } }
     const res = await post('op/run', { spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 } }, {}, env)
     expect(res.status).toBe(200)
     const body = (await res.json()) as { result: { shouted: { a: number } } }
     expect(body.result.shouted).toEqual({ a: 1 })
+  })
+
+  it('POST /op/run: the request\'s own AbortSignal cancels the run cooperatively, stopping the next pipe step (#279)', async () => {
+    const controller = new AbortController()
+    const env: Env = { opRunLeaves: { abortNow: async (input) => { controller.abort(); return input } } }
+    let secondRan = false
+    env.opRunLeaves!.neverRuns = async (input) => { secondRan = true; return input }
+    const res = await handler.fetch(new Request('https://fileops.example/op/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'abortNow' }, { tag: 'leaf', name: 'neverRuns' }] }, input: { a: 1 } }),
+      signal: controller.signal,
+    }), env)
+    expect(res.status).toBe(400)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toMatch(/aborted/)
+    expect(secondRan).toBe(false)
+  })
+
+  it('GET /op/schema: reports the built-in leaf registry, sink targets, reconcile modes, and field policies', async () => {
+    const res = await handler.fetch(new Request('https://fileops.example/op/schema'))
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { leaves: Record<string, unknown>; sinks: string[]; reconcileModes: string[]; fieldPolicies: string[] }
+    expect(Object.keys(body.leaves)).toContain('convert')
+    expect(body.sinks).toEqual(['store'])
+    expect(body.reconcileModes).toContain('field-merge')
+    expect(body.fieldPolicies).toContain('union')
+  })
+
+  it('GET /op/schema: reports env.opRunLeaves/opRunSinks-registered names alongside the built-in registry', async () => {
+    const env: Env = { opRunLeaves: { shout: async (input) => input }, opRunSinks: { log: { name: 'log', write: async (v) => v } } }
+    const res = await handler.fetch(new Request('https://fileops.example/op/schema'), env)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { leaves: Record<string, unknown>; sinks: string[] }
+    expect(Object.keys(body.leaves)).toContain('shout')
+    expect(body.sinks).toContain('log')
+  })
+
+  it('POST /op/validate: a well-formed spec reports valid with no errors, without running it', async () => {
+    const res = await post('op/validate', { spec: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } } })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ valid: true, errors: [] })
+  })
+
+  it('POST /op/validate: collects every structural error in one pass instead of stopping at the first (#208)', async () => {
+    const res = await post('op/validate', {
+      spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'nope' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 0 }] },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { valid: boolean; errors: Array<{ path: string; message: string }> }
+    expect(body.valid).toBe(false)
+    expect(body.errors.some((e) => /unknown leaf "nope"/.test(e.message))).toBe(true)
+    expect(body.errors.some((e) => /concurrency/.test(e.message))).toBe(true)
+  })
+
+  it('POST /op/validate: a missing `spec` surfaces a 400', async () => {
+    const res = await post('op/validate', {})
+    expect(res.status).toBe(400)
+  })
+
+  it('POST /op/validate: env.opRunLeaves lets a host-registered leaf validate as known', async () => {
+    const env: Env = { opRunLeaves: { shout: async (input) => input } }
+    const res = await post('op/validate', { spec: { tag: 'leaf', name: 'shout' } }, {}, env)
+    expect(await res.json()).toEqual({ valid: true, errors: [] })
+  })
+
+  it('POST /op/plan: reports a non-executing cost/capability audit (#361)', async () => {
+    const res = await post('op/plan', {
+      spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'summarize', opts: { retries: 1 } }, { tag: 'sink', targets: ['store'] }] },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { nodeCount: number; maxRetryMultiplier: number; usesLlm: boolean; llmLeaves: string[]; sinkTargets: string[] }
+    expect(body.nodeCount).toBe(3)
+    expect(body.maxRetryMultiplier).toBe(2 + 1) // summarize retries:1 -> 2, sink default -> 1
+    expect(body.usesLlm).toBe(true)
+    expect(body.llmLeaves).toEqual(['summarize'])
+    expect(body.sinkTargets).toEqual(['store'])
+  })
+
+  it('POST /op/plan: a missing `spec` surfaces a 400', async () => {
+    const res = await post('op/plan', {})
+    expect(res.status).toBe(400)
   })
 })

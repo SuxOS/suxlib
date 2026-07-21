@@ -13,12 +13,14 @@
 // it finds back into base64 -- the caller never sees or invents a Store key
 // itself.
 
-import type { Handle, Llm, Cache, Store } from '../effects/types.js'
+import type { Handle, Llm, Cache, Store, Ask, Checkpoint } from '../effects/types.js'
 import { MemoryStore } from '../effects/types.js'
 import type { Caps, Governor, SinkTarget, LeafFn } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import { runInline } from '../runtime/inline.js'
+import type { RunGovernedOpts } from '../control/governor.js'
+import type { TraceEvent } from '../control/trace.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
 export type HandleRef = { $handle: true; base64: string; type?: string }
@@ -44,6 +46,17 @@ function isResolvedHandle(v: unknown): v is Handle {
 // already send in one request.
 export const MAX_HYDRATE_BYTES = 50_000_000
 
+// Bomb guard on trace: true's collected TraceEvent buffer, mirroring
+// MAX_HYDRATE_BYTES above. map/mapField's OpSpec only range-checks
+// `concurrency` (src/op/spec.ts's buildOp/validateOpSpec), never the length
+// of the array being mapped over -- that's a property of the hydrated JSON
+// input, not the spec -- so a modest request body piped through a `map`
+// node with trace: true would otherwise grow this in-memory array without
+// bound (one node-enter/node-exit pair per item visited), amplifying a
+// small request into large uncapped server-side memory retention across
+// HTTP/MCP/CLI, the one surface that pattern had been skipped on.
+export const MAX_TRACE_EVENTS = 20_000
+
 async function hydrate(store: Store, value: unknown, budget: { totalBytes: number }): Promise<unknown> {
   if (isHandleRef(value)) {
     const bytes = b64ToBytes(value.base64)
@@ -52,6 +65,14 @@ async function hydrate(store: Store, value: unknown, budget: { totalBytes: numbe
       throw new Error(`op-run input totals more than ${MAX_HYDRATE_BYTES} bytes across all $handle refs (bomb guard).`)
     }
     return store.put(bytes, value.type ?? 'application/octet-stream')
+  }
+  // A caller-supplied object shaped like an already-resolved Handle
+  // (r2Key/sha256/type/size) must never reach a leaf unchanged -- that would
+  // let a caller name another run's Store entry directly, bypassing the
+  // $handle-ref minting this function exists to enforce (see the header
+  // comment: "the caller never sees or invents a Store key itself").
+  if (isResolvedHandle(value)) {
+    throw new Error('op-run input may not contain a raw Handle object -- seed bytes via { $handle: true, base64, type? } instead.')
   }
   if (Array.isArray(value)) return Promise.all(value.map((v) => hydrate(store, v, budget)))
   if (value && typeof value === 'object') {
@@ -88,7 +109,29 @@ const llmUnavailable: Llm = {
   summarize: async () => { throw new Error('llm capability is not available via run_pipeline/op-run') },
 }
 
-export type OpRunRequest = { spec: OpSpec; input: unknown }
+/**
+ * `trace`: opt-in per-call, for a stateless caller (HTTP/MCP/CLI) that wants
+ * #215's per-node execution trace back without supplying a live
+ * `gOpts.onTrace` callback of its own -- runOpSpec collects every emitted
+ * `TraceEvent` into an array and returns `{ result, trace }` instead of the
+ * bare result. Omitted (or `false`), runOpSpec's return value is unchanged
+ * from before #228 (the bare dehydrated result), so every existing caller
+ * asserting that shape keeps working untouched. A caller-supplied
+ * `opts.gOpts.onTrace` still fires alongside the collector when both are
+ * present -- `trace: true` doesn't replace a live callback, it adds a
+ * buffered one.
+ *
+ * `runId`: opt-in, for a caller that wants to *resume* a previously
+ * checkpointed run (#396) -- pass back the `runId` a prior call returned (see
+ * `OpRunOpts.checkpoint` below) to share that run's `(runId, path)`
+ * checkpoint ledger, letting already-completed nodes short-circuit instead of
+ * re-executing. Omitted, runOpSpec mints a fresh one via
+ * `crypto.randomUUID()` itself (rather than letting `runInline` default it
+ * internally) specifically so it can hand the minted id back to the caller --
+ * `runInline`'s own internal default is otherwise unobservable from outside
+ * the call.
+ */
+export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean; runId?: string }
 
 /**
  * Governors/cache/store a host wants shared across calls (createGovernor per
@@ -130,8 +173,33 @@ export type OpRunRequest = { spec: OpSpec; input: unknown }
  * resolve against logic this library never shipped -- a host embedding
  * suxlib (e.g. `sux`) registering its own leaf. Omitted entirely still
  * resolves every built-in registry leaf as before.
+ *
+ * `ask`: a host-supplied Ask implementation, threaded to `caps.ask` the same
+ * way `store`/`cache`/`llm` are -- lets a caller-supplied OpSpec's `ask` step
+ * (src/op/spec.ts) actually reach a human-in-the-loop answer instead of only
+ * ever hitting runInline's no-capability-supplied fallback (`onTimeout:
+ * 'fail'` throws `AskTimeoutError`, `'proceed'` passes the piped value
+ * through). Omitted entirely, that fallback behavior is unchanged.
+ *
+ * `gOpts`: passed through unchanged as runInline's 4th argument -- the only
+ * way to reach retry-attempt/memo-hit/memo-miss GovernorEvents (runGoverned
+ * emits those directly from `gOpts.onEvent`, unlike breaker/tokenBucket/
+ * concurrency events which are observable via a host-constructed `governors`
+ * Governor's own onEvent) or to supply a custom backoff/sleep/rand. Host-only
+ * config (carries function callbacks), same as governors/cache/store/leaves
+ * above -- never JSON-caller-supplied. Omitted entirely, runInline's own
+ * defaults apply as before.
+ *
+ * `checkpoint`: a host-supplied Checkpoint implementation (#390), threaded to
+ * `caps.checkpoint` the same way `store`/`cache`/`llm` are -- lets a
+ * `runId`-sharing pair of `runOpSpec` calls resume a crashed run instead of
+ * re-executing every node from scratch. Omitted entirely, `caps.checkpoint`
+ * stays undefined and every node runs unconditionally, same as before #390.
+ * Supplying `checkpoint` without also supplying a long-lived `store` has the
+ * same footgun as `cache` above -- a checkpointed node's Handle-shaped result
+ * won't resolve against a fresh per-call MemoryStore on a resumed call.
  */
-export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn> }
+export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; store?: Store; sinks?: Record<string, SinkTarget>; llm?: Llm; leaves?: Record<string, LeafFn>; ask?: Ask; gOpts?: RunGovernedOpts; checkpoint?: Checkpoint }
 
 /**
  * Executes one adapter-triggered pipeline run end to end: builds the Op tree
@@ -143,13 +211,49 @@ export type OpRunOpts = { governors?: Record<string, Governor>; cache?: Cache; s
  * reliability primitives they gate (breaker trip state, token-bucket fill,
  * memoized results, handle data) actually persist across requests instead of
  * resetting on every stateless HTTP route / MCP tool call.
+ *
+ * When `opts.checkpoint` is supplied, the return value always carries the
+ * `runId` this call ran under (minted fresh via `crypto.randomUUID()` when
+ * the request didn't supply one) alongside `result`/`trace` -- a caller
+ * without a checkpoint capability configured keeps getting the pre-#396
+ * bare-result (or `{ result, trace }`) shape unchanged, since it has no way
+ * to make use of a `runId` anyway.
  */
-export async function runOpSpec({ spec, input }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
+export async function runOpSpec({ spec, input, trace, runId }: OpRunRequest, opts: OpRunOpts = {}): Promise<unknown> {
   const store = opts.store ?? new MemoryStore()
   const sinks = Object.assign(Object.create(null), SINK_REGISTRY, opts.sinks) as Record<string, SinkTarget>
-  const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache }
+  const caps: Caps = { store, llm: opts.llm ?? llmUnavailable, clock: { now: () => Date.now() }, sinks, governors: opts.governors, cache: opts.cache, ask: opts.ask, checkpoint: opts.checkpoint }
+  // Mint the runId here (rather than letting runInline default it
+  // internally) so it can be handed back to the caller -- runInline's own
+  // internal default would otherwise be unobservable from outside the call.
+  const effectiveRunId = runId ?? crypto.randomUUID()
   const tree = buildOp(spec, opts.leaves)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
-  const result = await runInline(tree, hydrated, caps)
-  return dehydrate(store, result)
+  let gOpts = opts.gOpts
+  let events: TraceEvent[] | undefined
+  if (trace) {
+    events = []
+    const collected = events
+    const userOnTrace = opts.gOpts?.onTrace
+    gOpts = {
+      ...opts.gOpts,
+      onTrace: (e) => {
+        collected.push(e)
+        // Fail loud, consistent with every other bomb guard in this file
+        // (hydrate()'s MAX_HYDRATE_BYTES): abort the run rather than
+        // silently truncating the trace and returning a partial-but-looks-
+        // complete buffer to the caller.
+        if (collected.length > MAX_TRACE_EVENTS) {
+          throw new Error(`op-run trace collected more than ${MAX_TRACE_EVENTS} TraceEvents (bomb guard).`)
+        }
+        userOnTrace?.(e)
+      },
+    }
+  }
+  const result = await runInline(tree, hydrated, caps, gOpts, '', effectiveRunId)
+  const dehydrated = await dehydrate(store, result)
+  if (opts.checkpoint) {
+    return trace ? { result: dehydrated, trace: events, runId: effectiveRunId } : { result: dehydrated, runId: effectiveRunId }
+  }
+  return trace ? { result: dehydrated, trace: events } : dehydrated
 }

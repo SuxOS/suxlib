@@ -13,9 +13,12 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import type { OpSpec } from '../op/spec.js'
+import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, validateOpSpec, type OpSpec } from '../op/spec.js'
+import { describePipelineSchema } from '../op/introspect.js'
+import { planOpSpec } from '../op/plan.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
-import type { Cache, Store, Llm } from '../effects/types.js'
+import type { Cache, Store, Llm, Ask, Checkpoint } from '../effects/types.js'
+import type { RunGovernedOpts } from '../control/governor.js'
 
 function textResult(obj: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(obj) }] }
@@ -25,13 +28,24 @@ function textResult(obj: unknown) {
 // building the schema for `steps`/`op` until it's actually validated, which is
 // what makes a self-referential shape like this expressible in zod at all.
 const opSpecLeafOptsSchema = z.object({
-  retries: z.number().int().min(0).max(5).optional(),
+  retries: z.number().int().min(0).max(MAX_LEAF_RETRIES).optional(),
   heavy: z.boolean().optional(),
   memo: z.boolean().optional(),
   kind: z.enum(['pure', 'effect']).optional(),
 }).optional()
 
-const fieldPolicySchema = z.enum(['last-write-wins', 'union', 'keep-first'])
+// Same shape as opSpecLeafOptsSchema minus `kind` -- a sink write is always
+// I/O, so there's no 'pure'/'effect' choice to make (see op/types.ts's SinkOpts).
+const opSpecSinkOptsSchema = z.object({
+  retries: z.number().int().min(0).max(MAX_LEAF_RETRIES).optional(),
+  heavy: z.boolean().optional(),
+  memo: z.boolean().optional(),
+}).optional()
+
+// Derived from spec.ts's FIELD_POLICIES (not a hand-duplicated literal array)
+// so this schema can't silently drift from what buildOp actually validates --
+// the concrete example CLAUDE.md's OpSpec-validation footgun note calls out (#187).
+const fieldPolicySchema = z.enum(FIELD_POLICIES)
 
 // Mirrors src/op/reconcile.ts's ReconcileOpts discriminated union; buildOp
 // (src/op/spec.ts) re-validates mode/defaultPolicy/policy itself, so this
@@ -51,9 +65,25 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   // stop this key from being silently stripped before it reaches buildOp.
   z.object({ tag: z.literal('leaf'), name: z.string(), opts: opSpecLeafOptsSchema, params: z.record(z.string(), z.unknown()).optional() }),
   z.object({ tag: z.literal('pipe'), steps: z.array(opSpecSchema).min(1) }),
-  z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(32) }),
-  z.object({ tag: z.literal('sink'), targets: z.array(z.string()).min(1) }),
+  z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(MAX_MAP_CONCURRENCY) }),
+  z.object({
+    tag: z.literal('mapField'),
+    arrayField: z.string(),
+    elementField: z.string(),
+    op: opSpecSchema,
+    concurrency: z.number().int().min(1).max(MAX_MAP_CONCURRENCY),
+    renameTo: z.string().optional(),
+  }),
+  z.object({
+    tag: z.literal('sink'),
+    // A bare name falls back to the sink spec's own `opts`; a `{ name, opts }`
+    // pair overrides per-field (#251) -- mirrors src/op/spec.ts's OpSpecSinkTarget.
+    targets: z.array(z.union([z.string(), z.object({ name: z.string(), opts: opSpecSinkOptsSchema })])).min(1),
+    opts: opSpecSinkOptsSchema,
+  }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
+  z.object({ tag: z.literal('catch'), try: opSpecSchema, catch: opSpecSchema }),
+  z.object({ tag: z.literal('ask'), prompt: z.string(), timeout: z.string(), onTimeout: z.enum(['proceed', 'fail']) }),
 ]))
 
 export type RegisterFileopsToolsOptions = {
@@ -106,6 +136,32 @@ export type RegisterFileopsToolsOptions = {
    * leaf as before.
    */
   opRunLeaves?: Record<string, LeafFn>
+  /**
+   * A host-supplied RunGovernedOpts (onEvent, custom backoff/sleep/rand),
+   * passed through unchanged to runInline's 4th argument for every
+   * `run_pipeline` call — the only way to observe retry-attempt/memo-hit/
+   * memo-miss GovernorEvents (see op-run.ts's OpRunOpts doc). Omitted
+   * entirely, runInline's own defaults apply.
+   */
+  opRunGOpts?: RunGovernedOpts
+  /**
+   * A host-supplied Ask implementation, threaded to `caps.ask` for every
+   * `run_pipeline` call — lets a spec's `ask` step actually reach a
+   * human-in-the-loop answer instead of only ever hitting runInline's
+   * no-capability fallback (`onTimeout: 'fail'` throws AskTimeoutError,
+   * `'proceed'` passes the piped value through; see op-run.ts's OpRunOpts
+   * doc). Omitted entirely, that fallback behavior is unchanged.
+   */
+  opRunAsk?: Ask
+  /**
+   * A host-supplied Checkpoint implementation (#390/#396), threaded to
+   * `caps.checkpoint` for every `run_pipeline` call -- lets a `run_pipeline`
+   * caller resume a crashed run by re-submitting the `runId` a prior call's
+   * response returned (only returned once `opRunCheckpoint` is configured),
+   * instead of re-executing every node from scratch. Omitted entirely,
+   * `run_pipeline`'s response shape is unchanged from before #396.
+   */
+  opRunCheckpoint?: Checkpoint
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -117,7 +173,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
     server.registerTool(
       'archive_create',
       {
-        description: 'Pack one or more files into a zip, tar, or gzip archive.',
+        description: 'Pack one or more files into a zip, tar, gzip, or tar.gz archive.',
         inputSchema: {
           format: z.enum(ARCHIVE_FORMATS).default('zip'),
           files: z.array(z.object({ name: z.string(), base64: z.string(), mtime: z.number().optional() })).min(1).max(MAX_ENTRIES),
@@ -148,7 +204,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
     server.registerTool(
       'archive_extract',
       {
-        description: 'Extract a zip, tar, or gzip archive into its entries.',
+        description: 'Extract a zip, tar, gzip, or tar.gz archive into its entries.',
         inputSchema: {
           format: z.enum(ARCHIVE_FORMATS).default('zip'),
           base64: z.string(),
@@ -255,16 +311,93 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
       'run_pipeline',
       {
         description:
-          `Run a JSON-described op-tree pipeline (leaf/pipe/map/sink) over the op engine's registered leaves ` +
+          `Run a JSON-described op-tree pipeline (${OP_SPEC_TAGS.join('/')}) over the op engine's registered leaves ` +
           `(${leafNames.join(', ')}) and sink targets (${sinkNames.join(', ')}), ` +
           `instead of calling one tool per step. ` +
           `Handle-shaped values in \`input\`/the result are marshalled as { $handle: true, base64, type } / { base64, type, size }.`,
         inputSchema: {
           spec: opSpecSchema,
           input: z.unknown(),
+          trace: z.boolean().default(false).describe('Include a TraceEvent[] execution trace alongside the result.'),
+          runId: z.string().optional().describe('Resume a previously checkpointed run by passing back its runId (requires opRunCheckpoint to be configured server-side).'),
         },
       },
-      async ({ spec, input }) => textResult(await runOpSpec({ spec, input }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves })),
+      async ({ spec, input, trace, runId }, extra) => {
+        // The MCP request's own AbortSignal (fired on client disconnect) wires
+        // into cooperative cancellation (#279) unless a host-supplied
+        // opRunGOpts already declares one.
+        const signal = extra?.signal
+        let gOpts = signal ? { ...opts.opRunGOpts, signal: opts.opRunGOpts?.signal ?? signal } : opts.opRunGOpts
+        // Bridge #215's live per-node onTrace stream to MCP's standard
+        // notifications/progress, keyed off the request's progressToken --
+        // only when the client actually asked for progress (opted in by
+        // sending one). progress/total are per-run node-visit counts (not a
+        // percentage; the total node count isn't knowable up front), which
+        // still gives a client visibility that the run is alive and moving
+        // rather than none until the whole call resolves. Additive to any
+        // host-supplied onTrace, same pattern as the signal wiring above.
+        const progressToken = extra?._meta?.progressToken
+        if (progressToken !== undefined) {
+          const userOnTrace = gOpts?.onTrace
+          let progress = 0
+          gOpts = {
+            ...gOpts,
+            onTrace: (e) => {
+              userOnTrace?.(e)
+              if (e.kind === 'node-exit') {
+                progress++
+                extra.sendNotification({ method: 'notifications/progress', params: { progressToken, progress, message: e.path || e.tag } }).catch(() => {})
+              }
+            },
+          }
+        }
+        return textResult(await runOpSpec({ spec, input, trace, runId }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, gOpts, ask: opts.opRunAsk, checkpoint: opts.opRunCheckpoint }))
+      },
+    )
+  }
+
+  if (enabled('describe_pipeline')) {
+    server.registerTool(
+      'describe_pipeline',
+      {
+        description:
+          'Describe every leaf/sink/reconcile option a `run_pipeline` OpSpec can currently use: ' +
+          'each registered leaf\'s declared input/output shape, sink target names, reconcile modes, and field-merge policies.',
+        inputSchema: {},
+      },
+      async () => textResult(describePipelineSchema(opts.opRunLeaves, opts.opRunSinks)),
+    )
+  }
+
+  if (enabled('validate_pipeline')) {
+    server.registerTool(
+      'validate_pipeline',
+      {
+        description:
+          'Check a `run_pipeline` OpSpec for structural errors (unknown leaf names, out-of-range retries/concurrency, ' +
+          'malformed ask/reconcile/mapField fields, mismatched pipe-adjacency shapes, ...) without running it. ' +
+          'Returns every error found in one pass, not just the first.',
+        inputSchema: { spec: opSpecSchema },
+      },
+      async ({ spec }) => {
+        const errors = validateOpSpec(spec, opts.opRunLeaves)
+        return textResult({ valid: errors.length === 0, errors })
+      },
+    )
+  }
+
+  if (enabled('plan_pipeline')) {
+    server.registerTool(
+      'plan_pipeline',
+      {
+        description:
+          'Report a non-executing cost/capability audit for a `run_pipeline` OpSpec: total node count, the widest ' +
+          'declared map/mapField concurrency, the worst-case Σ(retries+1) retry multiplier across every leaf/sink, ' +
+          'and which optional capabilities (ask, cache/memo, llm, named sink targets) the spec will reach if run -- ' +
+          'lets a caller estimate blast radius and check readiness against its own Caps before actually running a spec.',
+        inputSchema: { spec: opSpecSchema },
+      },
+      async ({ spec }) => textResult(planOpSpec(spec)),
     )
   }
 }

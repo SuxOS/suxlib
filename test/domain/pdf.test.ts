@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
-import { PDFDocument } from 'pdf-lib'
-import { pdfShrink, pdfPageCount, loadBoundedPdf, shrink, MAX_PDF_INPUT_BYTES } from '../../src/domain/pdf.js'
+import { PDFDocument, PDFName } from 'pdf-lib'
+import { pdfShrink, pdfPageCount, loadBoundedPdf, shrink, pageCount, MAX_PDF_INPUT_BYTES } from '../../src/domain/pdf.js'
 import { MemoryStore } from '../../src/effects/types.js'
 import { putBytes, resolve } from '../../src/handles/handle.js'
 
@@ -12,6 +12,23 @@ async function blankPdf(pages = 1): Promise<Uint8Array> {
   return doc.save()
 }
 
+// Builds a fixture with a catalog XMP /Metadata stream -- pdf-lib's
+// setTitle/etc. only ever touch the classic /Info dict, so the only way to
+// get an XMP packet into a test fixture is via the low-level context API
+// (mirrors how a real Acrobat/Office/LibreOffice export embeds one).
+async function pdfWithXmp(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create()
+  doc.addPage([300, 400])
+  const xmp = '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>' +
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">' +
+    '<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Confidential Report</dc:title></rdf:Description>' +
+    '</rdf:RDF></x:xmpmeta><?xpacket end="w"?>'
+  const stream = doc.context.stream(xmp, { Type: 'Metadata', Subtype: 'XML' })
+  const ref = doc.context.register(stream)
+  doc.catalog.set(PDFName.of('Metadata'), ref)
+  return doc.save()
+}
+
 test('pdfShrink strips metadata by default and reports byte savings', async () => {
   const input = await blankPdf(1)
   const result = await pdfShrink(input)
@@ -20,6 +37,58 @@ test('pdfShrink strips metadata by default and reports byte savings', async () =
   const out = await PDFDocument.load(result.bytes)
   expect(out.getTitle() ?? '').toBe('')
   expect(out.getAuthor() ?? '').toBe('')
+})
+
+test('pdfShrink clears a catalog XMP /Metadata stream, not just the Info dict', async () => {
+  const input = await pdfWithXmp()
+  expect(new TextDecoder('latin1').decode(input)).toContain('Confidential Report')
+  const result = await pdfShrink(input, { stripMetadata: true })
+  const outText = new TextDecoder('latin1').decode(result.bytes)
+  expect(outText).not.toContain('Confidential Report')
+  const out = await PDFDocument.load(result.bytes)
+  expect(out.catalog.get(PDFName.of('Metadata'))).toBeUndefined()
+})
+
+// Builds a fixture with a page-level XMP /Metadata stream, plus an XObject
+// (image-like) dict carrying its own -- covers #359's page/XObject gap, not
+// just the catalog-level stream #351 already handles.
+async function pdfWithPageAndXObjectXmp(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create()
+  const page = doc.addPage([300, 400])
+  const pageXmp = '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>' +
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">' +
+    '<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Page Secret</dc:title></rdf:Description>' +
+    '</rdf:RDF></x:xmpmeta><?xpacket end="w"?>'
+  const pageStream = doc.context.stream(pageXmp, { Type: 'Metadata', Subtype: 'XML' })
+  const pageRef = doc.context.register(pageStream)
+  page.node.set(PDFName.of('Metadata'), pageRef)
+
+  const xobjXmp = '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>' +
+    '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">' +
+    '<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>Image Author</dc:creator></rdf:Description>' +
+    '</rdf:RDF></x:xmpmeta><?xpacket end="w"?>'
+  const xobjXmpStream = doc.context.stream(xobjXmp, { Type: 'Metadata', Subtype: 'XML' })
+  const xobjXmpRef = doc.context.register(xobjXmpStream)
+  const xobjStream = doc.context.stream('', { Type: 'XObject', Subtype: 'Form', Metadata: xobjXmpRef })
+  const xobjRef = doc.context.register(xobjStream)
+  page.node.set(PDFName.of('Resources'), doc.context.obj({ XObject: { Im0: xobjRef } }))
+
+  return doc.save()
+}
+
+test('pdfShrink clears page-level and XObject-level XMP /Metadata streams, not just the catalog', async () => {
+  const input = await pdfWithPageAndXObjectXmp()
+  const inText = new TextDecoder('latin1').decode(input)
+  expect(inText).toContain('Page Secret')
+  expect(inText).toContain('Image Author')
+
+  const result = await pdfShrink(input, { stripMetadata: true })
+  const outText = new TextDecoder('latin1').decode(result.bytes)
+  expect(outText).not.toContain('Page Secret')
+  expect(outText).not.toContain('Image Author')
+
+  const out = await PDFDocument.load(result.bytes)
+  expect(out.getPage(0).node.get(PDFName.of('Metadata'))).toBeUndefined()
 })
 
 test('pdfShrink keeps metadata when stripMetadata is false', async () => {
@@ -44,6 +113,13 @@ test('shrink (Handle-based leaf) round-trips a PDF through a Store and reports t
 test('pdfPageCount reports the page count', async () => {
   const input = await blankPdf(3)
   expect(await pdfPageCount(input)).toBe(3)
+})
+
+test('pageCount (Handle-based leaf) resolves the input Handle and reports the same count as pdfPageCount', async () => {
+  const store = new MemoryStore()
+  const input = await blankPdf(3)
+  const handle = await putBytes(store, input, 'application/pdf')
+  expect(await pageCount(handle, { store } as any)).toBe(3)
 })
 
 test('loadBoundedPdf rejects a PDF larger than MAX_PDF_INPUT_BYTES', async () => {

@@ -4,7 +4,7 @@ import { runOpSpec } from '../../src/adapters/op-run.js'
 import { bytesToB64 } from '../../src/adapters/base64.js'
 import type { OpSpec } from '../../src/op/spec.js'
 import { createGovernor } from '../../src/control/governor.js'
-import { MemoryStore, type Cache, type Llm } from '../../src/effects/types.js'
+import { MemoryStore, MemoryCheckpoint, type Cache, type Llm } from '../../src/effects/types.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -70,6 +70,41 @@ test('runOpSpec: a "__proto__"-keyed input cannot inject an inherited `to` into 
   await expect(runOpSpec({ spec, input: maliciousInput })).rejects.toThrow(/Unsupported target format/)
 })
 
+test('runOpSpec: trace defaults to omitted, returning the bare result unchanged', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const result = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+  }) as { base64: string }
+  expect(result.base64).toBeTypeOf('string')
+})
+
+test('runOpSpec: trace: true returns { result, trace } with a node-enter/node-exit pair for the leaf', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const outcome = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+    trace: true,
+  }) as { result: { base64: string }; trace: Array<{ kind: string; tag: string; name?: string }> }
+  expect(Buffer.from(outcome.result.base64, 'base64').toString('utf8')).toBe('a: 1')
+  expect(outcome.trace).toEqual([
+    expect.objectContaining({ kind: 'node-enter', tag: 'leaf', name: 'convert' }),
+    expect.objectContaining({ kind: 'node-exit', tag: 'leaf', name: 'convert', ok: true }),
+  ])
+})
+
+test('runOpSpec: trace: true still invokes a caller-supplied gOpts.onTrace alongside the collected array', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const seen: string[] = []
+  const outcome = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+    trace: true,
+  }, { gOpts: { onTrace: (e) => seen.push(e.kind) } }) as { trace: unknown[] }
+  expect(seen).toEqual(['node-enter', 'node-exit'])
+  expect(outcome.trace).toHaveLength(2)
+})
+
 test('runOpSpec: opts.cache is a long-lived instance a host reuses across calls, so a memo leaf runs only once for repeated input', async () => {
   let gets = 0
   let puts = 0
@@ -101,6 +136,32 @@ test('runOpSpec: hydrate() bails on the aggregate byte guard across multiple $ha
   const spec: OpSpec = { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 }
   const input = [{ $handle: true, base64: big }, { $handle: true, base64: big }]
   await expect(runOpSpec({ spec, input })).rejects.toThrow(/bomb guard/)
+})
+
+test('runOpSpec: trace: true bails on the TraceEvent count bomb guard for a large map fan-out instead of buffering it all', async () => {
+  const { MAX_TRACE_EVENTS } = await import('../../src/adapters/op-run.js')
+  // Each item contributes a node-enter/node-exit pair; the map node itself
+  // contributes one more pair -- comfortably over MAX_TRACE_EVENTS either way.
+  const items = Array.from({ length: Math.ceil(MAX_TRACE_EVENTS / 2) + 1 }, (_, i) => i)
+  const spec: OpSpec = { tag: 'map', op: { tag: 'leaf', name: 'shout', opts: { kind: 'pure' } }, concurrency: 16 }
+  await expect(runOpSpec(
+    { spec, input: items, trace: true },
+    { leaves: { shout: async (input) => input } },
+  )).rejects.toThrow(/bomb guard/)
+})
+
+test('runOpSpec: opts.gOpts.onTrace (the same gOpts bag onEvent already rides) receives node-enter/node-exit for every node the spec visits (#215)', async () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'convert' }] }
+  const trace: unknown[] = []
+  const input = { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' }
+  const result = await runOpSpec({ spec, input }, { gOpts: { onTrace: (e) => trace.push(e) } }) as { base64: string }
+  expect(Buffer.from(result.base64, 'base64').toString('utf8')).toBe('a: 1')
+  expect(trace).toEqual([
+    { kind: 'node-enter', tag: 'pipe', name: undefined, path: '', runId: expect.any(String), callId: expect.any(String) },
+    { kind: 'node-enter', tag: 'leaf', name: 'convert', path: '0', runId: expect.any(String), callId: expect.any(String) },
+    { kind: 'node-exit', tag: 'leaf', name: 'convert', path: '0', runId: expect.any(String), callId: expect.any(String), durationMs: expect.any(Number), ok: true },
+    { kind: 'node-exit', tag: 'pipe', name: undefined, path: '', runId: expect.any(String), callId: expect.any(String), durationMs: expect.any(Number), ok: true },
+  ])
 })
 
 test('runOpSpec: a sink spec resolves the built-in `store` target with no host wiring required, echoing the piped value through', async () => {
@@ -162,4 +223,75 @@ test('runOpSpec: opts.leaves lets a host register a custom leaf a spec can name'
 test('runOpSpec: an unknown leaf name still surfaces a clear error when opts.leaves is supplied but doesn\'t cover it', async () => {
   const spec: OpSpec = { tag: 'leaf', name: 'nope' }
   await expect(runOpSpec({ spec, input: null }, { leaves: { shout: async (input) => input } })).rejects.toThrow(/unknown leaf "nope"/)
+})
+
+test('runOpSpec: an ask spec fails without opts.ask (onTimeout: fail), and opts.ask lets a host answer it', async () => {
+  const spec: OpSpec = { tag: 'ask', prompt: 'approve?', timeout: '5m', onTimeout: 'fail' }
+  await expect(runOpSpec({ spec, input: null })).rejects.toThrow(/ask timed out/)
+
+  const result = await runOpSpec({ spec, input: null }, { ask: { request: async () => ({ answered: true, value: 'approved' }) } })
+  expect(result).toBe('approved')
+})
+
+test('runOpSpec: a caller-supplied raw Handle object (not a $handle ref) is rejected instead of passed through to the leaf', async () => {
+  const store = new MemoryStore()
+  const secret = await store.put(new TextEncoder().encode('someone else\'s bytes'), 'application/octet-stream')
+  const spec: OpSpec = { tag: 'leaf', name: 'scrub' }
+  await expect(runOpSpec({ spec, input: secret }, { store })).rejects.toThrow(/raw Handle object/)
+})
+
+test('runOpSpec: a raw Handle object nested inside a larger input (e.g. a {handle, ...opts} leaf shape) is also rejected', async () => {
+  const store = new MemoryStore()
+  const secret = await store.put(new TextEncoder().encode('{"a":1}'), 'application/json')
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  await expect(runOpSpec({ spec, input: { handle: secret, from: 'json', to: 'yaml' } }, { store })).rejects.toThrow(/raw Handle object/)
+})
+
+test('runOpSpec: with no opts.checkpoint configured, the response shape is unchanged (no runId leaks in)', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const result = await runOpSpec({ spec, input: { a: 1 } }, { leaves: { shout: async (input) => input } })
+  expect(result).toEqual({ a: 1 })
+})
+
+test('runOpSpec: opts.checkpoint wired in mints and returns a runId when the request omits one, wrapping the result as { result, runId }', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const outcome = await runOpSpec(
+    { spec, input: { a: 1 } },
+    { leaves: { shout: async (input) => input }, checkpoint },
+  ) as { result: unknown; runId: string }
+  expect(outcome.result).toEqual({ a: 1 })
+  expect(outcome.runId).toBeTypeOf('string')
+  expect(outcome.runId.length).toBeGreaterThan(0)
+})
+
+test('runOpSpec: a second call sharing opts.checkpoint/store and the first call\'s returned runId resumes instead of re-executing a leaf that already finished (#396)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const store = new MemoryStore()
+  let calls = 0
+  const spec: OpSpec = { tag: 'leaf', name: 'countedLeaf' }
+  const leaves = { countedLeaf: async (input: unknown) => { calls++; return input } }
+
+  const first = await runOpSpec({ spec, input: { a: 1 } }, { leaves, checkpoint, store }) as { result: unknown; runId: string }
+  expect(first.result).toEqual({ a: 1 })
+  expect(calls).toBe(1)
+
+  const second = await runOpSpec({ spec, input: { a: 1 }, runId: first.runId }, { leaves, checkpoint, store }) as { result: unknown; runId: string }
+  expect(second.result).toEqual({ a: 1 })
+  expect(second.runId).toBe(first.runId)
+  // The leaf is never re-invoked -- the resumed call's node was already
+  // recorded under (runId, path) by the first call.
+  expect(calls).toBe(1)
+})
+
+test('runOpSpec: trace: true plus opts.checkpoint returns { result, trace, runId } together', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const outcome = await runOpSpec(
+    { spec, input: { a: 1 }, trace: true },
+    { leaves: { shout: async (input) => input }, checkpoint },
+  ) as { result: unknown; trace: unknown[]; runId: string }
+  expect(outcome.result).toEqual({ a: 1 })
+  expect(outcome.trace.length).toBeGreaterThan(0)
+  expect(outcome.runId).toBeTypeOf('string')
 })

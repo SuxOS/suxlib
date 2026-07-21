@@ -1,10 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { zipSync } from 'fflate'
 import { archiveCreate } from '../../src/domain/archive.js'
 import { extractArchiveTo, main, pipelineRunCmd, transform } from '../../src/adapters/cli.js'
+import { bytesToB64 } from '../../src/adapters/base64.js'
 
 // extractArchiveTo exercises the CLI's actual filesystem-writing extract path —
 // the real attack surface the zip-slip guard protects, as opposed to
@@ -68,6 +69,15 @@ describe('extractArchiveTo (CLI filesystem extract path)', () => {
     expect(statSync(join(out, 'a.txt')).mtimeMs).toBeCloseTo(mtime, -3)
   })
 
+  it('writes entries from a tar.gz archive', () => {
+    const out = tmpDir()
+    const packed = archiveCreate('tar.gz', [{ name: 'a.txt', data: new TextEncoder().encode('hello') }])
+    const { written, skipped } = extractArchiveTo('tar.gz', packed, out)
+    expect(written).toBe(1)
+    expect(skipped).toEqual([])
+    expect(readFileSync(join(out, 'a.txt'), 'utf8')).toBe('hello')
+  })
+
   it('refuses to extract (and writes nothing outside the output dir) for a zip-slip entry name', () => {
     const out = tmpDir()
     const escapeTarget = resolve(out, '..', 'suxlib-fileops-zip-slip-victim.txt')
@@ -76,6 +86,25 @@ describe('extractArchiveTo (CLI filesystem extract path)', () => {
     expect(() => extractArchiveTo('zip', packed, out)).toThrow(/escapes|absolute/)
     expect(existsSync(escapeTarget)).toBe(false)
     rmSync(escapeTarget, { force: true })
+  })
+})
+
+describe('cli allowCommands subset (real CLI entry point)', () => {
+  it('blocks a command outside the allowed subset and leaves an allowed one working', async () => {
+    const work = tmpDir()
+    const inPath = join(work, 'in.txt')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(inPath, 'contact me at a@b.com')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'archive', 'create', '-o', join(work, 'out.zip'), inPath], {}, ['sanitize'])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/unknown command 'archive'/))
+    process.exitCode = 0
+
+    await main(['node', 'suxlib-fileops', 'sanitize', 'text', inPath], {}, ['sanitize'])
+    expect(process.exitCode).toBe(0)
+    errSpy.mockRestore()
   })
 })
 
@@ -150,6 +179,72 @@ describe('cli `archive create` (real CLI entry point)', () => {
     process.exitCode = 0
     errSpy.mockRestore()
   })
+
+  it('honors a distinct --mtime per file via name=epoch-ms pairs (#246)', async () => {
+    const work = tmpDir()
+    const pathA = join(work, 'a.txt')
+    const pathB = join(work, 'b.txt')
+    const outPath = join(work, 'out.zip')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(pathA, 'first')
+    writeFileSync(pathB, 'second')
+    const mtimeA = new Date(2021, 0, 1).getTime()
+    const mtimeB = new Date(2022, 5, 15).getTime()
+    await main(['node', 'suxlib-fileops', 'archive', 'create', '-o', outPath, '-m', `a.txt=${mtimeA},b.txt=${mtimeB}`, pathA, pathB])
+    const { archiveExtract } = await import('../../src/domain/archive.js')
+    const { entries } = archiveExtract('zip', new Uint8Array(readFileSync(outPath)))
+    expect(entries.find((e) => e.name === 'a.txt')!.mtime).toBe(mtimeA)
+    expect(entries.find((e) => e.name === 'b.txt')!.mtime).toBe(mtimeB)
+  })
+
+  it('rejects a --mtime name=epoch-ms pair referencing a file not being packed', async () => {
+    const work = tmpDir()
+    const inPath = join(work, 'in.txt')
+    const outPath = join(work, 'out.zip')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(inPath, 'hello')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'archive', 'create', '-o', outPath, '-m', 'nope.txt=1700000000000', inPath])
+    expect(process.exitCode).toBe(1)
+    expect(existsSync(outPath)).toBe(false)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/--mtime references unknown file 'nope.txt'/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
+})
+
+describe('cli `archive extract` (real CLI entry point)', () => {
+  it('lists entry name/bytes/text/base64/mtime as JSON to stdout instead of extracting when -o is omitted (#182, #207)', async () => {
+    const work = tmpDir()
+    const outPath = join(work, 'out.zip')
+    const data = new TextEncoder().encode('hello')
+    writeFileSync(outPath, archiveCreate('zip', [{ name: 'in.txt', data, mtime: 1700000000000 }]))
+
+    // Read .mock.calls before mockRestore() below, not after: mockRestore()
+    // resets the mock's call history as part of restoring the original
+    // implementation, so a later .mock.calls read comes back undefined even
+    // though the spy WAS invoked during the test.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'archive', 'extract', outPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls.at(-1)![0] as string)
+    expect(printed.entries).toEqual([{ name: 'in.txt', bytes: 5, text: 'hello', truncated: undefined, mtime: 1700000000000, base64: bytesToB64(data) }])
+    logSpy.mockRestore()
+  })
+
+  it('rejects an invalid --format instead of crashing with a destructure TypeError (#350)', async () => {
+    const work = tmpDir()
+    const outPath = join(work, 'out.zip')
+    writeFileSync(outPath, archiveCreate('zip', [{ name: 'in.txt', data: new TextEncoder().encode('hello') }]))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'archive', 'extract', '-f', 'bogus', outPath])
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/--format must be zip, tar, gzip, or tar\.gz/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
 })
 
 describe('cli `pipeline run` (real CLI entry point)', () => {
@@ -197,6 +292,30 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     expect(printed[0].kind).toBe('png')
     expect(existsSync(join(outDir, printed[0].handle.file))).toBe(true)
     expect(readFileSync(join(outDir, printed[0].handle.file)).length).toBeGreaterThan(0)
+    logSpy.mockRestore()
+  })
+
+  it('preserves a "__proto__"-keyed result value under --output instead of silently dropping it', async () => {
+    const work = tmpDir()
+    const outDir = join(work, 'out')
+    const specPath = join(work, 'spec.json')
+    const { writeFileSync } = await import('node:fs')
+    // wrapHandle doesn't validate its input is a real Handle -- it just
+    // echoes whatever it's given under a fixed "handle" key (src/op/reshape.ts)
+    // -- so this spec's result is `{ handle: <input> }`, putting the
+    // caller-supplied "__proto__" key two levels deep in the result value
+    // extractHandleFiles walks. Written as raw JSON text, not a JS object
+    // literal, so the "__proto__" key round-trips as a genuine own property
+    // (JSON.parse doesn't apply the object-literal grammar's exotic
+    // "__proto__: value" prototype-setter behavior).
+    writeFileSync(specPath, `{"spec":{"tag":"leaf","name":"wrapHandle"},"input":{"a":1,"__proto__":{"pwned":true}}}`)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '-o', outDir])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { handle: Record<string, unknown> }
+    expect(Object.prototype.hasOwnProperty.call(printed.handle, '__proto__')).toBe(true)
+    expect(printed.handle.__proto__).toEqual({ pwned: true })
+    expect(printed.handle.a).toBe(1)
     logSpy.mockRestore()
   })
 
@@ -325,5 +444,135 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/must have a default export/))
     process.exitCode = 0
     errSpy.mockRestore()
+  })
+
+  // Last `pipeline run` test in this describe block deliberately: pipelineRunCmd
+  // is a module-level Commander singleton (CLAUDE.md's "cli.ts's main() gotcha"),
+  // so any flag left implicit here would inherit whatever a *prior* test in this
+  // block last set it to, not its true default -- explicitly pass every flag a
+  // previous test has ever set (-o, --config) alongside --trace, rather than
+  // relying on any of them being freshly undefined.
+  it('--trace includes a TraceEvent[] trace alongside the result', async () => {
+    const work = tmpDir()
+    const outDir = join(work, 'out')
+    const dataPath = join(work, 'data.json')
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(dataPath, '{"a":1}')
+    writeFileSync(configPath, 'export default {}\n')
+    writeFileSync(
+      specPath,
+      JSON.stringify({
+        spec: { tag: 'leaf', name: 'convert' },
+        input: { handle: { $file: 'data.json', type: 'application/json' }, from: 'json', to: 'yaml' },
+      }),
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '-o', outDir, '--trace', '--config', configPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { result: { file: string }; trace: Array<{ kind: string }> }
+    expect(existsSync(join(outDir, printed.result.file))).toBe(true)
+    expect(readFileSync(join(outDir, printed.result.file), 'utf8')).toBe('a: 1')
+    expect(printed.trace.map((e) => e.kind)).toEqual(['node-enter', 'node-exit'])
+    logSpy.mockRestore()
+  })
+})
+
+describe('cli `pipeline describe` (real CLI entry point)', () => {
+  it('prints the leaf/sink/reconcile-mode/field-policy schema as JSON', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'describe'])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { leaves: Record<string, unknown>; sinks: string[]; reconcileModes: string[]; fieldPolicies: string[] }
+    expect(Object.keys(printed.leaves)).toContain('convert')
+    expect(printed.sinks).toEqual(['store'])
+    expect(printed.reconcileModes).toContain('field-merge')
+    expect(printed.fieldPolicies).toContain('union')
+    logSpy.mockRestore()
+  })
+
+  it('--config merges host-registered leaves/sinks into the printed schema', async () => {
+    const work = tmpDir()
+    const configPath = join(work, 'op-run.config.mjs')
+    writeFileSync(
+      configPath,
+      'export default { leaves: { shout: async (input) => input }, sinks: { log: { name: "log", write: async (v) => v } } }\n',
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'describe', '--config', configPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { leaves: Record<string, unknown>; sinks: string[] }
+    expect(Object.keys(printed.leaves)).toContain('shout')
+    expect(printed.sinks).toContain('log')
+    logSpy.mockRestore()
+  })
+})
+
+describe('cli `pipeline validate` (real CLI entry point)', () => {
+  it('reports a well-formed spec as valid with no errors, without running it (#208)', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } } }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'validate', specPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string)
+    expect(printed).toEqual({ valid: true, errors: [] })
+    logSpy.mockRestore()
+  })
+
+  it('collects every structural error in one pass and exits non-zero (#208)', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    writeFileSync(specPath, JSON.stringify({
+      spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'nope' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 0 }] },
+    }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'validate', specPath])
+    expect(process.exitCode).toBe(1)
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { valid: boolean; errors: Array<{ path: string; message: string }> }
+    expect(printed.valid).toBe(false)
+    expect(printed.errors.some((e) => /unknown leaf "nope"/.test(e.message))).toBe(true)
+    expect(printed.errors.some((e) => /concurrency/.test(e.message))).toBe(true)
+    process.exitCode = 0
+    logSpy.mockRestore()
+  })
+
+  it('--config merges host-registered leaves so a custom leaf validates as known', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'shout' } }))
+    writeFileSync(configPath, 'export default { leaves: { shout: async (input) => input } }\n')
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'validate', specPath, '--config', configPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string)
+    expect(printed).toEqual({ valid: true, errors: [] })
+    logSpy.mockRestore()
+  })
+})
+
+describe('cli `pipeline plan` (real CLI entry point)', () => {
+  it('prints a non-executing cost/capability audit without running the spec (#361)', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    writeFileSync(specPath, JSON.stringify({
+      spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'extract', opts: { retries: 2 } }, { tag: 'map', op: { tag: 'leaf', name: 'stamp' }, concurrency: 5 }] },
+    }))
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'plan', specPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string)
+    expect(printed.nodeCount).toBe(4) // pipe + leaf + map + leaf
+    expect(printed.maxConcurrency).toBe(5)
+    expect(printed.maxRetryMultiplier).toBe(3 + 1) // extract retries:2 -> 3, stamp default -> 1
+    expect(printed.usesLlm).toBe(true)
+    expect(printed.llmLeaves).toEqual(['extract'])
+    logSpy.mockRestore()
   })
 })

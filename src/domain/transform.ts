@@ -49,6 +49,7 @@ function needsQuote(s: string): boolean {
   if (s === '') return true
   if (/^(true|false|null|~)$/i.test(s)) return true
   if (/^-?\d+(\.\d+)?$/.test(s)) return true
+  if (/^-?\d(\.\d+)?[eE][+-]?\d+$/.test(s)) return true
   return /[:#\[\]{}&*!|>'"%@`,\n\r\t]|^[\s?-]|\s$/.test(s)
 }
 
@@ -106,6 +107,7 @@ function parseScalar(raw: string): unknown {
     if (Number.isSafeInteger(n)) return n
   }
   if (/^-?\d*\.\d+$/.test(s)) return parseFloat(s)
+  if (/^-?\d(\.\d+)?[eE][+-]?\d+$/.test(s)) return parseFloat(s)
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
     if (s[0] === '"') {
       try {
@@ -126,48 +128,264 @@ function parseScalar(raw: string): unknown {
   return s
 }
 
+// Strips a trailing `# comment`, but only when the `#` sits outside a quoted
+// scalar -- tracked at the character level rather than "does this line
+// contain a quote anywhere" (the old heuristic, which both over-protected a
+// plain scalar containing a stray apostrophe like "it's great # comment" and
+// under-protected a genuinely quoted scalar followed by a real comment).
+// `expectValueStart` marks positions where a quote character actually opens
+// a quoted token (line start, right after "- ", right after "key: ", or
+// right after a flow-collection delimiter `[`/`{`/`,` while inside one --
+// #345) -- everywhere else a quote char is just a literal, e.g. the
+// apostrophe in "it's".
+function stripYamlComment(line: string): string {
+  let inQuote: '"' | "'" | null = null
+  let expectValueStart = true
+  let flowDepth = 0
+  let i = 0
+  while (i < line.length) {
+    const c = line[i]
+    if (inQuote) {
+      if (inQuote === '"' && c === '\\') { i += 2; continue }
+      if (c === inQuote) {
+        if (inQuote === "'" && line[i + 1] === "'") { i += 2; continue }
+        inQuote = null
+        expectValueStart = false
+      }
+      i++
+      continue
+    }
+    if (c === '"' || c === "'") {
+      if (expectValueStart) inQuote = c
+      else expectValueStart = false
+      i++
+      continue
+    }
+    if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i).replace(/\s+$/, '')
+    if (c === ':' && (line[i + 1] === undefined || /\s/.test(line[i + 1]))) { expectValueStart = true; i++; continue }
+    if (c === '-' && expectValueStart && (line[i + 1] === undefined || /\s/.test(line[i + 1]))) { i++; continue }
+    if (c === '[' || c === '{') { flowDepth++; expectValueStart = true; i++; continue }
+    if ((c === ']' || c === '}') && flowDepth > 0) { flowDepth--; expectValueStart = false; i++; continue }
+    if (c === ',' && flowDepth > 0) { expectValueStart = true; i++; continue }
+    if (/\s/.test(c)) { i++; continue }
+    expectValueStart = false
+    i++
+  }
+  return line
+}
+
+// Block-scalar header (`|`/`>`, optionally with a chomping indicator `+`/`-`
+// and/or an explicit indentation indicator, in either order -- `|2-` and
+// `|-2` are both valid). Returns null when `s` isn't a bare block-scalar
+// header (i.e. an ordinary scalar value, parsed as before).
+function parseBlockScalarHeader(s: string): { folded: boolean; chomp: 'strip' | 'clip' | 'keep'; indent?: number } | null {
+  const m = s.match(/^([|>])([+-]?)(\d*)([+-]?)$/)
+  if (!m) return null
+  const chompChar = m[2] || m[4]
+  return {
+    folded: m[1] === '>',
+    chomp: chompChar === '-' ? 'strip' : chompChar === '+' ? 'keep' : 'clip',
+    indent: m[3] ? parseInt(m[3], 10) : undefined,
+  }
+}
+
+// Given a (comment-already-stripped) line that turns out to open a block
+// scalar, returns the `minIndent` floor its body must be read at -- mirrors
+// the two call shapes readBlockScalar's own callers use (mergeMap/depth-0
+// bare scalar: `indentOf(line) + 1`; a seq item, bare or with an inline key:
+// `indentOf(line) + 2`, since the dash itself eats one column) -- or null if
+// this line isn't a bare block-scalar header at all.
+function detectBlockScalarMinIndent(line: string): number | null {
+  const ind = line.match(/^\s*/)![0].length
+  const isSeqItem = /^\s*-(\s|$)/.test(line)
+  let valueCandidate: string
+  const minIndent = ind + (isSeqItem ? 2 : 1)
+  if (isSeqItem) {
+    const rest = line.slice(ind + 1).replace(/^\s*/, '')
+    if (/^-(\s|$)/.test(rest)) return null // nested seq -- not a header
+    const m = /^[^"'[{][^:]*:(\s|$)/.test(rest) ? rest.match(/^([^:]+):\s*(.*)$/) : null
+    valueCandidate = m ? m[2].trim() : rest.trim()
+  } else {
+    const body = line.slice(ind)
+    const m = body.match(/^([^:]+?):\s*(.*)$/)
+    valueCandidate = m ? m[2].trim() : body.trim()
+  }
+  return parseBlockScalarHeader(valueCandidate) ? minIndent : null
+}
+
+// #395: comment-stripping used to run as one global pass over the raw
+// document before any parsing -- including before readBlockScalar ever got a
+// chance to treat a literal/folded block scalar's body as content where '#'
+// has no comment meaning at all. This mirrors #392's fix for the analogous
+// blank-line problem: process the document line-by-line, tracking whether
+// we're currently inside a block scalar body (using the same indent-floor /
+// auto-detected-indent logic readBlockScalar itself applies), and skip both
+// the full-line '#' filter and stripYamlComment for any line that's inside
+// one -- a '#' as the first non-whitespace char, or preceded by whitespace
+// mid-line, is just literal body text there.
+function stripYamlComments(rawLines: string[]): string[] {
+  const indentOf = (l: string) => l.match(/^\s*/)![0].length
+  const out: string[] = []
+  let inBlock = false
+  let blockMinIndent = 0
+  let blockIndent: number | undefined
+  for (const line of rawLines) {
+    if (inBlock) {
+      if (line.trim() === '') { out.push(line); continue }
+      const ind = indentOf(line)
+      if (ind >= blockMinIndent && (blockIndent === undefined || ind >= blockIndent)) {
+        if (blockIndent === undefined) blockIndent = ind
+        out.push(line)
+        continue
+      }
+      inBlock = false
+      blockIndent = undefined
+    }
+    if (/^\s*#/.test(line)) continue
+    const stripped = stripYamlComment(line)
+    out.push(stripped)
+    const minIndent = detectBlockScalarMinIndent(stripped)
+    if (minIndent !== null) { inBlock = true; blockMinIndent = minIndent; blockIndent = undefined }
+  }
+  return out
+}
+
 export function parseYaml(text: string): unknown {
-  const lines = text
-    .split(/\r?\n/)
-    .filter((l) => l.trim() !== '' && !/^\s*#/.test(l))
-    .map((l) => (/["']/.test(l) ? l : l.replace(/\s+#.*$/, '')))
+  // Blank lines are kept (as '') rather than filtered out here -- a block
+  // scalar's body can contain an intentional blank line (#392), and only
+  // readBlockScalar knows whether a given blank belongs to the scalar it's
+  // reading. Every other consumer (parseBlock/parseSeq/parseNestedSeq/
+  // mergeMap) explicitly skips blank lines itself instead.
+  const lines = stripYamlComments(text.split(/\r?\n/))
     .map((l) => l.replace(/\s+$/, ''))
 
   let i = 0
   const indentOf = (l: string) => l.match(/^\s*/)![0].length
 
+  // Consumes every following line indented at least `minIndent` (the block's
+  // content columns are auto-detected from the first such line unless the
+  // header gave an explicit indent) as this block scalar's body, applying
+  // literal/folded joining and chomping. A blank line never terminates the
+  // block on its own (only a subsequent non-blank line dedented past
+  // `minIndent` does) and is kept as an empty content line, so blank lines
+  // embedded in the middle of a literal/folded body round-trip (#392);
+  // leading/trailing blanks around that (which don't count as content) are
+  // trimmed back off before chomping is applied.
+  function readBlockScalar(header: NonNullable<ReturnType<typeof parseBlockScalarHeader>>, minIndent: number): string {
+    const contentLines: string[] = []
+    let indent = header.indent !== undefined ? minIndent - 1 + header.indent : undefined
+    while (i < lines.length) {
+      const line = lines[i]
+      if (line === '') {
+        contentLines.push('')
+        i++
+        continue
+      }
+      const ind = indentOf(line)
+      if (ind < minIndent) break
+      if (indent === undefined) indent = ind
+      if (ind < indent) break
+      contentLines.push(line.slice(indent))
+      i++
+    }
+    while (contentLines.length && contentLines[contentLines.length - 1] === '') contentLines.pop()
+    while (contentLines.length && contentLines[0] === '') contentLines.shift()
+    if (contentLines.length === 0) return ''
+    // Folded style: a run of blank lines between content lines becomes that
+    // many newlines instead of the usual space-joined "fold"; a lone
+    // newline between two non-blank lines still folds to a single space.
+    const text = header.folded
+      ? contentLines.reduce((acc, l, k) => (k === 0 ? l : acc + (l === '' || contentLines[k - 1] === '' ? '\n' : ' ') + l))
+      : contentLines.join('\n')
+    if (header.chomp === 'strip') return text
+    return text + '\n' // 'clip' and 'keep' -- indistinguishable here since trailing blank lines are trimmed off above
+  }
+
   function parseBlock(minIndent: number, depth = 0): unknown {
     if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
+    while (lines[i] === '') i++
     const first = lines[i]
     if (first === undefined) return null
     if (/^\s*-(\s|$)/.test(first)) return parseSeq(minIndent, depth)
+    // toYaml never nests a bare scalar under a key or seq item (it always
+    // inlines those as "key: value"/"- value") -- a line with no ':' key
+    // pattern can only happen at the true document root, i.e. toYaml was
+    // called on a bare scalar (1e21, 'hello', ...) with nothing to map/seq.
+    if (depth === 0 && splitKey(first) === null) {
+      const bs = parseBlockScalarHeader(first.trim())
+      if (bs) { i++; return readBlockScalar(bs, indentOf(first) + 1) }
+      i++
+      return parseScalar(first)
+    }
     return parseMap(minIndent, depth)
   }
   function parseSeq(minIndent: number, depth: number): unknown[] {
     const arr: unknown[] = []
+    let seqIndent: number | undefined
     while (i < lines.length) {
+      if (lines[i] === '') { i++; continue }
       const line = lines[i]
       const ind = indentOf(line)
       if (ind < minIndent || !/^\s*-(\s|$)/.test(line)) break
+      // A sibling item of THIS array must sit at the same column as the
+      // array's first item -- a deeper-indented "-" line instead belongs to
+      // a nested sequence (see parseNestedSeq below), not a new sibling.
+      // Using `minIndent` itself (a floor, not the array's actual column)
+      // here was the root cause of #352: "- - 1\n    - 2\n  - - 3\n    - 4"
+      // silently misread its deeper-indented continuation lines as more
+      // top-level siblings.
+      if (seqIndent === undefined) seqIndent = ind
+      else if (ind !== seqIndent) break
       const rest = line.slice(ind + 1).replace(/^\s*/, '')
       i++
-      if (rest === '') {
-        arr.push(parseBlock(ind + 1, depth + 1))
-      } else if (/^[^"'\[{][^:]*:(\s|$)/.test(rest)) {
-        const m = rest.match(/^([^:]+):\s*(.*)$/)!
-        const obj: Record<string, unknown> = {}
-        const childIndent = ind + 2
-        const key = m[1].trim()
-        const dangerous = key === '__proto__' || key === 'constructor' || key === 'prototype'
-        if (m[2].trim() === '') {
-          const block = parseBlock(childIndent, depth + 1)
-          if (!dangerous) obj[key] = block
-        } else if (!dangerous) obj[key] = parseScalar(m[2])
-        mergeMap(obj, childIndent, depth + 1)
-        arr.push(obj)
+      arr.push(parseSeqItem(rest, ind, depth))
+    }
+    return arr
+  }
+  // One sequence element's value, factored out of parseSeq's loop body so the
+  // same logic parses both a real physical line and (via parseNestedSeq) a
+  // nested sequence's synthetic first element.
+  function parseSeqItem(rest: string, ind: number, depth: number): unknown {
+    if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
+    if (rest === '') return parseBlock(ind + 1, depth + 1)
+    if (/^-(\s|$)/.test(rest)) return parseNestedSeq(rest, ind + 2, depth + 1)
+    if (/^[^"'\[{][^:]*:(\s|$)/.test(rest)) {
+      const m = rest.match(/^([^:]+):\s*(.*)$/)!
+      const obj: Record<string, unknown> = {}
+      const childIndent = ind + 2
+      const key = m[1].trim()
+      const dangerous = key === '__proto__' || key === 'constructor' || key === 'prototype'
+      if (m[2].trim() === '') {
+        const block = parseBlock(childIndent, depth + 1)
+        if (!dangerous) obj[key] = block
       } else {
-        arr.push(parseScalar(rest))
+        const bs = parseBlockScalarHeader(m[2].trim())
+        const value = bs ? readBlockScalar(bs, childIndent) : parseScalar(m[2])
+        if (!dangerous) obj[key] = value
       }
+      mergeMap(obj, childIndent, depth + 1)
+      return obj
+    }
+    const seqBs = parseBlockScalarHeader(rest.trim())
+    if (seqBs) return readBlockScalar(seqBs, ind + 2)
+    return parseScalar(rest)
+  }
+  // toYaml renders a nested array's first item inline on the outer item's own
+  // dash line ("- - 1", not "- \n  - 1") -- see toYaml's array branch, which
+  // overlays a bare "pad + '-'" onto the child block's own leading indent.
+  // `indent` is the column the inner dashes sit at (the outer item's `ind +
+  // 2`); every further sibling of this nested array must match it exactly,
+  // the same invariant parseSeq enforces via `seqIndent` above.
+  function parseNestedSeq(firstRest: string, indent: number, depth: number): unknown[] {
+    const arr: unknown[] = [parseSeqItem(firstRest.slice(1).replace(/^\s*/, ''), indent, depth)]
+    while (i < lines.length) {
+      if (lines[i] === '') { i++; continue }
+      const line = lines[i]
+      const ind = indentOf(line)
+      if (ind !== indent || !/^\s*-(\s|$)/.test(line)) break
+      const rest = line.slice(ind + 1).replace(/^\s*/, '')
+      i++
+      arr.push(parseSeqItem(rest, indent, depth))
     }
     return arr
   }
@@ -197,6 +415,7 @@ export function parseYaml(text: string): unknown {
   }
   function mergeMap(obj: Record<string, unknown>, minIndent: number, depth: number) {
     while (i < lines.length) {
+      if (lines[i] === '') { i++; continue }
       const line = lines[i]
       const ind = indentOf(line)
       if (ind < minIndent || /^\s*-(\s|$)/.test(line.slice(ind))) break
@@ -209,11 +428,16 @@ export function parseYaml(text: string): unknown {
       // parse the value (to consume its lines) but drop the assignment.
       const dangerous = key === '__proto__' || key === 'constructor' || key === 'prototype'
       if (kv.rest.trim() === '') {
+        while (lines[i] === '') i++
         const next = lines[i]
         const seqAtKeyIndent = next !== undefined && indentOf(next) === ind && /^\s*-(\s|$)/.test(next)
         const block = parseBlock(seqAtKeyIndent ? ind : ind + 1, depth + 1)
         if (!dangerous) obj[key] = block
-      } else if (!dangerous) obj[key] = parseScalar(kv.rest)
+      } else {
+        const bs = parseBlockScalarHeader(kv.rest.trim())
+        const value = bs ? readBlockScalar(bs, ind + 1) : parseScalar(kv.rest)
+        if (!dangerous) obj[key] = value
+      }
     }
   }
   return parseBlock(0)
@@ -222,6 +446,7 @@ export function parseYaml(text: string): unknown {
 // ---------- JSON <-> CSV (RFC4180-ish) ----------
 
 export function parseCsv(text: string, delim: string): string[][] {
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
   const rows: string[][] = []
   const nonBlank: boolean[] = []
   let row: string[] = []
@@ -250,7 +475,7 @@ export function parseCsv(text: string, delim: string): string[][] {
       } else field += c
       continue
     }
-    if (c === '"') {
+    if (c === '"' && field === '') {
       inQ = true
       started = true
     } else if (c === delim) {
@@ -319,17 +544,24 @@ export function toCsv(arr: unknown[], delim: string): string {
 
 // ---------- JSON <-> XML ----------
 
-/** Canonical HTML/XML entity decoder — named entities plus general numeric forms. */
+const NAMED_ENTITIES: Record<string, string> = { '&nbsp;': ' ', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&amp;': '&' }
+const ENTITY_RE = /&nbsp;|&lt;|&gt;|&quot;|&apos;|&amp;|&#x([0-9a-f]+);|&#(\d+);/gi
+
+/**
+ * Canonical HTML/XML entity decoder — named entities plus general numeric
+ * forms, all decoded in a single combined-regex pass (not chained separate
+ * `.replace()` calls) so a freshly-decoded fragment (e.g. `&#38;` decoding to
+ * a literal `&`) can never be re-scanned and collapsed by a later step —
+ * entity decoding is one scan over the source markup, not a re-scan of
+ * already-decoded output.
+ */
 export function decodeEntities(s: string): string {
-  return s
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&apos;/gi, "'")
-    .replace(/&#x([0-9a-f]+);/gi, (m, h) => fromCodePointSafe(parseInt(h, 16), m))
-    .replace(/&#(\d+);/g, (m, d) => fromCodePointSafe(parseInt(d, 10), m))
-    .replace(/&amp;/gi, '&')
+  return s.replace(ENTITY_RE, (m, hex, dec) => {
+    const named = NAMED_ENTITIES[m.toLowerCase()]
+    if (named !== undefined) return named
+    if (hex !== undefined) return fromCodePointSafe(parseInt(hex, 16), m)
+    return fromCodePointSafe(parseInt(dec, 10), m)
+  })
 }
 
 // String.fromCodePoint throws RangeError for values > U+10FFFF (or negative), which
@@ -347,13 +579,26 @@ function encodeEntitiesXml(s: string): string {
 /**
  * Sanitize an object key before using it as an XML tag/attribute name: names
  * may only contain `[A-Za-z0-9_.-]` and can't start with a digit, `.`, or `-`
- * (those are valid mid-name but not as the first char). Anything else is
- * replaced with `_` so `toXml` never interpolates a raw key into markup —
- * without this a key like `a><script>` would inject its own tag/attribute.
+ * (those are valid mid-name but not as the first char). Every character
+ * outside `[A-Za-z0-9.-]` -- including a literal `_`, which is reserved below
+ * as the escape delimiter -- is replaced by a self-delimited `_<hex>_` escape,
+ * so `toXml` never interpolates a raw key into markup (without this a key
+ * like `a><script>` would inject its own tag/attribute) *and* two distinct
+ * keys that differ only in which invalid characters they contain (e.g. 'a>b'
+ * vs 'a<b', which used to both collapse onto the bare substitute 'a_b' and
+ * silently merge into one array-valued tag) can no longer collide: since a
+ * literal `_` never survives un-escaped from the input, every `_` in `safe`
+ * marks the start of a self-delimited escape block, so the key -> safe
+ * mapping stays injective the same way the digit-prefix step below is.
  */
 function xmlName(key: string): string {
-  const safe = key.replace(/[^A-Za-z0-9_.-]/g, '_')
-  return /^[A-Za-z_]/.test(safe) ? safe : `_${safe}`
+  const safe = [...key].map(ch => (/[A-Za-z0-9.-]/.test(ch) ? ch : `_${ch.codePointAt(0)!.toString(16)}_`)).join('')
+  // Prefixing must apply whenever `safe` doesn't already start with a letter —
+  // including when it already starts with `_` — or two distinct keys (e.g.
+  // '123abc' and '_123abc') sanitize to the same escaped name. Unconditionally
+  // prepending `_` for every non-letter-start case keeps the mapping injective:
+  // it's a pure `s -> '_' + s` prefix, so distinct `safe` values can never collide.
+  return /^[A-Za-z]/.test(safe) ? safe : `_${safe}`
 }
 
 // attach()'s default promote-on-repeat heuristic (below) infers "already
@@ -393,26 +638,42 @@ function collapse(node: Record<string, unknown>): unknown {
   return node
 }
 
+// All four marker attribute names below start with a digit -- which XML's own
+// Name grammar forbids for any attribute/element name (NameStartChar excludes
+// digits), so no well-formed hand-authored XML document can ever legally carry
+// an attribute literally named e.g. '0sux-single-array', full stop -- unlike
+// the earlier `sux:...` scheme (#389), a leading-digit name can't collide via
+// a coincidental namespace-prefix declaration (`xmlns:sux="..." sux:single-
+// array="true"` is syntactically legal XML; `0sux-single-array="true"` never
+// is). xmlName() (see above) also never produces a digit-leading name for any
+// real JSON key -- it unconditionally prefixes `_` whenever the sanitized form
+// doesn't already start with a letter -- so a real JSON attribute key (however
+// it's spelled) can never sanitize to the same string as one of these markers
+// either. See issue #291 -- plain-word marker names (e.g. bare 'single-array')
+// collided with a same-named real user attribute key, corrupting the
+// round-trip; #389 -- the `sux:` namespace-prefix successor scheme still
+// collided with hand-authored XML declaring its own `sux` namespace prefix.
+
 // Self-closing marker attribute `toXml` emits for a JSON key whose value is an
 // empty array — without it, `obj.map(...).join('')` over an empty array
 // produces '', and the key vanishes from the output entirely instead of
 // round-tripping (see toYaml's `[]` handling, which has no such gap since
 // yamlScalar emits an explicit '[]' for empty arrays). `parseXml` looks for
 // this same attribute to decode a self-closed tag back into [] rather than ''.
-const EMPTY_ARRAY_ATTR = 'empty-array'
+const EMPTY_ARRAY_ATTR = '0sux-empty-array'
 
 // Marker attribute `toXml` emits on the sole element of a length-1 JSON array —
 // without it, a 1-element array renders as exactly one sibling element, which is
 // byte-identical to a plain scalar field of the same tag name, so parseXml (which
 // only promotes a key to an array once it sees the tag repeated) silently turns
 // the round-tripped value back into a scalar. See issue #68.
-const SINGLE_ARRAY_ATTR = 'single-array'
+const SINGLE_ARRAY_ATTR = '0sux-single-array'
 
 // Marker attribute `toXml` emits for a JSON key whose value is null/undefined —
 // without it, a null field and an empty-string scalar field both render as the
 // same self-closing `<tag/>`, so parseXml can't tell them apart and always
 // decodes the tag back to ''. See issue #79.
-const NULL_VALUE_ATTR = 'null-value'
+const NULL_VALUE_ATTR = '0sux-null-value'
 
 // Marker attribute `toXml` emits on an array element that is itself an array
 // (array-of-arrays) — without it, `{a: [[1,2],[3,4]]}` recurses into the inner
@@ -421,7 +682,7 @@ const NULL_VALUE_ATTR = 'null-value'
 // element's children all use ARRAY_ITEM_TAG rather than the outer array's own
 // tag, so parseXml can rebuild the inner array without it being mistaken for
 // more siblings of the outer array. See issue #105.
-const NESTED_ARRAY_ATTR = 'nested-array'
+const NESTED_ARRAY_ATTR = '0sux-nested-array'
 
 // Fixed child tag `wrapNestedArray` renders a nested array's own elements
 // under, keeping them distinct from the outer array's repeated tag name.
@@ -614,17 +875,38 @@ export function dispatchTransform(data: string, from: Format | 'auto', to: Forma
 // Common subset: headings, links, bold/em, lists, inline code, code blocks,
 // blockquotes, paragraphs.
 
+// Strips tags without decoding entities -- used for substitutions inside
+// inlineToMd, which decodes entities exactly once, on the fully-assembled
+// string, to avoid double-decoding already-decoded doubly-encoded content (#263).
+function stripTags(s: string): string {
+  return s.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+}
+
+// Longest run of consecutive backticks in `s` -- used to size an inline-code
+// delimiter or fence long enough that the content itself can't prematurely
+// close it (CommonMark's own rule for choosing a backtick-run/fence length).
+function longestBacktickRun(s: string): number {
+  let longest = 0
+  for (const run of s.match(/`+/g) ?? []) longest = Math.max(longest, run.length)
+  return longest
+}
+
 function inlineText(s: string): string {
-  return decodeEntities(s.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim()
+  return decodeEntities(stripTags(s))
 }
 
 function inlineToMd(s: string): string {
   return decodeEntities(
     s
-      .replace(/<a\b[^>]*\bhref=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, txt) => `[${inlineText(txt)}](${href})`)
-      .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `**${inlineText(txt)}**`)
-      .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `*${inlineText(txt)}*`)
-      .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, txt) => `\`${inlineText(txt)}\``)
+      .replace(/<a\b[^>]*\bhref=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, txt) => `[${stripTags(txt)}](${href})`)
+      .replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `**${stripTags(txt)}**`)
+      .replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_m, _t, txt) => `*${stripTags(txt)}*`)
+      .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, txt) => {
+        const content = stripTags(txt)
+        const delim = '`'.repeat(longestBacktickRun(content) + 1)
+        const pad = content.startsWith('`') || content.endsWith('`') || content === '' ? ' ' : ''
+        return `${delim}${pad}${content}${pad}${delim}`
+      })
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<[^>]+>/g, ''),
   )
@@ -649,7 +931,8 @@ export function htmlToMarkdown(html: string): string {
   s = s.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, lvl, txt) => `\x00${'#'.repeat(Number(lvl))} ${inlineToMd(txt)}\x00`)
   s = s.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_m, txt) => {
     const inner = inlineText(txt.replace(/<code\b[^>]*>|<\/code>/gi, ''))
-    return `\x00\`\`\`\n${inner}\n\`\`\`\x00`
+    const fence = '`'.repeat(Math.max(3, longestBacktickRun(inner) + 1))
+    return `\x00${fence}\n${inner}\n${fence}\x00`
   })
   s = s.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, txt) =>
     `\x00${inlineToMd(txt).split('\n').map((l: string) => `> ${l}`.trimEnd()).join('\n')}\x00`,
@@ -689,11 +972,14 @@ function inlineMdToHtml(s: string): string {
   const codes: string[] = []
   return encodeEntitiesXml(s)
     .replace(/`([^`]+)`/g, (_m, c) => `\x00${codes.push(`<code>${c}</code>`) - 1}\x00`)
-    .replace(/\[([^\]]*)\]\(([^)]*)\)/g, (_m, txt, href) => `<a href="${sanitizeUrl(href)}">${txt}</a>`)
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/__([^_]+)__/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/_([^_]+)_/g, '<em>$1</em>')
+    .replace(
+      /\[([^\]]*)\]\(([^)]*)\)/g,
+      (_m, txt, href) => `<a href="\x00${codes.push(sanitizeUrl(href)) - 1}\x00">${txt}</a>`,
+    )
+    .replace(/\*\*([^<>]+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^<>]+?)__/g, '<strong>$1</strong>')
+    .replace(/\*([^*<>]+)\*/g, '<em>$1</em>')
+    .replace(/_([^_<>]+)_/g, '<em>$1</em>')
     .replace(/\x00(\d+)\x00/g, (_m, i) => codes[Number(i)])
 }
 

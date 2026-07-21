@@ -1,11 +1,13 @@
 import type { Store, Handle } from '../effects/types.js'
 import { putText, resolveText } from '../handles/handle.js'
+import { canonicalize } from '../control/retry.js'
 export type FieldPolicy = 'last-write-wins' | 'union' | 'keep-first'
 export type ReconcileOpts =
   | { mode: 'faithful-union' }
   | { mode: 'last-write-wins' }
   | { mode: 'field-merge'; defaultPolicy?: FieldPolicy; policy?: Record<string, FieldPolicy> }
 export async function faithfulUnion(handles: Handle[], store: Store): Promise<Handle> {
+  if (handles.length === 0) throw new Error('faithfulUnion: empty input')
   const seen = new Set<string>(); const blocks: string[] = []
   for (const h of handles) {
     if (seen.has(h.sha256)) continue; seen.add(h.sha256)
@@ -38,9 +40,21 @@ export async function fieldMerge(
       if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
       const policy = opts.policy?.[k] ?? defaultPolicy
       if (policy === 'keep-first') { if (!Object.prototype.hasOwnProperty.call(merged, k)) merged[k] = v; continue }
-      if (policy === 'union' && Array.isArray(v)) {
+      if (policy === 'union') {
         const prior = Array.isArray(merged[k]) ? merged[k] as unknown[] : []
-        merged[k] = [...new Set([...prior, ...v])]
+        const incoming = Array.isArray(v) ? v : [v]
+        // Set()'s SameValueZero equality only catches exact-duplicate primitives --
+        // two structurally-identical-but-distinct objects (the common case merging
+        // JSON docs from different handles) never collapse under it. Key by the
+        // canonicalized JSON form instead (same trick retry.ts's idempotencyKey and
+        // memo.ts's memoKey already use), which dedupes value-wise for objects too.
+        const seen = new Set<string>(); const deduped: unknown[] = []
+        for (const item of [...prior, ...incoming]) {
+          const key = JSON.stringify(canonicalize(item))
+          if (seen.has(key)) continue
+          seen.add(key); deduped.push(item)
+        }
+        merged[k] = deduped
         continue
       }
       merged[k] = v   // 'last-write-wins' (default): later handle's value overwrites
