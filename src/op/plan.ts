@@ -1,5 +1,19 @@
-import type { OpSpec } from './spec.js'
+import { MAX_MAP_CONCURRENCY, type OpSpec } from './spec.js'
 import { LEAF_CAPS } from './registry.js'
+
+// A map/mapField `concurrency` field is either a plain number (fixed()
+// shorthand) or an `{ kind: 'aimd', ... }` spec (#195) -- the widest count
+// runInline could ever run concurrently for that step is the number itself,
+// or an aimd spec's own `max` (defaulting to MAX_MAP_CONCURRENCY, the widest
+// value OpSpec validation itself allows, when `max` is left unspecified).
+function concurrencyWidth(c: unknown): number {
+  if (Number.isInteger(c)) return c as number
+  if (c && typeof c === 'object' && (c as { kind?: unknown }).kind === 'aimd') {
+    const max = (c as { max?: unknown }).max
+    return Number.isInteger(max) ? (max as number) : MAX_MAP_CONCURRENCY
+  }
+  return 0
+}
 
 export type OpPlan = {
   nodeCount: number
@@ -22,8 +36,10 @@ export type OpPlan = {
  *
  * - `nodeCount`: total OpSpec nodes visited.
  * - `maxConcurrency`: the widest single `map`/`mapField` `concurrency`
- *   declared anywhere in the tree (bounded by MAX_MAP_CONCURRENCY). This
- *   deliberately only reports the declared *concurrency bound* (a real,
+ *   declared anywhere in the tree (bounded by MAX_MAP_CONCURRENCY; an aimd
+ *   spec, #195, reports its own `max`, defaulting to MAX_MAP_CONCURRENCY when
+ *   unspecified). This deliberately only reports the declared *concurrency
+ *   bound* (a real,
  *   build-time-known figure -- the most in-flight items runInline will ever
  *   run for that step), not a total invocation count: how many items an
  *   array-shaped input actually has (e.g. past `unzip`'s `handle[]` output)
@@ -94,7 +110,8 @@ function walkPlan(spec: OpSpec, plan: OpPlan, llmLeaves: Set<string>, sinkTarget
     }
     case 'map':
     case 'mapField': {
-      if (Number.isInteger(spec.concurrency) && spec.concurrency > plan.maxConcurrency) plan.maxConcurrency = spec.concurrency
+      const width = concurrencyWidth(spec.concurrency)
+      if (width > plan.maxConcurrency) plan.maxConcurrency = width
       if (spec.op) walkPlan(spec.op, plan, llmLeaves, sinkTargets)
       return
     }

@@ -194,6 +194,28 @@ describe('mcp adapter', () => {
     expect(atob(body[0].base64)).toBe('a: 1')
   })
 
+  it('run_pipeline: a map spec\'s `{ kind: \'aimd\' }` concurrency reaches buildOp through the MCP tool schema, not just a plain-number fixed() concurrency (#195)', async () => {
+    const zipMod = await import('fflate')
+    const zip = zipMod.zipSync({ 'a.txt': new TextEncoder().encode('hello'), 'b.txt': new TextEncoder().encode('world') })
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: {
+          tag: 'pipe',
+          steps: [
+            { tag: 'leaf', name: 'unzip' },
+            { tag: 'map', op: { tag: 'leaf', name: 'stamp' }, concurrency: { kind: 'aimd', start: 2, min: 1, max: 4 } },
+          ],
+        },
+        input: { $handle: true, base64: bytesToB64(zip), type: 'application/zip' },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as Array<{ base64: string }>
+    expect(body).toHaveLength(2)
+    expect([atob(body[0].base64), atob(body[1].base64)].sort()).toEqual(['hello', 'world'])
+  })
+
   it('run_pipeline: an unknown leaf name surfaces as a tool error, not an uncaught exception', async () => {
     const result = await client.callTool({ name: 'run_pipeline', arguments: { spec: { tag: 'leaf', name: 'nope' }, input: null } })
     expect(result.isError).toBe(true)
@@ -301,6 +323,17 @@ describe('mcp adapter', () => {
     expect(body.errors.some((e) => /unknown leaf "nope-2"/.test(e.message))).toBe(true)
   })
 
+  it('validate_pipeline: reports an aimd concurrency spec\'s `min` exceeding `max` -- a cross-field check the tool\'s own zod schema doesn\'t enforce, so it must reach buildOp\'s own validation (#195)', async () => {
+    const result = await client.callTool({
+      name: 'validate_pipeline',
+      arguments: { spec: { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'aimd', min: 10, max: 2 } } },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { valid: boolean; errors: Array<{ path: string; message: string }> }
+    expect(body.valid).toBe(false)
+    expect(body.errors.some((e) => /`min` cannot exceed `max`/.test(e.message))).toBe(true)
+  })
+
   it('plan_pipeline: reports a non-executing cost/capability audit (#361)', async () => {
     const result = await client.callTool({
       name: 'plan_pipeline',
@@ -312,6 +345,16 @@ describe('mcp adapter', () => {
     expect(body.maxConcurrency).toBe(3)
     expect(body.usesLlm).toBe(true)
     expect(body.llmLeaves).toEqual(['extract'])
+  })
+
+  it('plan_pipeline: reports an aimd concurrency spec\'s own `max` as the concurrency bound (#195)', async () => {
+    const result = await client.callTool({
+      name: 'plan_pipeline',
+      arguments: { spec: { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'aimd', start: 2, min: 1, max: 16 } } },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { maxConcurrency: number }
+    expect(body.maxConcurrency).toBe(16)
   })
 })
 

@@ -935,6 +935,7 @@ function listItems(html: string, ordered: boolean): string {
 
 export function htmlToMarkdown(html: string): string {
   let s = html
+    .replace(/\x00/g, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -980,7 +981,7 @@ function sanitizeUrl(raw: string): string {
 
 function inlineMdToHtml(s: string): string {
   const codes: string[] = []
-  return encodeEntitiesXml(s)
+  return encodeEntitiesXml(s.replace(/\x00/g, ''))
     .replace(/`([^`]+)`/g, (_m, c) => `\x00${codes.push(`<code>${c}</code>`) - 1}\x00`)
     .replace(
       /\[([^\]]*)\]\(([^)]*)\)/g,

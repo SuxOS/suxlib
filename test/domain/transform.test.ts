@@ -419,3 +419,18 @@ test('htmlToMarkdown widens a <pre> fence so a backtick run in the content canno
   const md = htmlToMarkdown('<pre>```\nfenced\n```</pre>')
   expect(md).toContain('````\n``` fenced ```\n````')
 })
+
+test('htmlToMarkdown strips a pre-existing NUL byte instead of letting it collide with the block-marker sentinel and shift later blocks (#178)', () => {
+  const md = htmlToMarkdown('<p>foo\x00bar</p><p>baz</p>')
+  expect(md).not.toMatch(/\x00/)
+  expect(md).toContain('foobar')
+  expect(md).toContain('baz')
+  expect(md).toBe('foobar\n\nbaz')
+})
+
+test('markdownToHtml strips a pre-existing NUL byte instead of letting it collide with the inline code-span placeholder and splice in an unrelated/undefined replacement (#178)', () => {
+  const html = markdownToHtml('`abc`\x001\x00')
+  expect(html).not.toMatch(/\x00/)
+  expect(html).not.toContain('undefined')
+  expect(html).toContain('<code>abc</code>')
+})

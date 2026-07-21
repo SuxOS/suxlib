@@ -13,7 +13,7 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, validateOpSpec, type OpSpec } from '../op/spec.js'
+import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, MAX_SINK_TARGETS, validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import { planOpSpec } from '../op/plan.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
@@ -57,6 +57,20 @@ const reconcileOptsSchema = z.union([
   z.object({ mode: z.literal('field-merge'), defaultPolicy: fieldPolicySchema.optional(), policy: z.record(z.string(), fieldPolicySchema).optional() }),
 ])
 
+// Mirrors spec.ts's OpSpecConcurrency: a plain number is `fixed()` shorthand,
+// or an aimd spec for adaptive backpressure (#195) -- buildOp re-validates
+// this itself, same "stop it being silently stripped before it gets there"
+// reasoning as `params`/reconcileOptsSchema above.
+const opSpecConcurrencySchema = z.union([
+  z.number().int().min(1).max(MAX_MAP_CONCURRENCY),
+  z.object({
+    kind: z.literal('aimd'),
+    start: z.number().int().min(1).max(MAX_MAP_CONCURRENCY).optional(),
+    min: z.number().int().min(1).max(MAX_MAP_CONCURRENCY).optional(),
+    max: z.number().int().min(1).max(MAX_MAP_CONCURRENCY).optional(),
+  }),
+])
+
 const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   // record(z.unknown()), not a stricter value schema: `params` is shallow-merged
   // as-is onto whatever the piped value is (buildOp/mergeParams, src/op/spec.ts)
@@ -65,20 +79,20 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   // stop this key from being silently stripped before it reaches buildOp.
   z.object({ tag: z.literal('leaf'), name: z.string(), opts: opSpecLeafOptsSchema, params: z.record(z.string(), z.unknown()).optional() }),
   z.object({ tag: z.literal('pipe'), steps: z.array(opSpecSchema).min(1) }),
-  z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: z.number().int().min(1).max(MAX_MAP_CONCURRENCY) }),
+  z.object({ tag: z.literal('map'), op: opSpecSchema, concurrency: opSpecConcurrencySchema }),
   z.object({
     tag: z.literal('mapField'),
     arrayField: z.string(),
     elementField: z.string(),
     op: opSpecSchema,
-    concurrency: z.number().int().min(1).max(MAX_MAP_CONCURRENCY),
+    concurrency: opSpecConcurrencySchema,
     renameTo: z.string().optional(),
   }),
   z.object({
     tag: z.literal('sink'),
     // A bare name falls back to the sink spec's own `opts`; a `{ name, opts }`
     // pair overrides per-field (#251) -- mirrors src/op/spec.ts's OpSpecSinkTarget.
-    targets: z.array(z.union([z.string(), z.object({ name: z.string(), opts: opSpecSinkOptsSchema })])).min(1),
+    targets: z.array(z.union([z.string(), z.object({ name: z.string(), opts: opSpecSinkOptsSchema })])).min(1).max(MAX_SINK_TARGETS),
     opts: opSpecSinkOptsSchema,
   }),
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
