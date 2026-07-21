@@ -174,35 +174,94 @@ function stripYamlComment(line: string): string {
   return line
 }
 
+// Block-scalar header (`|`/`>`, optionally with a chomping indicator `+`/`-`
+// and/or an explicit indentation indicator, in either order -- `|2-` and
+// `|-2` are both valid). Returns null when `s` isn't a bare block-scalar
+// header (i.e. an ordinary scalar value, parsed as before).
+function parseBlockScalarHeader(s: string): { folded: boolean; chomp: 'strip' | 'clip' | 'keep'; indent?: number } | null {
+  const m = s.match(/^([|>])([+-]?)(\d*)([+-]?)$/)
+  if (!m) return null
+  const chompChar = m[2] || m[4]
+  return {
+    folded: m[1] === '>',
+    chomp: chompChar === '-' ? 'strip' : chompChar === '+' ? 'keep' : 'clip',
+    indent: m[3] ? parseInt(m[3], 10) : undefined,
+  }
+}
+
+// Given a (comment-already-stripped) line that turns out to open a block
+// scalar, returns the `minIndent` floor its body must be read at -- mirrors
+// the two call shapes readBlockScalar's own callers use (mergeMap/depth-0
+// bare scalar: `indentOf(line) + 1`; a seq item, bare or with an inline key:
+// `indentOf(line) + 2`, since the dash itself eats one column) -- or null if
+// this line isn't a bare block-scalar header at all.
+function detectBlockScalarMinIndent(line: string): number | null {
+  const ind = line.match(/^\s*/)![0].length
+  const isSeqItem = /^\s*-(\s|$)/.test(line)
+  let valueCandidate: string
+  const minIndent = ind + (isSeqItem ? 2 : 1)
+  if (isSeqItem) {
+    const rest = line.slice(ind + 1).replace(/^\s*/, '')
+    if (/^-(\s|$)/.test(rest)) return null // nested seq -- not a header
+    const m = /^[^"'[{][^:]*:(\s|$)/.test(rest) ? rest.match(/^([^:]+):\s*(.*)$/) : null
+    valueCandidate = m ? m[2].trim() : rest.trim()
+  } else {
+    const body = line.slice(ind)
+    const m = body.match(/^([^:]+?):\s*(.*)$/)
+    valueCandidate = m ? m[2].trim() : body.trim()
+  }
+  return parseBlockScalarHeader(valueCandidate) ? minIndent : null
+}
+
+// #395: comment-stripping used to run as one global pass over the raw
+// document before any parsing -- including before readBlockScalar ever got a
+// chance to treat a literal/folded block scalar's body as content where '#'
+// has no comment meaning at all. This mirrors #392's fix for the analogous
+// blank-line problem: process the document line-by-line, tracking whether
+// we're currently inside a block scalar body (using the same indent-floor /
+// auto-detected-indent logic readBlockScalar itself applies), and skip both
+// the full-line '#' filter and stripYamlComment for any line that's inside
+// one -- a '#' as the first non-whitespace char, or preceded by whitespace
+// mid-line, is just literal body text there.
+function stripYamlComments(rawLines: string[]): string[] {
+  const indentOf = (l: string) => l.match(/^\s*/)![0].length
+  const out: string[] = []
+  let inBlock = false
+  let blockMinIndent = 0
+  let blockIndent: number | undefined
+  for (const line of rawLines) {
+    if (inBlock) {
+      if (line.trim() === '') { out.push(line); continue }
+      const ind = indentOf(line)
+      if (ind >= blockMinIndent && (blockIndent === undefined || ind >= blockIndent)) {
+        if (blockIndent === undefined) blockIndent = ind
+        out.push(line)
+        continue
+      }
+      inBlock = false
+      blockIndent = undefined
+    }
+    if (/^\s*#/.test(line)) continue
+    const stripped = stripYamlComment(line)
+    out.push(stripped)
+    const minIndent = detectBlockScalarMinIndent(stripped)
+    if (minIndent !== null) { inBlock = true; blockMinIndent = minIndent; blockIndent = undefined }
+  }
+  return out
+}
+
 export function parseYaml(text: string): unknown {
   // Blank lines are kept (as '') rather than filtered out here -- a block
   // scalar's body can contain an intentional blank line (#392), and only
   // readBlockScalar knows whether a given blank belongs to the scalar it's
   // reading. Every other consumer (parseBlock/parseSeq/parseNestedSeq/
   // mergeMap) explicitly skips blank lines itself instead.
-  const lines = text
-    .split(/\r?\n/)
-    .filter((l) => !/^\s*#/.test(l))
-    .map(stripYamlComment)
+  const lines = stripYamlComments(text.split(/\r?\n/))
     .map((l) => l.replace(/\s+$/, ''))
 
   let i = 0
   const indentOf = (l: string) => l.match(/^\s*/)![0].length
 
-  // Block-scalar header (`|`/`>`, optionally with a chomping indicator `+`/`-`
-  // and/or an explicit indentation indicator, in either order -- `|2-` and
-  // `|-2` are both valid). Returns null when `s` isn't a bare block-scalar
-  // header (i.e. an ordinary scalar value, parsed as before).
-  function parseBlockScalarHeader(s: string): { folded: boolean; chomp: 'strip' | 'clip' | 'keep'; indent?: number } | null {
-    const m = s.match(/^([|>])([+-]?)(\d*)([+-]?)$/)
-    if (!m) return null
-    const chompChar = m[2] || m[4]
-    return {
-      folded: m[1] === '>',
-      chomp: chompChar === '-' ? 'strip' : chompChar === '+' ? 'keep' : 'clip',
-      indent: m[3] ? parseInt(m[3], 10) : undefined,
-    }
-  }
   // Consumes every following line indented at least `minIndent` (the block's
   // content columns are auto-detected from the first such line unless the
   // header gave an explicit indent) as this block scalar's body, applying

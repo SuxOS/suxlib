@@ -17,7 +17,7 @@ import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, va
 import { describePipelineSchema } from '../op/introspect.js'
 import { planOpSpec } from '../op/plan.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
-import type { Cache, Store, Llm, Ask } from '../effects/types.js'
+import type { Cache, Store, Llm, Ask, Checkpoint } from '../effects/types.js'
 import type { RunGovernedOpts } from '../control/governor.js'
 
 function textResult(obj: unknown) {
@@ -153,6 +153,15 @@ export type RegisterFileopsToolsOptions = {
    * doc). Omitted entirely, that fallback behavior is unchanged.
    */
   opRunAsk?: Ask
+  /**
+   * A host-supplied Checkpoint implementation (#390/#396), threaded to
+   * `caps.checkpoint` for every `run_pipeline` call -- lets a `run_pipeline`
+   * caller resume a crashed run by re-submitting the `runId` a prior call's
+   * response returned (only returned once `opRunCheckpoint` is configured),
+   * instead of re-executing every node from scratch. Omitted entirely,
+   * `run_pipeline`'s response shape is unchanged from before #396.
+   */
+  opRunCheckpoint?: Checkpoint
 }
 
 /** Register every fileops tool on an MCP server instance, or a subset via `opts.allow`. */
@@ -310,9 +319,10 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           spec: opSpecSchema,
           input: z.unknown(),
           trace: z.boolean().default(false).describe('Include a TraceEvent[] execution trace alongside the result.'),
+          runId: z.string().optional().describe('Resume a previously checkpointed run by passing back its runId (requires opRunCheckpoint to be configured server-side).'),
         },
       },
-      async ({ spec, input, trace }, extra) => {
+      async ({ spec, input, trace, runId }, extra) => {
         // The MCP request's own AbortSignal (fired on client disconnect) wires
         // into cooperative cancellation (#279) unless a host-supplied
         // opRunGOpts already declares one.
@@ -341,7 +351,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
             },
           }
         }
-        return textResult(await runOpSpec({ spec, input, trace }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, gOpts, ask: opts.opRunAsk }))
+        return textResult(await runOpSpec({ spec, input, trace, runId }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, gOpts, ask: opts.opRunAsk, checkpoint: opts.opRunCheckpoint }))
       },
     )
   }

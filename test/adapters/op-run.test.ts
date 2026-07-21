@@ -4,7 +4,7 @@ import { runOpSpec } from '../../src/adapters/op-run.js'
 import { bytesToB64 } from '../../src/adapters/base64.js'
 import type { OpSpec } from '../../src/op/spec.js'
 import { createGovernor } from '../../src/control/governor.js'
-import { MemoryStore, type Cache, type Llm } from '../../src/effects/types.js'
+import { MemoryStore, MemoryCheckpoint, type Cache, type Llm } from '../../src/effects/types.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -245,4 +245,53 @@ test('runOpSpec: a raw Handle object nested inside a larger input (e.g. a {handl
   const secret = await store.put(new TextEncoder().encode('{"a":1}'), 'application/json')
   const spec: OpSpec = { tag: 'leaf', name: 'convert' }
   await expect(runOpSpec({ spec, input: { handle: secret, from: 'json', to: 'yaml' } }, { store })).rejects.toThrow(/raw Handle object/)
+})
+
+test('runOpSpec: with no opts.checkpoint configured, the response shape is unchanged (no runId leaks in)', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const result = await runOpSpec({ spec, input: { a: 1 } }, { leaves: { shout: async (input) => input } })
+  expect(result).toEqual({ a: 1 })
+})
+
+test('runOpSpec: opts.checkpoint wired in mints and returns a runId when the request omits one, wrapping the result as { result, runId }', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const outcome = await runOpSpec(
+    { spec, input: { a: 1 } },
+    { leaves: { shout: async (input) => input }, checkpoint },
+  ) as { result: unknown; runId: string }
+  expect(outcome.result).toEqual({ a: 1 })
+  expect(outcome.runId).toBeTypeOf('string')
+  expect(outcome.runId.length).toBeGreaterThan(0)
+})
+
+test('runOpSpec: a second call sharing opts.checkpoint/store and the first call\'s returned runId resumes instead of re-executing a leaf that already finished (#396)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const store = new MemoryStore()
+  let calls = 0
+  const spec: OpSpec = { tag: 'leaf', name: 'countedLeaf' }
+  const leaves = { countedLeaf: async (input: unknown) => { calls++; return input } }
+
+  const first = await runOpSpec({ spec, input: { a: 1 } }, { leaves, checkpoint, store }) as { result: unknown; runId: string }
+  expect(first.result).toEqual({ a: 1 })
+  expect(calls).toBe(1)
+
+  const second = await runOpSpec({ spec, input: { a: 1 }, runId: first.runId }, { leaves, checkpoint, store }) as { result: unknown; runId: string }
+  expect(second.result).toEqual({ a: 1 })
+  expect(second.runId).toBe(first.runId)
+  // The leaf is never re-invoked -- the resumed call's node was already
+  // recorded under (runId, path) by the first call.
+  expect(calls).toBe(1)
+})
+
+test('runOpSpec: trace: true plus opts.checkpoint returns { result, trace, runId } together', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const outcome = await runOpSpec(
+    { spec, input: { a: 1 }, trace: true },
+    { leaves: { shout: async (input) => input }, checkpoint },
+  ) as { result: unknown; trace: unknown[]; runId: string }
+  expect(outcome.result).toEqual({ a: 1 })
+  expect(outcome.trace.length).toBeGreaterThan(0)
+  expect(outcome.runId).toBeTypeOf('string')
 })

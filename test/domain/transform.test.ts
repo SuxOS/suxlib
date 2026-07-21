@@ -111,6 +111,16 @@ test('parseYaml trims leading/trailing blank lines around a block scalar body, k
   expect(parseYaml('note: |-\n  para1\n\n  para2\n\n\nkey: value\n')).toEqual({ note: 'para1\n\npara2', key: 'value' })
 })
 
+test('parseYaml treats a "#" as the first non-whitespace char inside a block scalar body as literal text, not a comment (#395)', () => {
+  expect(parseYaml('note: |\n  line1\n  # not a comment, literal text\n  line3\nkey: value\n'))
+    .toEqual({ note: 'line1\n# not a comment, literal text\nline3\n', key: 'value' })
+})
+
+test('parseYaml does not truncate a block scalar body line at a "#" preceded by whitespace mid-line (#395)', () => {
+  expect(parseYaml('note: |\n  value # trailing\n  line2\nkey: value\n'))
+    .toEqual({ note: 'value # trailing\nline2\n', key: 'value' })
+})
+
 test('parseYaml skips a blank line between sibling map keys and between sequence items', () => {
   expect(parseYaml('a: 1\n\nb: 2\n')).toEqual({ a: 1, b: 2 })
   expect(parseYaml('- 1\n\n- 2\n')).toEqual([1, 2])

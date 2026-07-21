@@ -14,7 +14,7 @@ import { validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import { planOpSpec } from '../op/plan.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
-import type { Cache, Store, Llm, Ask } from '../effects/types.js'
+import type { Cache, Store, Llm, Ask, Checkpoint } from '../effects/types.js'
 import type { RunGovernedOpts } from '../control/governor.js'
 
 function json(data: unknown, status = 200): Response {
@@ -66,11 +66,17 @@ function errorResponse(e: unknown, status = 400): Response {
 // human-in-the-loop capability instead of only ever hitting runInline's
 // no-capability fallback (see op-run.ts's OpRunOpts doc).
 //
+// opRunCheckpoint: a host-supplied Checkpoint implementation (#390/#396),
+// threaded to runOpSpec's `checkpoint` opt so a crashed `POST /op/run` run
+// can be resumed by a later call sharing the same `runId` (returned in the
+// response body once opRunCheckpoint is set). Omitted entirely, `POST
+// /op/run`'s response shape is unchanged from before #396.
+//
 // allowRoutes: restrict routing to these paths (e.g. "/transform",
 // "/sanitize/text") — every route is reachable when omitted. Mirrors
 // mcp.ts's `RegisterFileopsToolsOptions.allow`, so a host embedding this
 // Worker can expose a chosen subset without forking the route table.
-export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn>; opRunGOpts?: RunGovernedOpts; opRunAsk?: Ask; allowRoutes?: string[] }
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn>; opRunGOpts?: RunGovernedOpts; opRunAsk?: Ask; opRunCheckpoint?: Checkpoint; allowRoutes?: string[] }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -240,14 +246,20 @@ const routes: Route[] = [
     method: 'POST',
     path: '/op/run',
     handle: async (rawBody, env, signal) => {
-      const body = rawBody as { spec?: unknown; input?: unknown; trace?: unknown }
+      const body = rawBody as { spec?: unknown; input?: unknown; trace?: unknown; runId?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
       const trace = body.trace === true
+      const runId = typeof body.runId === 'string' ? body.runId : undefined
       // The request's own AbortSignal wires into cooperative cancellation
       // (#279) unless a host-supplied opRunGOpts already declares one.
       const gOpts = signal ? { ...env.opRunGOpts, signal: env.opRunGOpts?.signal ?? signal } : env.opRunGOpts
-      const outcome = await runOpSpec({ spec: body.spec as OpSpec, input: body.input, trace }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts, ask: env.opRunAsk })
-      return json(trace ? (outcome as object) : { result: outcome })
+      const outcome = await runOpSpec({ spec: body.spec as OpSpec, input: body.input, trace, runId }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts, ask: env.opRunAsk, checkpoint: env.opRunCheckpoint })
+      // runOpSpec already returns a wrapped object (carrying `runId`, and
+      // `trace` when requested) whenever a checkpoint capability is
+      // configured -- see op-run.ts's runOpSpec doc -- so only the bare
+      // dehydrated-result case (no trace, no checkpoint) still needs
+      // wrapping here.
+      return json((trace || env.opRunCheckpoint) ? (outcome as object) : { result: outcome })
     },
   },
   {
