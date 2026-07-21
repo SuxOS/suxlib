@@ -20,6 +20,7 @@ import { buildOp, type OpSpec } from '../op/spec.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import { runInline } from '../runtime/inline.js'
 import type { RunGovernedOpts } from '../control/governor.js'
+import { canonicalize } from '../control/retry.js'
 import type { TraceEvent } from '../control/trace.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 
@@ -110,6 +111,28 @@ const llmUnavailable: Llm = {
 }
 
 /**
+ * Binds a run's checkpoint ledger to the request that produced it (#398),
+ * closing an IDOR: `runId` alone is a caller-supplied string over HTTP/MCP --
+ * guessable, observable in a prior response, or simply reused -- and a
+ * checkpoint keyed only by `(runId, path)` would let a request carrying
+ * another run's `runId` but a *different* spec/input read that other run's
+ * recorded leaf/sink output at any path the two op-tree shapes happen to
+ * share. Hashes the caller-supplied `spec` JSON directly (not the `Op` tree
+ * `buildOp` produces from it) plus the raw `input`, before hydrate() ever
+ * runs -- a leaf spec's `params` (buildOp's mergeParams, see spec.ts) is
+ * closed over a generated pipe step's `fn` and never appears as an
+ * enumerable field on the built tree, so hashing the tree instead would miss
+ * two specs that differ only in a leaf's params. Reuses retry.ts's
+ * `canonicalize` so key order never affects the hash, same as
+ * `idempotencyKey`/`memoKey`.
+ */
+async function runIdentity(spec: OpSpec, input: unknown): Promise<string> {
+  const stable = JSON.stringify(canonicalize({ spec, input }))
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stable))
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
  * `trace`: opt-in per-call, for a stateless caller (HTTP/MCP/CLI) that wants
  * #215's per-node execution trace back without supplying a live
  * `gOpts.onTrace` callback of its own -- runOpSpec collects every emitted
@@ -123,13 +146,15 @@ const llmUnavailable: Llm = {
  *
  * `runId`: opt-in, for a caller that wants to *resume* a previously
  * checkpointed run (#396) -- pass back the `runId` a prior call returned (see
- * `OpRunOpts.checkpoint` below) to share that run's `(runId, path)`
- * checkpoint ledger, letting already-completed nodes short-circuit instead of
- * re-executing. Omitted, runOpSpec mints a fresh one via
- * `crypto.randomUUID()` itself (rather than letting `runInline` default it
- * internally) specifically so it can hand the minted id back to the caller --
- * `runInline`'s own internal default is otherwise unobservable from outside
- * the call.
+ * `OpRunOpts.checkpoint` below) to share that run's checkpoint ledger,
+ * letting already-completed nodes short-circuit instead of re-executing.
+ * Omitted, runOpSpec mints a fresh one via `crypto.randomUUID()` itself
+ * (rather than letting `runInline` default it internally) specifically so it
+ * can hand the minted id back to the caller -- `runInline`'s own internal
+ * default is otherwise unobservable from outside the call. A resume attempt
+ * whose `spec`/`input` don't match the run `runId` originally ran under
+ * misses the ledger entirely rather than reading that other run's results --
+ * see `runIdentity` below (#398).
  */
 export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean; runId?: string }
 
@@ -227,6 +252,11 @@ export async function runOpSpec({ spec, input, trace, runId }: OpRunRequest, opt
   // internally) so it can be handed back to the caller -- runInline's own
   // internal default would otherwise be unobservable from outside the call.
   const effectiveRunId = runId ?? crypto.randomUUID()
+  // Only computed when a checkpoint capability is actually wired -- runSig
+  // has nothing to bind otherwise (traced() ignores it whenever
+  // caps.checkpoint is undefined), so this stays a no-op cost for every
+  // caller that hasn't opted into checkpointing.
+  const runSig = opts.checkpoint ? await runIdentity(spec, input) : ''
   const tree = buildOp(spec, opts.leaves)
   const hydrated = await hydrate(store, input, { totalBytes: 0 })
   let gOpts = opts.gOpts
@@ -250,7 +280,7 @@ export async function runOpSpec({ spec, input, trace, runId }: OpRunRequest, opt
       },
     }
   }
-  const result = await runInline(tree, hydrated, caps, gOpts, '', effectiveRunId)
+  const result = await runInline(tree, hydrated, caps, gOpts, '', effectiveRunId, runSig)
   const dehydrated = await dehydrate(store, result)
   if (opts.checkpoint) {
     return trace ? { result: dehydrated, trace: events, runId: effectiveRunId } : { result: dehydrated, runId: effectiveRunId }

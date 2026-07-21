@@ -216,3 +216,21 @@ test('runInline cancels a mapField item still queued behind a full item-level co
   await expect(runInline(tree, { entries: [{ n: 1 }, { n: 2 }] }, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
   expect(secondRan).toBe(false)
 })
+
+test('runInline releases a map item\'s aimd concurrency slot neutrally (not as a failure) when the item throws OpAbortError, so the limiter\'s failure-halving is not charged for a cancellation (#399)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const limiter = aimd({ start: 4, min: 1, max: 8 })
+  const tree = map(op('aborted', async () => { throw new OpAbortError() }, { kind: 'pure' }), { concurrency: limiter })
+  await expect(runInline(tree, [1], caps)).rejects.toThrow(OpAbortError)
+  // A real failure would halve the limit (4 -> 2, per aimd's release(false)); a
+  // neutral release must leave it untouched.
+  expect(limiter.limit).toBe(4)
+})
+
+test('runInline releases a mapField item\'s aimd concurrency slot neutrally when the item throws OpAbortError (#399)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const limiter = aimd({ start: 4, min: 1, max: 8 })
+  const tree = mapField('entries', 'n', op('aborted', async () => { throw new OpAbortError() }, { kind: 'pure' }), { concurrency: limiter })
+  await expect(runInline(tree, { entries: [{ n: 1 }] }, caps)).rejects.toThrow(OpAbortError)
+  expect(limiter.limit).toBe(4)
+})
