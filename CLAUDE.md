@@ -140,6 +140,17 @@ There is no linter in this repo. Run both locally before pushing.
   stays fixed once you go looking; re-check via `gh pr list --search
   "<issue>" --state all` rather than trusting a previously-recorded PR
   number.
+- Update (2026-07-21, #414): the #320/#337 `security-review` missing-script
+  infra gap (extensively documented above) is now RESOLVED — closed both
+  issues after confirming the 10 most recent `security-review` workflow runs
+  on this repo all pass or fail on a genuine CONFIRMED critical/high
+  verdict, with zero occurrences of the
+  `.suxos-ci/scripts/classify-security-noverdict.sh: No such file or
+  directory` error. Stop re-checking #320/#337-blocked PRs for this specific
+  cause — if a `security-review` check fails going forward, read its actual
+  log output; it's almost certainly a real finding to address, not the old
+  infra gap. If the missing-script error ever reappears, it needs a fresh
+  issue, not a reopen of these two (their history is long and mostly moot).
 
 ## Consumers
 
