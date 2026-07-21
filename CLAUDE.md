@@ -140,6 +140,17 @@ There is no linter in this repo. Run both locally before pushing.
   stays fixed once you go looking; re-check via `gh pr list --search
   "<issue>" --state all` rather than trusting a previously-recorded PR
   number.
+- Update (2026-07-21, #414): the #320/#337 `security-review` missing-script
+  infra gap (extensively documented above) is now RESOLVED — closed both
+  issues after confirming the 10 most recent `security-review` workflow runs
+  on this repo all pass or fail on a genuine CONFIRMED critical/high
+  verdict, with zero occurrences of the
+  `.suxos-ci/scripts/classify-security-noverdict.sh: No such file or
+  directory` error. Stop re-checking #320/#337-blocked PRs for this specific
+  cause — if a `security-review` check fails going forward, read its actual
+  log output; it's almost certainly a real finding to address, not the old
+  infra gap. If the missing-script error ever reappears, it needs a fresh
+  issue, not a reopen of these two (their history is long and mostly moot).
 
 ## Consumers
 
@@ -250,6 +261,19 @@ There is no linter in this repo. Run both locally before pushing.
   key parsing in each copy on its own, since fixing one didn't fix the others
   (#401). All four now share one `splitMappingKey(body)` helper; any future
   YAML key-parsing tweak belongs there, not re-derived at a new call site.
+- `src/domain/transform.ts`'s `htmlToMarkdown` had the same lazy,
+  depth-unaware `<tag\b[^>]*>([\s\S]*?)<\/tag>` shape independently in its
+  `<ul>`/`<ol>` block replace and `listItems`' own `<li>` regex — a nested
+  list stopped each at the *inner* list's/item's closing tag, silently
+  merging the sub-list into the parent item with no separator (#353). Fixed
+  with shared `findMatchingClose`/`replaceTopLevelTags` helpers that track
+  same-tag-name nesting depth; `renderListItem` recurses into a nested
+  `<ul>`/`<ol>` found inside a `<li>` instead of flattening it. The
+  `<blockquote>` replace a few lines below has the identical lazy,
+  non-nesting-aware shape and reproduces the same truncation for a nested
+  `<blockquote>` — not fixed here (out of #353's scope), but any future fix
+  there should reuse `replaceTopLevelTags` rather than re-deriving depth
+  tracking a third time.
 - Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
   `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
   `circuitBreaker` gating for `effect` leaves is configured separately, via
