@@ -42,19 +42,41 @@ let traceCallSeq = 0
 // concurrent spans. When tracing is off (no onTrace), a callId is still
 // minted so runGoverned always has one to stamp -- it just never appears in
 // a TraceEvent.
+//
+// Checkpoint resume (#390): when caps.checkpoint is supplied, every node --
+// not just 'leaf' -- consults it by (runId, path) before doing any work at
+// all, and persists its result after. A hit short-circuits entirely (no
+// callId minted, no trace event, no governor call, `fn` never invoked), so a
+// runInline call sharing a prior run's runId skips re-executing any subtree
+// already recorded -- a completed leaf, sink target, or a whole finished
+// composite node. Since `path` already addresses individual map/mapField
+// items and sink fanout targets, this gives partial-fanout resume for free:
+// only the still-unfinished items of an in-flight fan-out actually re-run.
+// With no caps.checkpoint (the common case), this is a pure no-op -- same
+// degrade-gracefully contract as caps.ask/caps.cache.
 async function traced<T>(tag: string, name: string | undefined, path: string, runId: string, caps: Caps, gOpts: RunGovernedOpts | undefined, fn: (callId: string) => Promise<T>): Promise<T> {
   // Cooperative-cancellation checkpoint (#279): every node runInline
   // dispatches -- leaf, pipe step, map/mapField item, reconcile, sink
   // fanout/target, ask, catch's try -- passes through here before it starts,
   // so one check here is equivalent to a check at every one of those sites.
   if (gOpts?.signal?.aborted) throw new OpAbortError()
+  const checkpoint = caps.checkpoint
+  if (checkpoint) {
+    const recorded = await checkpoint.get(runId, path)
+    if (recorded) return recorded.value as T
+  }
   const callId = String(++traceCallSeq)
+  const run = async (): Promise<T> => {
+    const result = await fn(callId)
+    if (checkpoint) await checkpoint.put(runId, path, result)
+    return result
+  }
   const onTrace = gOpts?.onTrace
-  if (!onTrace) return fn(callId)
+  if (!onTrace) return run()
   const t0 = caps.clock.now()
   onTrace({ kind: 'node-enter', tag, name, path, runId, callId })
   try {
-    const result = await fn(callId)
+    const result = await run()
     onTrace({ kind: 'node-exit', tag, name, path, runId, callId, durationMs: caps.clock.now() - t0, ok: true })
     return result
   } catch (err) {
