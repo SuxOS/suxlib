@@ -34,6 +34,22 @@ function buildMinimalPng(): Uint8Array {
   return out
 }
 
+// Self-contained (no import) so it works regardless of where tmpDir() places
+// the config file on disk -- a relative import inside the written module
+// would resolve against the tmp directory, not this repo.
+const checkpointConfigModule =
+  'export default { checkpoint: (() => {\n' +
+  '  const m = new Map()\n' +
+  '  return {\n' +
+  '    async get(runId, path) { return m.get(runId)?.get(path) },\n' +
+  '    async put(runId, path, value) {\n' +
+  '      let byPath = m.get(runId)\n' +
+  '      if (!byPath) { byPath = new Map(); m.set(runId, byPath) }\n' +
+  '      byPath.set(path, { done: true, value })\n' +
+  '    },\n' +
+  '  }\n' +
+  '})() }\n'
+
 const dirs: string[] = []
 function tmpDir(): string {
   const d = mkdtempSync(join(tmpdir(), 'suxlib-fileops-extract-'))
@@ -446,12 +462,66 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     errSpy.mockRestore()
   })
 
+  // Positioned before the --trace test below deliberately: pipelineRunCmd is a
+  // module-level Commander singleton (CLAUDE.md's "cli.ts's main() gotcha") whose
+  // boolean --trace flag, once set true by a call, has no CLI-reachable way back to
+  // false (no --no-trace is declared) -- so a test asserting on *unset* --trace
+  // behavior must run before the dedicated --trace test below ever sets it, not
+  // after. -o/--config are already sticky by this point (set by earlier tests in
+  // this block), so both are still passed explicitly here to fully control them.
+  it('a --config module supplying a checkpoint capability with no --trace prints the bare result (not the { result, runId } wrapper) and the runId to stderr (#408)', async () => {
+    const work = tmpDir()
+    const outDir = join(work, 'out')
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 } }))
+    writeFileSync(configPath, checkpointConfigModule)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await main(
+      ['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '-o', outDir, '--config', configPath],
+      { leaves: { shout: async (input) => input } },
+    )
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as { a: number }
+    expect(printed).toEqual({ a: 1 })
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/^runId: .+/))
+    logSpy.mockRestore()
+    errSpy.mockRestore()
+  })
+
+  it('--run-id resumes a checkpointed run instead of re-executing a leaf that already finished', async () => {
+    const work = tmpDir()
+    const outDir = join(work, 'out')
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'count' }, input: { a: 1 } }))
+    writeFileSync(configPath, checkpointConfigModule)
+    let calls = 0
+    const leaves = { count: async (input: unknown) => { calls++; return input } }
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '-o', outDir, '--config', configPath], { leaves })
+    const runId = (errSpy.mock.calls[0][0] as string).replace(/^runId: /, '')
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '-o', outDir, '--config', configPath, '--run-id', runId], { leaves })
+    expect(process.exitCode).toBeFalsy()
+    expect(calls).toBe(1)
+    const printed = JSON.parse(logSpy.mock.calls[1][0] as string) as { a: number }
+    expect(printed).toEqual({ a: 1 })
+    logSpy.mockRestore()
+    errSpy.mockRestore()
+  })
+
   // Last `pipeline run` test in this describe block deliberately: pipelineRunCmd
   // is a module-level Commander singleton (CLAUDE.md's "cli.ts's main() gotcha"),
   // so any flag left implicit here would inherit whatever a *prior* test in this
   // block last set it to, not its true default -- explicitly pass every flag a
   // previous test has ever set (-o, --config) alongside --trace, rather than
-  // relying on any of them being freshly undefined.
+  // relying on any of them being freshly undefined. A stale --run-id may also
+  // linger from the resume test above, but it's inert here (no checkpoint is
+  // configured, so runOpSpec never reads it).
   it('--trace includes a TraceEvent[] trace alongside the result', async () => {
     const work = tmpDir()
     const outDir = join(work, 'out')
