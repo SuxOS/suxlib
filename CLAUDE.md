@@ -106,6 +106,17 @@ There is no linter in this repo. Run both locally before pushing.
   `shapeCompatible`/`stepShape` implementation that actually landed from a
   different sibling branch) — verify a follow-up issue's cited names/lines
   against current code rather than trusting them verbatim.
+  Update (#409): a stale branch's CI failure doesn't always mean its core
+  logic is broken — `bot/issue-build-29820298284` (PR #419, closed unmerged)
+  implemented #409 correctly but failed `Test & build` on a parse error
+  ("Identifier `checkpointConfigModule` has already been declared") because
+  a *different*, since-merged PR (#416) had independently added an
+  identically-named test helper to the same file. Read the actual CI log
+  before writing off a whole stale branch as unusable — a same-file test-
+  scaffolding collision between two sibling batches is a different failure
+  class than a real logic bug, and here it meant reusing #416's already-
+  landed helper (dropping the branch's own duplicate copy) instead of
+  redesigning anything.
 - **A follow-up issue can be filed against a prerequisite that hasn't merged
   yet.** #242 (trace snapshot budget guard, follow-up to #234) and #250/#251
   (follow-ups to #247's sink governance) were all still queued as buildable
