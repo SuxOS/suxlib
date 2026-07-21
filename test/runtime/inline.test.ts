@@ -1,7 +1,7 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
 import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
-import { fixed } from '../../src/control/aimd.js'
+import { fixed, aimd } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { createGovernor, OpAbortError } from '../../src/control/governor.js'
@@ -92,6 +92,20 @@ test('runInline does not double-release a map item\'s concurrency slot when a po
   const tree = map(op('id', async (n: number) => n, { kind: 'pure' }), { concurrency: throwingConcurrency as any })
   await expect(runInline(tree, [1], caps)).rejects.toThrow('onEvent boom')
   expect(onEventCalls).toBe(1)
+})
+
+test('map/mapField thread runId and callId into concurrency.release, so an aimd limiter\'s GovernorEvents carry them (#387)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const events: any[] = []
+  const limiter = aimd({ start: 1, min: 1, onEvent: (e) => events.push(e) })
+  const tree = map(op('id', async (n: number) => n, { kind: 'pure' }), { concurrency: limiter })
+  const runId = 'fixed-run-id'
+  await runInline(tree, [1, 2], caps, undefined, '', runId)
+  expect(events.length).toBeGreaterThan(0)
+  for (const e of events) {
+    expect(e.runId).toBe(runId)
+    expect(typeof e.callId).toBe('string')
+  }
 })
 
 test('runInline aggregates every concurrent map item failure instead of surfacing only the first by index (#333)', async () => {

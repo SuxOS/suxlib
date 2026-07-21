@@ -567,6 +567,25 @@ test('aborting while queued behind a full concurrency limiter rejects immediatel
   expect(breaker.state).toBe('closed') // abort must not be misclassified as a leaf failure
 })
 
+test('an abort-aware fn throwing OpAbortError after acquiring a concurrency slot releases it neutrally, not as a failure (#309)', async () => {
+  const limiter = aimd({ start: 8, min: 1 })
+  const fn = async () => { throw new OpAbortError() }
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency: limiter }, noSleep),
+  ).rejects.toThrow(OpAbortError)
+  expect(limiter.limit).toBe(8) // unchanged -- a real failure would have halved it to 4
+})
+
+test('falls back to a plain release(true) when a Concurrency implementation has no releaseNeutral (#309)', async () => {
+  const releases: boolean[] = []
+  const concurrency = { async acquire() {}, release: (ok: boolean) => { releases.push(ok) } }
+  const fn = async () => { throw new OpAbortError() }
+  await expect(
+    runGoverned('leaf', { kind: 'effect' }, fn, null, caps(), { concurrency }, noSleep),
+  ).rejects.toThrow(OpAbortError)
+  expect(releases).toEqual([true])
+})
+
 test('a throw from post-success bookkeeping does not permanently strand the half-open probe reservation (#290)', async () => {
   const concurrency = { async acquire() {}, release() {} }
   const breaker = circuitBreaker({

@@ -79,6 +79,26 @@ test('parseYaml does not truncate a flow-collection value at a "#" inside one of
   expect(parseYaml('key: [1, "a # not comment", 3] # real comment')).toEqual({ key: [1, 'a # not comment', 3] })
 })
 
+test('parseYaml reads a literal block scalar (|) and does not truncate the rest of the document (#388)', () => {
+  expect(parseYaml('note: |\n  line1\n  line2\nkey: value\n')).toEqual({ note: 'line1\nline2\n', key: 'value' })
+})
+
+test('parseYaml reads a folded block scalar (>), joining lines with spaces', () => {
+  expect(parseYaml('note: >\n  line1\n  line2\nkey: value\n')).toEqual({ note: 'line1 line2\n', key: 'value' })
+})
+
+test('parseYaml honors a "-" chomping indicator on a block scalar, stripping the trailing newline', () => {
+  expect(parseYaml('note: |-\n  line1\n  line2\nkey: value\n')).toEqual({ note: 'line1\nline2', key: 'value' })
+})
+
+test('parseYaml reads a block scalar as a sequence item', () => {
+  expect(parseYaml('items:\n  - |\n    hi\n    there\n  - x\n')).toEqual({ items: ['hi\nthere\n', 'x'] })
+})
+
+test('parseYaml reads a block scalar nested under a sequence item\'s own key', () => {
+  expect(parseYaml('items:\n  - note: |\n      hi\n      there\n    other: x\n')).toEqual({ items: [{ note: 'hi\nthere\n', other: 'x' }] })
+})
+
 test('parseYaml and parseXml guard against prototype pollution via __proto__ keys', () => {
   const y = parseYaml('__proto__:\n  polluted: true\nq: hi') as Record<string, unknown>
   expect(({} as Record<string, unknown>).polluted).toBeUndefined()
@@ -177,21 +197,21 @@ test('toXml escapes attribute quotes and parseXml round-trips them', () => {
 test('toXml preserves a key whose value is an empty array instead of silently dropping it, and parseXml round-trips it back to []', () => {
   const obj = { a: 1, tags: [] as unknown[] }
   const xml = toXml(obj, 'root')
-  expect(xml).toBe('<root><a>1</a><tags sux:empty-array="true"/></root>')
+  expect(xml).toBe('<root><a>1</a><tags 0sux-empty-array="true"/></root>')
   expect(parseXml(xml)).toEqual({ root: { a: '1', tags: [] } })
 })
 
 test('toXml preserves a key whose value is a single-element array, and parseXml round-trips it back to a 1-element array instead of a bare scalar', () => {
   const obj = { tags: ['a'] }
   const xml = toXml(obj, 'root')
-  expect(xml).toBe('<root><tags sux:single-array="true">a</tags></root>')
+  expect(xml).toBe('<root><tags 0sux-single-array="true">a</tags></root>')
   expect(parseXml(xml)).toEqual({ root: { tags: ['a'] } })
 })
 
 test('toXml marks a null value distinctly from an empty-string scalar, and parseXml round-trips it back to null instead of ""', () => {
   const obj = { a: null }
   const xml = toXml(obj, 'root')
-  expect(xml).toBe('<root><a sux:null-value="true"/></root>')
+  expect(xml).toBe('<root><a 0sux-null-value="true"/></root>')
   expect(parseXml(xml)).toEqual({ root: { a: null } })
   expect(parseXml('<root><a></a></root>')).not.toEqual(parseXml(xml))
 })
@@ -218,6 +238,11 @@ test('toXml/parseXml round-trip a real attribute whose key collides with the nul
   const obj = { row: { '@null-value': 'true' } }
   const xml = toXml(obj, 'root')
   expect(parseXml(xml)).toEqual({ root: obj })
+})
+
+test('parseXml does not mistake a hand-authored xmlns:sux namespace-prefixed attribute for the internal marker (#389)', () => {
+  const xml = '<root><bar xmlns:sux="urn:x" sux:single-array="true">hello</bar></root>'
+  expect(parseXml(xml)).toEqual({ root: { bar: { '@xmlns:sux': 'urn:x', '@sux:single-array': 'true', '#text': 'hello' } } })
 })
 
 test('toXml/parseXml round-trip a single-element array containing null', () => {
