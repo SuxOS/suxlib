@@ -336,13 +336,21 @@ export const pipelineRunCmd = pipelineCmd
   .option('-o, --output <dir>', 'write Handle-shaped result value(s) to files in this directory instead of inlining base64 in the printed JSON')
   .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object -- llm/store/cache/governors/sinks for this run, the shell CLI\'s equivalent of a programmatic caller\'s main(argv, opRunOpts)')
   .option('--trace', 'include a TraceEvent[] execution trace alongside the result')
-  .action(async (specFile: string, opts: { output?: string; config?: string; trace?: boolean }) => {
+  .option('--run-id <id>', 'resume a previously checkpointed run by passing back its runId (requires --config to supply a checkpoint capability)')
+  .action(async (specFile: string, opts: { output?: string; config?: string; trace?: boolean; runId?: string }) => {
     const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown; input?: unknown }
     if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
     const input = resolveFileRefs(parsed.input, dirname(resolve(specFile)))
     const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
-    const outcome = await runOpSpec({ spec: parsed.spec as OpSpec, input, trace: !!opts.trace }, runOpts)
-    const result = opts.trace ? (outcome as { result: unknown }).result : outcome
+    const outcome = await runOpSpec({ spec: parsed.spec as OpSpec, input, trace: !!opts.trace, runId: opts.runId }, runOpts)
+    // runOpSpec wraps its return in { result, runId } (or { result, trace, runId })
+    // whenever runOpts.checkpoint is configured -- independent of --trace, see
+    // op-run.ts's runOpSpec doc -- so unwrapping only on opts.trace (pre-#408)
+    // mistook the whole wrapper for the result whenever a --config module supplied
+    // a checkpoint with no --trace. Mirrors http.ts's POST /op/run unwrap condition.
+    const wrapped = !!opts.trace || !!runOpts.checkpoint
+    const result = wrapped ? (outcome as { result: unknown }).result : outcome
+    if (runOpts.checkpoint) console.error(`runId: ${(outcome as { runId: string }).runId}`)
     if (opts.output) {
       const files: Array<{ name: string; bytes: Uint8Array }> = []
       const shaped = extractHandleFiles(result, files)

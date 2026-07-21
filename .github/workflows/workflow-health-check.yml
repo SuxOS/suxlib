@@ -28,7 +28,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          workflows="audit.yml automerge.yml claude-autofix.yml claude.yml fixer.yml fixer-hourly.yml issue-build.yml pr-auto-update.yml pr-drain.yml pr-unstick.yml pr-watch.yml security-review.yml"
+          workflows="audit.yml automerge.yml claude.yml fixer.yml fixer-bugs.yml fixer-30m.yml issue-build.yml pr-auto-update.yml pr-drain.yml pr-unstick.yml pr-watch.yml security-review.yml"
           failed=""
           for wf in $workflows; do
             conclusion=$(gh run list --workflow "$wf" --limit 1 --json conclusion --jq '.[0].conclusion // "none"')
