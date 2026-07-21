@@ -242,6 +242,14 @@ There is no linter in this repo. Run both locally before pushing.
   regexes should keep both properties — lazy quantifiers for the double-delimiter
   pairs, and `<`/`>` excluded from every content class — rather than reverting to
   a plain `[^*]+`-style class.
+- `src/domain/transform.ts`'s YAML `parseYaml` used to have the same naive,
+  quote-unaware `[^:]+?`-style "split on the first colon" regex independently
+  copied into four places (`splitKey`, `detectBlockScalarMinIndent`'s two
+  branches, and `parseSeqItem`'s inline-key check) — a quoted mapping key
+  containing a colon (`"a: b": |`) broke block-scalar detection and seq-item
+  key parsing in each copy on its own, since fixing one didn't fix the others
+  (#401). All four now share one `splitMappingKey(body)` helper; any future
+  YAML key-parsing tweak belongs there, not re-derived at a new call site.
 - Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
   `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
   `circuitBreaker` gating for `effect` leaves is configured separately, via
