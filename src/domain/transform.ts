@@ -924,12 +924,74 @@ function inlineToMd(s: string): string {
     .trim()
 }
 
-function listItems(html: string, ordered: boolean): string {
+// Finds the tag that closes the one just opened at `fromIndex`, tracking
+// same-name nesting depth so an inner <ul>/<ol>/<li> of the same tag name
+// doesn't get mistaken for the outer tag's own closing tag.
+function findMatchingClose(html: string, tagName: string, fromIndex: number): { start: number; end: number } {
+  const re = new RegExp(`<\\/?${tagName}\\b[^>]*>`, 'gi')
+  re.lastIndex = fromIndex
+  let depth = 1
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html))) {
+    if (m[0].charAt(1) === '/') {
+      depth--
+      if (depth === 0) return { start: m.index, end: m.index + m[0].length }
+    } else {
+      depth++
+    }
+  }
+  return { start: html.length, end: html.length }
+}
+
+// Replaces each top-level (nesting-aware) <tagName>...</tagName> block among
+// `tagNames` with `render`'s output, left to right, without re-entering a
+// block already consumed as part of an outer match.
+function replaceTopLevelTags(html: string, tagNames: string[], render: (tagName: string, inner: string) => string): string {
+  const openRe = new RegExp(`<(${tagNames.join('|')})\\b[^>]*>`, 'gi')
+  let out = ''
+  let cursor = 0
+  let m: RegExpExecArray | null
+  while ((m = openRe.exec(html))) {
+    if (m.index < cursor) continue
+    const tagName = m[1].toLowerCase()
+    out += html.slice(cursor, m.index)
+    const innerStart = m.index + m[0].length
+    const close = findMatchingClose(html, tagName, innerStart)
+    out += render(tagName, html.slice(innerStart, close.start))
+    cursor = close.end
+    openRe.lastIndex = cursor
+  }
+  out += html.slice(cursor)
+  return out
+}
+
+function renderListItem(inner: string, indent: string, marker: string): string {
+  const nested: string[] = []
+  const withPlaceholders = replaceTopLevelTags(inner, ['ul', 'ol'], (tag, content) => {
+    nested.push(listItems(content, tag === 'ol', `${indent}  `))
+    return `\x01${nested.length - 1}\x01`
+  })
+  let text = inlineToMd(withPlaceholders)
+  nested.forEach((block, i) => {
+    text = text.replace(`\x01${i}\x01`, block ? `\n${block}` : '')
+  })
+  return `${indent}${marker} ${text}`
+}
+
+function listItems(html: string, ordered: boolean, indent = ''): string {
   const items: string[] = []
-  const re = /<li\b[^>]*>([\s\S]*?)<\/li>/gi
+  const openRe = /<li\b[^>]*>/gi
   let m: RegExpExecArray | null
   let n = 1
-  while ((m = re.exec(html))) items.push(`${ordered ? `${n++}.` : '-'} ${inlineToMd(m[1])}`)
+  let cursor = 0
+  while ((m = openRe.exec(html))) {
+    if (m.index < cursor) continue
+    const innerStart = m.index + m[0].length
+    const close = findMatchingClose(html, 'li', innerStart)
+    items.push(renderListItem(html.slice(innerStart, close.start), indent, ordered ? `${n++}.` : '-'))
+    cursor = close.end
+    openRe.lastIndex = cursor
+  }
   return items.join('\n')
 }
 
@@ -948,8 +1010,7 @@ export function htmlToMarkdown(html: string): string {
   s = s.replace(/<blockquote\b[^>]*>([\s\S]*?)<\/blockquote>/gi, (_m, txt) =>
     `\x00${inlineToMd(txt).split('\n').map((l: string) => `> ${l}`.trimEnd()).join('\n')}\x00`,
   )
-  s = s.replace(/<ul\b[^>]*>([\s\S]*?)<\/ul>/gi, (_m, txt) => `\x00${listItems(txt, false)}\x00`)
-  s = s.replace(/<ol\b[^>]*>([\s\S]*?)<\/ol>/gi, (_m, txt) => `\x00${listItems(txt, true)}\x00`)
+  s = replaceTopLevelTags(s, ['ul', 'ol'], (tag, inner) => `\x00${listItems(inner, tag === 'ol')}\x00`)
   s = s.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (_m, txt) => `\x00${inlineToMd(txt)}\x00`)
   s = s
     .split('\x00')
