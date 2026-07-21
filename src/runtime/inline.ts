@@ -1,4 +1,4 @@
-import type { Op, Caps } from '../op/types.js'
+import type { Op, Caps, Concurrency } from '../op/types.js'
 import { runReconcile } from '../op/reconcile.js'
 import { runGoverned, OpAbortError, type RunGovernedOpts } from '../control/governor.js'
 
@@ -21,6 +21,19 @@ function throwFirstOrAggregate(results: PromiseSettledResult<any>[], label: stri
   if (failures.length === 0) return
   if (failures.length === 1) throw failures[0]
   throw new AggregateError(failures, `${label}: ${failures.length} concurrent failures`)
+}
+
+// Mirrors runGoverned's own abort-branch release (src/control/governor.ts) --
+// an item unwinding through OpAbortError was cancelled, not failed, so
+// charging an aimd limiter's failure-halving for it (a plain release(false))
+// would misclassify cooperative cancellation as a real failure (#399).
+function releaseOnItemCatch(concurrency: Concurrency, e: unknown, runId: string, callId: string): void {
+  if (e instanceof OpAbortError) {
+    if (concurrency.releaseNeutral) concurrency.releaseNeutral(runId, callId)
+    else concurrency.release(true, runId, callId)
+    return
+  }
+  concurrency.release(false, runId, callId)
 }
 
 // Monotonic per-process counter backing traced()'s callId (#366) -- cheap
@@ -54,21 +67,40 @@ let traceCallSeq = 0
 // only the still-unfinished items of an in-flight fan-out actually re-run.
 // With no caps.checkpoint (the common case), this is a pure no-op -- same
 // degrade-gracefully contract as caps.ask/caps.cache.
-async function traced<T>(tag: string, name: string | undefined, path: string, runId: string, caps: Caps, gOpts: RunGovernedOpts | undefined, fn: (callId: string) => Promise<T>): Promise<T> {
+//
+// `runSig` (#398) namespaces that (runId, path) ledger by a hash of the run's
+// spec/root input -- runId alone is a caller-supplied string a network caller
+// can guess, observe, or simply reuse, and a bare (runId, path) key would then
+// let a request with a mismatched spec read a stranger's recorded leaf/sink
+// output at any path the two op-tree shapes happen to share. Every direct
+// runInline caller that doesn't pass one (every test, and any host embedding
+// this library in-process) defaults to '', which folds back to the exact
+// pre-#398 (runId, path) key -- only src/adapters/op-run.ts (the actual
+// network-exposed surface a runId can be guessed/replayed against) computes a
+// real one, from the caller-supplied OpSpec JSON (not the built Op tree --
+// buildOp's mergeParams closes a leaf spec's `params` over the piped value,
+// so those params never appear as an enumerable field on the built tree) and
+// root input.
+async function traced<T>(tag: string, name: string | undefined, path: string, runId: string, runSig: string, caps: Caps, gOpts: RunGovernedOpts | undefined, fn: (callId: string) => Promise<T>): Promise<T> {
   // Cooperative-cancellation checkpoint (#279): every node runInline
   // dispatches -- leaf, pipe step, map/mapField item, reconcile, sink
   // fanout/target, ask, catch's try -- passes through here before it starts,
   // so one check here is equivalent to a check at every one of those sites.
   if (gOpts?.signal?.aborted) throw new OpAbortError()
   const checkpoint = caps.checkpoint
+  // \0 can't appear in a caller-supplied runId/runSig (a UUID or hex
+  // digest), so this can't collide with an unnamespaced key -- and when
+  // runSig is '' (the default for every caller that doesn't opt in), this
+  // reduces to the bare `runId` used before #398, unchanged.
+  const checkpointRunId = checkpoint && runSig ? `${runId}\0${runSig}` : runId
   if (checkpoint) {
-    const recorded = await checkpoint.get(runId, path)
+    const recorded = await checkpoint.get(checkpointRunId, path)
     if (recorded) return recorded.value as T
   }
   const callId = String(++traceCallSeq)
   const run = async (): Promise<T> => {
     const result = await fn(callId)
-    if (checkpoint) await checkpoint.put(runId, path, result)
+    if (checkpoint) await checkpoint.put(checkpointRunId, path, result)
     return result
   }
   const onTrace = gOpts?.onTrace
@@ -92,19 +124,22 @@ async function traced<T>(tag: string, name: string | undefined, path: string, ru
 // onTrace sink across concurrent runInline calls (src/adapters/otel.ts's
 // exporters) tell those calls' events apart even when their windows overlap
 // without nesting and they visit the exact same relative `path`.
-export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGovernedOpts, path = '', runId: string = crypto.randomUUID()): Promise<any> {
+//
+// `runSig` (#398) is threaded through every recursive call the exact same
+// way -- see traced()'s header comment above for what it binds and why.
+export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGovernedOpts, path = '', runId: string = crypto.randomUUID(), runSig = ''): Promise<any> {
   switch (node.tag) {
     case 'leaf':
-      return traced('leaf', node.name, path, runId, caps, gOpts, (callId) =>
+      return traced('leaf', node.name, path, runId, runSig, caps, gOpts, (callId) =>
         runGoverned(node.name, node.opts, node.fn, input, caps, caps.governors?.[node.name], gOpts, runId, callId))
     case 'pipe':
-      return traced('pipe', undefined, path, runId, caps, gOpts, async () => {
+      return traced('pipe', undefined, path, runId, runSig, caps, gOpts, async () => {
         let v = input
-        for (let i = 0; i < node.steps.length; i++) v = await runInline(node.steps[i], v, caps, gOpts, childPath(path, i), runId)
+        for (let i = 0; i < node.steps.length; i++) v = await runInline(node.steps[i], v, caps, gOpts, childPath(path, i), runId, runSig)
         return v
       })
     case 'map':
-      return traced('map', undefined, path, runId, caps, gOpts, async (callId) => {
+      return traced('map', undefined, path, runId, runSig, caps, gOpts, async (callId) => {
         const items: any[] = input; const out = new Array(items.length)
         // Promise.allSettled, not Promise.all -- see the 'sink' case below for
         // why: an item's own runInline call may still be mid-flight (e.g.
@@ -114,8 +149,8 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         const results = await Promise.allSettled(items.map(async (it, i) => {
           await node.concurrency.acquire(gOpts?.signal)
           let result: any
-          try { result = await runInline(node.op, it, caps, gOpts, childPath(path, i), runId) }
-          catch (e) { node.concurrency.release(false, runId, callId); throw e }
+          try { result = await runInline(node.op, it, caps, gOpts, childPath(path, i), runId, runSig) }
+          catch (e) { releaseOnItemCatch(node.concurrency, e, runId, callId); throw e }
           // Post-success release deliberately sits outside the try/catch above,
           // same as runGoverned's #275 fix -- a throw here (e.g. a host onEvent
           // callback) must not be misclassified as an item failure, which would
@@ -127,15 +162,15 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         return out
       })
     case 'mapField':
-      return traced('mapField', undefined, path, runId, caps, gOpts, async (callId) => {
+      return traced('mapField', undefined, path, runId, runSig, caps, gOpts, async (callId) => {
         const obj = input as Record<string, unknown>
         const items = obj[node.arrayField] as any[]
         const out = new Array(items.length)
         const results = await Promise.allSettled(items.map(async (it, i) => {
           await node.concurrency.acquire(gOpts?.signal)
           let value: any
-          try { value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts, childPath(path, i), runId) }
-          catch (e) { node.concurrency.release(false, runId, callId); throw e }
+          try { value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts, childPath(path, i), runId, runSig) }
+          catch (e) { releaseOnItemCatch(node.concurrency, e, runId, callId); throw e }
           // Post-success release outside try/catch, same reasoning as 'map' above.
           out[i] = { ...(it as Record<string, unknown>), [node.elementField]: value }
           node.concurrency.release(true, runId, callId)
@@ -152,7 +187,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         return { ...rest, [targetField]: out }
       })
     case 'reconcile':
-      return traced('reconcile', undefined, path, runId, caps, gOpts, () => runReconcile(node.opts, input, caps.store))
+      return traced('reconcile', undefined, path, runId, runSig, caps, gOpts, () => runReconcile(node.opts, input, caps.store))
     case 'sink':
       // Traced per-target, not just once for the whole fanout: Promise.allSettled
       // (not Promise.all -- which would resolve as soon as the first target
@@ -162,7 +197,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       // gives every target's write equal opportunity to fail independently and
       // guarantees every target's node-exit has landed before this node decides
       // success/failure.
-      return traced('sink', undefined, path, runId, caps, gOpts, async () => {
+      return traced('sink', undefined, path, runId, runSig, caps, gOpts, async () => {
         const results = await Promise.allSettled(node.targets.map(t => {
           // A bare string target falls back entirely to the fanout call's own
           // `opts`; a `{ name, opts }` pair overrides per-field, per-target
@@ -170,7 +205,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
           // retries by declaring its own `opts: { retries: 0 }`.
           const name = typeof t === 'string' ? t : t.name
           const targetOpts = typeof t === 'string' ? undefined : t.opts
-          return traced('sink-target', name, childPath(path, name), runId, caps, gOpts, async (callId) => {
+          return traced('sink-target', name, childPath(path, name), runId, runSig, caps, gOpts, async (callId) => {
             const s = caps.sinks[name]
             if (!s) throw new Error(`unknown sink "${name}" (registered: ${Object.keys(caps.sinks).join(', ')})`)
             // Each write runs through runGoverned exactly like an 'effect' leaf's
@@ -191,7 +226,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         return input
       })
     case 'ask':
-      return traced('ask', undefined, path, runId, caps, gOpts, async () => {
+      return traced('ask', undefined, path, runId, runSig, caps, gOpts, async () => {
         // No Ask capability: there is no way to pause for a human answer, so an
         // immediate "timeout" is the honest default -- honor onTimeout rather than
         // silently overriding a caller's explicit 'fail' contract with 'proceed'.
@@ -209,14 +244,14 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       // and the discarded error's message -- that's what answers "why did the
       // fallback fire" when a caller supplies onTrace; this case itself still
       // only needs the error to decide whether to run the fallback.
-      return traced('catch', undefined, path, runId, caps, gOpts, async () => {
-        try { return await runInline(node.try, input, caps, gOpts, childPath(path, 'try'), runId) }
+      return traced('catch', undefined, path, runId, runSig, caps, gOpts, async () => {
+        try { return await runInline(node.try, input, caps, gOpts, childPath(path, 'try'), runId, runSig) }
         catch (err) {
           // An abort is a control signal from outside the tree, not an
           // application error -- it must propagate past catch's fallback,
           // not be swallowed as "the try branch failed, run the fallback."
           if (err instanceof OpAbortError) throw err
-          return runInline(node.catch, input, caps, gOpts, childPath(path, 'catch'), runId)
+          return runInline(node.catch, input, caps, gOpts, childPath(path, 'catch'), runId, runSig)
         }
       })
   }
