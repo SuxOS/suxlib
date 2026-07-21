@@ -184,6 +184,45 @@ export function parseYaml(text: string): unknown {
   let i = 0
   const indentOf = (l: string) => l.match(/^\s*/)![0].length
 
+  // Block-scalar header (`|`/`>`, optionally with a chomping indicator `+`/`-`
+  // and/or an explicit indentation indicator, in either order -- `|2-` and
+  // `|-2` are both valid). Returns null when `s` isn't a bare block-scalar
+  // header (i.e. an ordinary scalar value, parsed as before).
+  function parseBlockScalarHeader(s: string): { folded: boolean; chomp: 'strip' | 'clip' | 'keep'; indent?: number } | null {
+    const m = s.match(/^([|>])([+-]?)(\d*)([+-]?)$/)
+    if (!m) return null
+    const chompChar = m[2] || m[4]
+    return {
+      folded: m[1] === '>',
+      chomp: chompChar === '-' ? 'strip' : chompChar === '+' ? 'keep' : 'clip',
+      indent: m[3] ? parseInt(m[3], 10) : undefined,
+    }
+  }
+  // Consumes every following line indented at least `minIndent` (the block's
+  // content columns are auto-detected from the first such line unless the
+  // header gave an explicit indent) as this block scalar's body, applying
+  // literal/folded joining and chomping. Note: parseYaml's line filter above
+  // already drops blank lines from `lines` entirely, so this -- like the rest
+  // of this deliberately non-spec-complete "YAMLish" parser -- can't preserve
+  // blank lines embedded inside a block scalar's body.
+  function readBlockScalar(header: NonNullable<ReturnType<typeof parseBlockScalarHeader>>, minIndent: number): string {
+    const contentLines: string[] = []
+    let indent = header.indent !== undefined ? minIndent - 1 + header.indent : undefined
+    while (i < lines.length) {
+      const line = lines[i]
+      const ind = indentOf(line)
+      if (ind < minIndent) break
+      if (indent === undefined) indent = ind
+      if (ind < indent) break
+      contentLines.push(line.slice(indent))
+      i++
+    }
+    if (contentLines.length === 0) return ''
+    const text = header.folded ? contentLines.join(' ') : contentLines.join('\n')
+    if (header.chomp === 'strip') return text
+    return text + '\n' // 'clip' and 'keep' -- indistinguishable here since blank trailing lines are already filtered out
+  }
+
   function parseBlock(minIndent: number, depth = 0): unknown {
     if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
     const first = lines[i]
@@ -194,6 +233,8 @@ export function parseYaml(text: string): unknown {
     // pattern can only happen at the true document root, i.e. toYaml was
     // called on a bare scalar (1e21, 'hello', ...) with nothing to map/seq.
     if (depth === 0 && splitKey(first) === null) {
+      const bs = parseBlockScalarHeader(first.trim())
+      if (bs) { i++; return readBlockScalar(bs, indentOf(first) + 1) }
       i++
       return parseScalar(first)
     }
@@ -237,10 +278,16 @@ export function parseYaml(text: string): unknown {
       if (m[2].trim() === '') {
         const block = parseBlock(childIndent, depth + 1)
         if (!dangerous) obj[key] = block
-      } else if (!dangerous) obj[key] = parseScalar(m[2])
+      } else {
+        const bs = parseBlockScalarHeader(m[2].trim())
+        const value = bs ? readBlockScalar(bs, childIndent) : parseScalar(m[2])
+        if (!dangerous) obj[key] = value
+      }
       mergeMap(obj, childIndent, depth + 1)
       return obj
     }
+    const seqBs = parseBlockScalarHeader(rest.trim())
+    if (seqBs) return readBlockScalar(seqBs, ind + 2)
     return parseScalar(rest)
   }
   // toYaml renders a nested array's first item inline on the outer item's own
@@ -303,7 +350,11 @@ export function parseYaml(text: string): unknown {
         const seqAtKeyIndent = next !== undefined && indentOf(next) === ind && /^\s*-(\s|$)/.test(next)
         const block = parseBlock(seqAtKeyIndent ? ind : ind + 1, depth + 1)
         if (!dangerous) obj[key] = block
-      } else if (!dangerous) obj[key] = parseScalar(kv.rest)
+      } else {
+        const bs = parseBlockScalarHeader(kv.rest.trim())
+        const value = bs ? readBlockScalar(bs, ind + 1) : parseScalar(kv.rest)
+        if (!dangerous) obj[key] = value
+      }
     }
   }
   return parseBlock(0)
@@ -504,15 +555,21 @@ function collapse(node: Record<string, unknown>): unknown {
   return node
 }
 
-// All four marker attribute names below carry a literal `:` -- a character
-// xmlName() (see above) always escapes to `_3a_` rather than passing through,
-// since `:` fails xmlName's `[A-Za-z0-9.-]` safe-charset test. That makes
-// `sux:...` unproducible as the *output* of xmlName(anyUserKey), so a real
-// JSON attribute key (however it's spelled) can never sanitize to the same
-// string as one of these markers and be silently mistaken for the internal
-// control channel by parseXml. See issue #291 -- plain-word marker names
-// (e.g. bare 'single-array') collided with a same-named real user attribute
-// key, corrupting the round-trip.
+// All four marker attribute names below start with a digit -- which XML's own
+// Name grammar forbids for any attribute/element name (NameStartChar excludes
+// digits), so no well-formed hand-authored XML document can ever legally carry
+// an attribute literally named e.g. '0sux-single-array', full stop -- unlike
+// the earlier `sux:...` scheme (#389), a leading-digit name can't collide via
+// a coincidental namespace-prefix declaration (`xmlns:sux="..." sux:single-
+// array="true"` is syntactically legal XML; `0sux-single-array="true"` never
+// is). xmlName() (see above) also never produces a digit-leading name for any
+// real JSON key -- it unconditionally prefixes `_` whenever the sanitized form
+// doesn't already start with a letter -- so a real JSON attribute key (however
+// it's spelled) can never sanitize to the same string as one of these markers
+// either. See issue #291 -- plain-word marker names (e.g. bare 'single-array')
+// collided with a same-named real user attribute key, corrupting the
+// round-trip; #389 -- the `sux:` namespace-prefix successor scheme still
+// collided with hand-authored XML declaring its own `sux` namespace prefix.
 
 // Self-closing marker attribute `toXml` emits for a JSON key whose value is an
 // empty array — without it, `obj.map(...).join('')` over an empty array
@@ -520,20 +577,20 @@ function collapse(node: Record<string, unknown>): unknown {
 // round-tripping (see toYaml's `[]` handling, which has no such gap since
 // yamlScalar emits an explicit '[]' for empty arrays). `parseXml` looks for
 // this same attribute to decode a self-closed tag back into [] rather than ''.
-const EMPTY_ARRAY_ATTR = 'sux:empty-array'
+const EMPTY_ARRAY_ATTR = '0sux-empty-array'
 
 // Marker attribute `toXml` emits on the sole element of a length-1 JSON array —
 // without it, a 1-element array renders as exactly one sibling element, which is
 // byte-identical to a plain scalar field of the same tag name, so parseXml (which
 // only promotes a key to an array once it sees the tag repeated) silently turns
 // the round-tripped value back into a scalar. See issue #68.
-const SINGLE_ARRAY_ATTR = 'sux:single-array'
+const SINGLE_ARRAY_ATTR = '0sux-single-array'
 
 // Marker attribute `toXml` emits for a JSON key whose value is null/undefined —
 // without it, a null field and an empty-string scalar field both render as the
 // same self-closing `<tag/>`, so parseXml can't tell them apart and always
 // decodes the tag back to ''. See issue #79.
-const NULL_VALUE_ATTR = 'sux:null-value'
+const NULL_VALUE_ATTR = '0sux-null-value'
 
 // Marker attribute `toXml` emits on an array element that is itself an array
 // (array-of-arrays) — without it, `{a: [[1,2],[3,4]]}` recurses into the inner
@@ -542,7 +599,7 @@ const NULL_VALUE_ATTR = 'sux:null-value'
 // element's children all use ARRAY_ITEM_TAG rather than the outer array's own
 // tag, so parseXml can rebuild the inner array without it being mistaken for
 // more siblings of the outer array. See issue #105.
-const NESTED_ARRAY_ATTR = 'sux:nested-array'
+const NESTED_ARRAY_ATTR = '0sux-nested-array'
 
 // Fixed child tag `wrapNestedArray` renders a nested array's own elements
 // under, keeping them distinct from the outer array's repeated tag name.

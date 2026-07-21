@@ -30,6 +30,7 @@ export function fixed(n: number): Concurrency {
   return {
     async acquire(signal?: AbortSignal) { await enqueue(q, pump, signal) },
     release() { inflight--; pump() },
+    releaseNeutral() { inflight--; pump() },
   }
 }
 
@@ -55,5 +56,6 @@ export function aimd(opts: { start?: number; min?: number; max?: number; onEvent
       }
       pump()
     },
+    releaseNeutral() { inflight--; pump() },
   }
 }

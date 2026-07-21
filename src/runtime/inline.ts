@@ -82,7 +82,7 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         return v
       })
     case 'map':
-      return traced('map', undefined, path, runId, caps, gOpts, async () => {
+      return traced('map', undefined, path, runId, caps, gOpts, async (callId) => {
         const items: any[] = input; const out = new Array(items.length)
         // Promise.allSettled, not Promise.all -- see the 'sink' case below for
         // why: an item's own runInline call may still be mid-flight (e.g.
@@ -93,19 +93,19 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
           await node.concurrency.acquire(gOpts?.signal)
           let result: any
           try { result = await runInline(node.op, it, caps, gOpts, childPath(path, i), runId) }
-          catch (e) { node.concurrency.release(false); throw e }
+          catch (e) { node.concurrency.release(false, runId, callId); throw e }
           // Post-success release deliberately sits outside the try/catch above,
           // same as runGoverned's #275 fix -- a throw here (e.g. a host onEvent
           // callback) must not be misclassified as an item failure, which would
           // double-release the concurrency slot.
           out[i] = result
-          node.concurrency.release(true)
+          node.concurrency.release(true, runId, callId)
         }))
         throwFirstOrAggregate(results, 'map')
         return out
       })
     case 'mapField':
-      return traced('mapField', undefined, path, runId, caps, gOpts, async () => {
+      return traced('mapField', undefined, path, runId, caps, gOpts, async (callId) => {
         const obj = input as Record<string, unknown>
         const items = obj[node.arrayField] as any[]
         const out = new Array(items.length)
@@ -113,10 +113,10 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
           await node.concurrency.acquire(gOpts?.signal)
           let value: any
           try { value = await runInline(node.op, (it as Record<string, unknown>)[node.elementField], caps, gOpts, childPath(path, i), runId) }
-          catch (e) { node.concurrency.release(false); throw e }
+          catch (e) { node.concurrency.release(false, runId, callId); throw e }
           // Post-success release outside try/catch, same reasoning as 'map' above.
           out[i] = { ...(it as Record<string, unknown>), [node.elementField]: value }
-          node.concurrency.release(true)
+          node.concurrency.release(true, runId, callId)
         }))
         throwFirstOrAggregate(results, 'mapField')
         const { [node.arrayField]: _dropped, ...rest } = obj
