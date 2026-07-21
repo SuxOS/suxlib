@@ -368,7 +368,19 @@ test('runOpSpecStatus: reports { done: false } for a runId with no recorded chec
   const checkpoint = new MemoryCheckpoint()
   const spec: OpSpec = { tag: 'leaf', name: 'shout' }
   const status = await runOpSpecStatus({ spec, input: { a: 1 }, runId: 'never-ran' }, { checkpoint })
-  expect(status).toEqual({ done: false })
+  expect(status).toEqual({ done: false, started: false })
+})
+
+test('runOpSpecStatus: reports { done: false, started: true } for a run whose root node started but never finished (crashed mid-run) (#425)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const spec: OpSpec = { tag: 'leaf', name: 'crashy' }
+  await expect(runOpSpec(
+    { spec, input: { a: 1 }, runId: 'crashed-run' },
+    { leaves: { crashy: async () => { throw new Error('boom') } }, checkpoint },
+  )).rejects.toThrow('boom')
+
+  const status = await runOpSpecStatus({ spec, input: { a: 1 }, runId: 'crashed-run' }, { checkpoint })
+  expect(status).toEqual({ done: false, started: true })
 })
 
 test('runOpSpecStatus: reports { done: true, result } for a finished run, given the same spec/input/runId it ran with (#409)', async () => {
@@ -414,5 +426,5 @@ test('runOpSpecStatus: a status query naming another run\'s runId but a differen
 
   const attackerSpec: OpSpec = { tag: 'leaf', name: 'victimLeaf' }
   const status = await runOpSpecStatus({ spec: attackerSpec, input: { a: 'attacker' }, runId: first.runId }, { checkpoint })
-  expect(status).toEqual({ done: false })
+  expect(status).toEqual({ done: false, started: false })
 })

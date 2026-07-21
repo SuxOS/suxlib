@@ -18,3 +18,15 @@ test('MemoryCheckpoint keeps separate runs\' checkpoints independent even when t
   expect(await c.get('run-1', '0')).toEqual({ done: true, value: 'a' })
   expect(await c.get('run-2', '0')).toEqual({ done: true, value: 'b' })
 })
+test('MemoryCheckpoint.start records an in-progress marker distinguishable from both "never started" and "done" (#425)', async () => {
+  const c = new MemoryCheckpoint()
+  expect(await c.get('run-1', '0')).toBeUndefined()
+  await c.start('run-1', '0')
+  expect(await c.get('run-1', '0')).toEqual({ done: false })
+})
+test('MemoryCheckpoint.start does not clobber an already-recorded done result (#425)', async () => {
+  const c = new MemoryCheckpoint()
+  await c.put('run-1', '0', 42)
+  await c.start('run-1', '0')
+  expect(await c.get('run-1', '0')).toEqual({ done: true, value: 42 })
+})
