@@ -138,6 +138,13 @@ function walkPlan(spec: OpSpec, plan: OpPlan, llmLeaves: Set<string>, sinkTarget
       if (spec.catch) walkPlan(spec.catch, plan, llmLeaves, sinkTargets)
       return
     }
+    case 'cond': {
+      if (Array.isArray(spec.cases)) {
+        for (const c of spec.cases) if (c?.then) walkPlan(c.then, plan, llmLeaves, sinkTargets)
+      }
+      if (spec.default) walkPlan(spec.default, plan, llmLeaves, sinkTargets)
+      return
+    }
     case 'ask': {
       plan.usesAsk = true
       return

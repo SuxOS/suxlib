@@ -1,4 +1,4 @@
-import type { Op, Caps, Concurrency } from '../op/types.js'
+import type { Op, Caps, Concurrency, CondPredicate } from '../op/types.js'
 import { runReconcile } from '../op/reconcile.js'
 import { runGoverned, OpAbortError, type RunGovernedOpts } from '../control/governor.js'
 
@@ -10,6 +10,20 @@ export class AskTimeoutError extends Error {
 }
 
 const childPath = (path: string, seg: string | number): string => (path === '' ? String(seg) : `${path}/${seg}`)
+
+// Resolves a cond predicate's `field` off the piped value -- omitted (or, for an
+// in-process Op tree built by hand rather than through OpSpec's validated field-name
+// checks, a falsy field) compares the piped value itself, the only option for a
+// primitive, non-object input.
+function resolveCondField(input: any, field: string | undefined): unknown {
+  if (!field) return input
+  return typeof input === 'object' && input !== null ? (input as Record<string, unknown>)[field] : undefined
+}
+
+function evalCondPredicate(p: CondPredicate, input: any): boolean {
+  const v = resolveCondField(input, p.field)
+  return 'equals' in p ? v === p.equals : p.in.includes(v as any)
+}
 
 // Surfaces every concurrent failure from a fan-out (map/mapField/sink), not
 // just the first-by-index one -- but preserves today's exact single-failure
@@ -253,6 +267,16 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
           if (err instanceof OpAbortError) throw err
           return runInline(node.catch, input, caps, gOpts, childPath(path, 'catch'), runId, runSig)
         }
+      })
+    case 'cond':
+      return traced('cond', undefined, path, runId, runSig, caps, gOpts, async () => {
+        for (let i = 0; i < node.cases.length; i++) {
+          if (evalCondPredicate(node.cases[i].when, input)) {
+            return runInline(node.cases[i].then, input, caps, gOpts, childPath(path, i), runId, runSig)
+          }
+        }
+        if (node.default) return runInline(node.default, input, caps, gOpts, childPath(path, 'default'), runId, runSig)
+        throw new Error('cond: no case matched and no default branch was supplied')
       })
   }
 }

@@ -71,6 +71,17 @@ const opSpecConcurrencySchema = z.union([
   }),
 ])
 
+// Mirrors src/op/types.ts's CondPredicate -- a JSON scalar (or array of scalars for
+// `in`), never eval'd code, checked against a field resolved off the piped value
+// (or the piped value itself, when `field` is omitted). buildOp re-validates this
+// itself (exactly one of `equals`/`in`), same "stop it being silently stripped
+// before it gets there" reasoning as reconcileOptsSchema/opSpecConcurrencySchema.
+const condPrimitiveSchema = z.union([z.string(), z.number(), z.boolean(), z.null()])
+const condPredicateSchema = z.union([
+  z.object({ field: z.string().optional(), equals: condPrimitiveSchema }),
+  z.object({ field: z.string().optional(), in: z.array(condPrimitiveSchema) }),
+])
+
 const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   // record(z.unknown()), not a stricter value schema: `params` is shallow-merged
   // as-is onto whatever the piped value is (buildOp/mergeParams, src/op/spec.ts)
@@ -98,6 +109,11 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   z.object({ tag: z.literal('reconcile'), opts: reconcileOptsSchema }),
   z.object({ tag: z.literal('catch'), try: opSpecSchema, catch: opSpecSchema }),
   z.object({ tag: z.literal('ask'), prompt: z.string(), timeout: z.string(), onTimeout: z.enum(['proceed', 'fail']) }),
+  z.object({
+    tag: z.literal('cond'),
+    cases: z.array(z.object({ when: condPredicateSchema, then: opSpecSchema })).min(1),
+    default: opSpecSchema.optional(),
+  }),
 ]))
 
 export type RegisterFileopsToolsOptions = {

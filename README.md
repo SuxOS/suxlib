@@ -1,7 +1,7 @@
 # @suxos/lib
 
 SuxOS's shared, dependency-light **pure core + adapters** library — the home of the
-**op engine** (`op`/`map`/`mapField`/`reconcile`/`pipe`/`sink`/`ask`/`catch`, the
+**op engine** (`op`/`map`/`mapField`/`reconcile`/`pipe`/`sink`/`ask`/`catch`/`cond`, the
 `runInline` graduated runtime) and of `sux-fileops`'s absorbed domain logic
 (archive/pdf/sanitize/transform), exposed identically over CLI, HTTP, and MCP.
 
@@ -76,7 +76,7 @@ on) and only differs in how it reads input and shapes output:
 ### Composable pipelines: `POST /op/run` and the `run_pipeline` MCP tool
 
 Beyond one-shot single-leaf calls, all three adapters also expose the op engine
-itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask', ... }`
+itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask' | 'cond', ... }`
 spec (`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`'s
 `LEAF_REGISTRY` (`pack`/`unpack`/`unzip`/`shrink`/`pageCount`/`redact`/`scrub`/
 `convert`/`extract`/`summarize`/`wrapHandle`/`unwrapHandle`/`stamp`), which gets built into a
@@ -98,6 +98,12 @@ piped value on `'proceed'`. A
 `catch` step runs its `try` branch and, on any thrown error, re-runs its
 `catch` branch against the original input instead of aborting the whole
 pipe — e.g. `{ tag: 'catch', try: <primary sink>, catch: <fallback sink> }`.
+Where `catch` routes on failure, `cond` routes on the piped *value* — its
+`cases` array is checked in order, each a `{ when, then }` pair whose `when` is a
+constrained, declarative predicate (`{ field?, equals }` or `{ field?, in }` over a
+JSON scalar, never eval'd code), running the first match's `then` branch against
+the original input; `default` runs when nothing matches (or the node throws if
+`default` is absent) — e.g. `{ tag: 'cond', cases: [{ when: { field: 'format', equals: 'zip' }, then: <unzip path> }], default: <passthrough> }`.
 Handle-shaped values thread
 through as `{ $handle: true, base64, type? }` on the way in and `{ base64, type, size }`
 on the way out. `POST /op/run` and the `run_pipeline` MCP tool take this JSON directly;

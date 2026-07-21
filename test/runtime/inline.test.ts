@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
-import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
+import { op, pipe, map, mapField, reconcile, sink, catchOp, cond } from '../../src/op/combinators.js'
 import { fixed, aimd } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
@@ -156,6 +156,36 @@ test('runInline propagates the catch branch\'s own error when the fallback also 
     op('boom2', async () => { throw new Error('fallback failed too') }, { kind: 'pure' }),
   )
   await expect(runInline(tree, 5, caps)).rejects.toThrow('fallback failed too')
+})
+
+test('runInline runs the first matching cond case\'s branch against the piped value (#196)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = cond([
+    { when: { field: 'kind', equals: 'a' }, then: op('a', async (v: any) => `a:${v.n}`, { kind: 'pure' }) },
+    { when: { field: 'kind', equals: 'b' }, then: op('b', async (v: any) => `b:${v.n}`, { kind: 'pure' }) },
+  ])
+  expect(await runInline(tree, { kind: 'b', n: 1 }, caps)).toBe('b:1')
+})
+
+test('runInline\'s cond falls back to `default` when no case matches, and throws with neither (#196)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const withDefault = cond(
+    [{ when: { field: 'kind', equals: 'a' }, then: op('a', async () => 'a', { kind: 'pure' }) }],
+    op('fallback', async () => 'fallback', { kind: 'pure' }),
+  )
+  expect(await runInline(withDefault, { kind: 'z' }, caps)).toBe('fallback')
+
+  const withoutDefault = cond([{ when: { field: 'kind', equals: 'a' }, then: op('a', async () => 'a', { kind: 'pure' }) }])
+  await expect(runInline(withoutDefault, { kind: 'z' }, caps)).rejects.toThrow(/no case matched/)
+})
+
+test('runInline\'s cond matches an `in` predicate, and compares the piped value itself when `field` is omitted (#196)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = cond([
+    { when: { in: ['x', 'y'] }, then: op('matched', async (v: string) => `matched:${v}`, { kind: 'pure' }) },
+  ], op('default', async () => 'default', { kind: 'pure' }))
+  expect(await runInline(tree, 'y', caps)).toBe('matched:y')
+  expect(await runInline(tree, 'z', caps)).toBe('default')
 })
 
 test('runInline rejects with OpAbortError before running any node when gOpts.signal is already aborted (#279)', async () => {

@@ -278,6 +278,22 @@ describe('mcp adapter', () => {
     expect(parseResult(result)).toEqual({ a: 1 })
   })
 
+  it('run_pipeline: a cond spec reaches buildOp through the MCP tool schema (not silently stripped), routing on the piped value (#196)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: {
+          tag: 'cond',
+          cases: [{ when: { field: 'kind', equals: 'a' }, then: { tag: 'leaf', name: 'unwrapHandle' } }],
+          default: { tag: 'sink', targets: ['store'] },
+        },
+        input: { kind: 'z', a: 1 },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ kind: 'z', a: 1 })
+  })
+
   it('run_pipeline: an ask spec reaches buildOp through the MCP tool schema (not silently stripped), degrading gracefully with no Ask capability wired (#181)', async () => {
     const result = await client.callTool({
       name: 'run_pipeline',
