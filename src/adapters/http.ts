@@ -9,7 +9,7 @@ import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
-import { runOpSpec } from './op-run.js'
+import { runOpSpec, runOpSpecStatus, unwrapOpRunOutcome } from './op-run.js'
 import { validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import { planOpSpec } from '../op/plan.js'
@@ -70,7 +70,12 @@ function errorResponse(e: unknown, status = 400): Response {
 // threaded to runOpSpec's `checkpoint` opt so a crashed `POST /op/run` run
 // can be resumed by a later call sharing the same `runId` (returned in the
 // response body once opRunCheckpoint is set). Omitted entirely, `POST
-// /op/run`'s response shape is unchanged from before #396.
+// /op/run`'s response shape is unchanged from before #396. Also required for
+// `POST /op/run/status` (#409) -- a cheap `{ done, result? }` poll of a
+// checkpointed run, given the exact `spec`/`input` it ran with (to recompute
+// runSig, same #398 guard runOpSpec itself applies) and its `runId` -- so a
+// caller with a long-running run can poll instead of holding one HTTP
+// connection open for the run's entire duration.
 //
 // allowRoutes: restrict routing to these paths (e.g. "/transform",
 // "/sanitize/text") — every route is reachable when omitted. Mirrors
@@ -254,12 +259,19 @@ const routes: Route[] = [
       // (#279) unless a host-supplied opRunGOpts already declares one.
       const gOpts = signal ? { ...env.opRunGOpts, signal: env.opRunGOpts?.signal ?? signal } : env.opRunGOpts
       const outcome = await runOpSpec({ spec: body.spec as OpSpec, input: body.input, trace, runId }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts, ask: env.opRunAsk, checkpoint: env.opRunCheckpoint })
-      // runOpSpec already returns a wrapped object (carrying `runId`, and
-      // `trace` when requested) whenever a checkpoint capability is
-      // configured -- see op-run.ts's runOpSpec doc -- so only the bare
-      // dehydrated-result case (no trace, no checkpoint) still needs
-      // wrapping here.
-      return json((trace || env.opRunCheckpoint) ? (outcome as object) : { result: outcome })
+      return json(unwrapOpRunOutcome(outcome, trace, env.opRunCheckpoint) as object)
+    },
+  },
+  {
+    method: 'POST',
+    path: '/op/run/status',
+    handle: async (rawBody, env) => {
+      const body = rawBody as { spec?: unknown; input?: unknown; runId?: unknown }
+      if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (the exact op-tree JSON description the run used) is required'))
+      if (typeof body.runId !== 'string') return errorResponse(new Error('`runId` is required'))
+      if (!env.opRunCheckpoint) return errorResponse(new Error('`POST /op/run/status` requires `opRunCheckpoint` to be configured'))
+      const status = await runOpSpecStatus({ spec: body.spec as OpSpec, input: body.input, runId: body.runId }, { checkpoint: env.opRunCheckpoint, store: env.opRunStore })
+      return json(status)
     },
   },
   {

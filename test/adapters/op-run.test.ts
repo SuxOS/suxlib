@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { zipSync } from 'fflate'
-import { runOpSpec } from '../../src/adapters/op-run.js'
+import { runOpSpec, runOpSpecStatus } from '../../src/adapters/op-run.js'
 import { bytesToB64 } from '../../src/adapters/base64.js'
 import type { OpSpec } from '../../src/op/spec.js'
 import { createGovernor } from '../../src/control/governor.js'
@@ -362,4 +362,57 @@ test('runOpSpec: trace: true plus opts.checkpoint returns { result, trace, runId
   expect(outcome.result).toEqual({ a: 1 })
   expect(outcome.trace.length).toBeGreaterThan(0)
   expect(outcome.runId).toBeTypeOf('string')
+})
+
+test('runOpSpecStatus: reports { done: false } for a runId with no recorded checkpoint entry', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const status = await runOpSpecStatus({ spec, input: { a: 1 }, runId: 'never-ran' }, { checkpoint })
+  expect(status).toEqual({ done: false })
+})
+
+test('runOpSpecStatus: reports { done: true, result } for a finished run, given the same spec/input/runId it ran with (#409)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  const first = await runOpSpec(
+    { spec, input: { a: 1 } },
+    { leaves: { shout: async (input) => input }, checkpoint },
+  ) as { result: unknown; runId: string }
+
+  const status = await runOpSpecStatus({ spec, input: { a: 1 }, runId: first.runId }, { checkpoint })
+  expect(status).toEqual({ done: true, result: { a: 1 } })
+})
+
+test('runOpSpecStatus: dehydrates a Handle-shaped recorded result back to base64 when opts.store is supplied', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const store = new MemoryStore()
+  const spec: OpSpec = { tag: 'leaf', name: 'unzip' }
+  const png = buildMinimalPng()
+  const zipBytes = zipSync({ 'a.png': png })
+  const first = await runOpSpec(
+    { spec, input: { $handle: true, base64: bytesToB64(zipBytes) } },
+    { checkpoint, store },
+  ) as { result: unknown; runId: string }
+  expect(Array.isArray(first.result)).toBe(true)
+
+  const status = await runOpSpecStatus({ spec, input: { $handle: true, base64: bytesToB64(zipBytes) }, runId: first.runId }, { checkpoint, store })
+  expect(status.done).toBe(true)
+  if (status.done) {
+    const results = status.result as Array<{ base64: string; type: string; size: number }>
+    expect(results.length).toBe(1)
+    expect(results[0].base64).toBeTypeOf('string')
+  }
+})
+
+test('runOpSpecStatus: a status query naming another run\'s runId but a different spec/input reports { done: false } instead of leaking that run\'s result (#398 guard applied to status queries too)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const victimSpec: OpSpec = { tag: 'leaf', name: 'victimLeaf' }
+  const first = await runOpSpec(
+    { spec: victimSpec, input: { a: 1 } },
+    { leaves: { victimLeaf: async (input) => ({ secret: 'victim-data', input }) }, checkpoint },
+  ) as { result: unknown; runId: string }
+
+  const attackerSpec: OpSpec = { tag: 'leaf', name: 'victimLeaf' }
+  const status = await runOpSpecStatus({ spec: attackerSpec, input: { a: 'attacker' }, runId: first.runId }, { checkpoint })
+  expect(status).toEqual({ done: false })
 })

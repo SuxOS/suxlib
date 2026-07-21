@@ -126,3 +126,34 @@ test('runInline checkpoints a sink target independently of its siblings, so a re
   expect(logCalls).toEqual(['payload'])
   expect(vaultAttempts).toBe(2)
 })
+
+test('runInline resumes a sink.fanout with duplicate target names, re-running only the copy that never finished (#423)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  let attempts = 0
+  const caps: any = {
+    store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, checkpoint,
+    sinks: {
+      a: {
+        name: 'a',
+        write: async (v: any) => {
+          attempts++
+          // Only the first of the two 'a' targets (by index) ever succeeds
+          // on the first pass -- the second is left unfinished, simulating a
+          // crash between the two concurrent writes completing.
+          if (attempts === 2) throw new Error('crash before second a finishes')
+          return v
+        },
+      },
+    },
+  }
+  const tree = sink.fanout(['a', 'a'])
+  const runId = 'resume-run'
+  await expect(runInline(tree, 'payload', caps, undefined, '', runId)).rejects.toThrow('crash before second a finishes')
+  expect(attempts).toBe(2)
+  const result = await runInline(tree, 'payload', caps, undefined, '', runId)
+  expect(result).toBe('payload')
+  // Only the target that never checkpointed gets a fresh attempt -- if the
+  // two 'a' targets shared one checkpoint key, the resume would either skip
+  // both (attempts stays at 2) or redo both (attempts jumps to 4).
+  expect(attempts).toBe(3)
+})

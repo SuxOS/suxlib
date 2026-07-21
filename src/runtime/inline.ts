@@ -102,6 +102,18 @@ let traceCallSeq = 0
 // also set, it can be handed to snapshotValue alongside `fn`'s result -- a
 // second, separately-gated cost layered on top of the timing/ok/error trace
 // (see trace.ts's header comment).
+//
+// \0 can't appear in a caller-supplied runId/runSig (a UUID or hex digest),
+// so this can't collide with an unnamespaced key -- and when runSig is ''
+// (the default for every caller that doesn't opt in), this reduces to the
+// bare `runId` used before #398, unchanged. Exported so a cheap status query
+// (src/adapters/op-run.ts's runOpSpecStatus, #409) can address the exact
+// same root-node ((runId, runSig), '') entry traced() itself writes, without
+// re-deriving this namespacing rule at a second call site.
+export function checkpointKey(runId: string, runSig: string): string {
+  return runSig ? `${runId}\0${runSig}` : runId
+}
+
 async function traced<T>(tag: string, name: string | undefined, path: string, runId: string, runSig: string, caps: Caps, gOpts: RunGovernedOpts | undefined, input: unknown, fn: (callId: string) => Promise<T>): Promise<T> {
   // Cooperative-cancellation checkpoint (#279): every node runInline
   // dispatches -- leaf, pipe step, map/mapField item, reconcile, sink
@@ -109,11 +121,7 @@ async function traced<T>(tag: string, name: string | undefined, path: string, ru
   // so one check here is equivalent to a check at every one of those sites.
   if (gOpts?.signal?.aborted) throw new OpAbortError()
   const checkpoint = caps.checkpoint
-  // \0 can't appear in a caller-supplied runId/runSig (a UUID or hex
-  // digest), so this can't collide with an unnamespaced key -- and when
-  // runSig is '' (the default for every caller that doesn't opt in), this
-  // reduces to the bare `runId` used before #398, unchanged.
-  const checkpointRunId = checkpoint && runSig ? `${runId}\0${runSig}` : runId
+  const checkpointRunId = checkpointKey(runId, runSig)
   if (checkpoint) {
     const recorded = await checkpoint.get(checkpointRunId, path)
     if (recorded) return recorded.value as T
@@ -221,14 +229,24 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
       // guarantees every target's node-exit has landed before this node decides
       // success/failure.
       return traced('sink', undefined, path, runId, runSig, caps, gOpts, input, async () => {
-        const results = await Promise.allSettled(node.targets.map(t => {
+        const results = await Promise.allSettled(node.targets.map((t, i) => {
           // A bare string target falls back entirely to the fanout call's own
           // `opts`; a `{ name, opts }` pair overrides per-field, per-target
           // (#251) -- e.g. target 'vault' can opt out of the fanout's default
           // retries by declaring its own `opts: { retries: 0 }`.
           const name = typeof t === 'string' ? t : t.name
           const targetOpts = typeof t === 'string' ? undefined : t.opts
-          return traced('sink-target', name, childPath(path, name), runId, runSig, caps, gOpts, input, async (callId) => {
+          // Keyed by index, not name (#423): sink.fanout(['a', 'a']) is valid
+          // (src/op/spec.ts never rejects duplicate target names), so two
+          // concurrent targets sharing a name would otherwise collide on one
+          // childPath(path, name) checkpoint key -- a resume after a crash
+          // between the two writes would then read the first write's
+          // recorded value for both, silently never re-attempting the second
+          // target's write. The array index is deterministic across resumes
+          // of the same OpSpec, unlike callId (a fresh per-process counter),
+          // so it's safe to use as a durable checkpoint path segment, the
+          // same way map/mapField already key their per-item paths by index.
+          return traced('sink-target', name, childPath(path, i), runId, runSig, caps, gOpts, input, async (callId) => {
             const s = caps.sinks[name]
             if (!s) throw new Error(`unknown sink "${name}" (registered: ${Object.keys(caps.sinks).join(', ')})`)
             // Each write runs through runGoverned exactly like an 'effect' leaf's

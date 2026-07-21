@@ -10,7 +10,7 @@ import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES } from '../domain/sanitize.js'
 import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
-import { runOpSpec } from './op-run.js'
+import { runOpSpec, runOpSpecStatus } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
 import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, MAX_SINK_TARGETS, validateOpSpec, type OpSpec } from '../op/spec.js'
@@ -189,7 +189,9 @@ export type RegisterFileopsToolsOptions = {
    * caller resume a crashed run by re-submitting the `runId` a prior call's
    * response returned (only returned once `opRunCheckpoint` is configured),
    * instead of re-executing every node from scratch. Omitted entirely,
-   * `run_pipeline`'s response shape is unchanged from before #396.
+   * `run_pipeline`'s response shape is unchanged from before #396. Also
+   * required for `check_pipeline_status` (#409), a cheap `{ done, result? }`
+   * poll of a checkpointed run.
    */
   opRunCheckpoint?: Checkpoint
 }
@@ -382,6 +384,24 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
           }
         }
         return textResult(await runOpSpec({ spec, input, trace, runId }, { governors: opts.opRunGovernors, cache: opts.opRunCache, store: opts.opRunStore, sinks: opts.opRunSinks, llm: opts.opRunLlm, leaves: opts.opRunLeaves, gOpts, ask: opts.opRunAsk, checkpoint: opts.opRunCheckpoint }))
+      },
+    )
+  }
+
+  if (enabled('check_pipeline_status')) {
+    server.registerTool(
+      'check_pipeline_status',
+      {
+        description:
+          'Cheaply check whether a previously checkpointed `run_pipeline` call has finished, without re-executing it (#409). ' +
+          'Requires the exact `spec`/`input` the run used (to recompute its runSig, the same #398 guard `run_pipeline` itself applies) ' +
+          'and the `runId` that call returned. Requires `opRunCheckpoint` to be configured server-side; returns `{ done: false }` for a ' +
+          'run that is still in progress, crashed mid-run, or never started -- those aren\'t distinguishable from each other yet.',
+        inputSchema: { spec: opSpecSchema, input: z.unknown(), runId: z.string() },
+      },
+      async ({ spec, input, runId }) => {
+        if (!opts.opRunCheckpoint) throw new Error('check_pipeline_status requires opRunCheckpoint to be configured')
+        return textResult(await runOpSpecStatus({ spec, input, runId }, { checkpoint: opts.opRunCheckpoint, store: opts.opRunStore }))
       },
     )
   }
