@@ -1,9 +1,9 @@
 # @suxos/lib
 
 SuxOS's shared, dependency-light **pure core + adapters** library — the home of the
-**op engine** (`op`/`map`/`reconcile`/`pipe`/`sink`/`ask`, the `runInline` graduated
-runtime) and of `sux-fileops`'s absorbed domain logic (archive/pdf/sanitize/transform),
-exposed identically over CLI, HTTP, and MCP.
+**op engine** (`op`/`map`/`mapField`/`reconcile`/`pipe`/`sink`/`ask`/`catch`, the
+`runInline` graduated runtime) and of `sux-fileops`'s absorbed domain logic
+(archive/pdf/sanitize/transform), exposed identically over CLI, HTTP, and MCP.
 
 ## Install
 
@@ -76,16 +76,28 @@ on) and only differs in how it reads input and shapes output:
 ### Composable pipelines: `POST /op/run` and the `run_pipeline` MCP tool
 
 Beyond one-shot single-leaf calls, all three adapters also expose the op engine
-itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'sink' | 'reconcile', ... }` spec
-(`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`
-(`pack`/`unpack`/`shrink`/`redact`/`scrub`/`convert`/`unzip`), which gets built into a
+itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask', ... }`
+spec (`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`'s
+`LEAF_REGISTRY` (`pack`/`unpack`/`unzip`/`shrink`/`pageCount`/`redact`/`scrub`/
+`convert`/`extract`/`summarize`/`wrapHandle`/`unwrapHandle`/`stamp`), which gets built into a
 real `Op` tree and run via `runInline` — a multi-step job (e.g. unzip a bundle,
-transform each entry) runs as one call instead of several round trips. A `sink` step
-names its target(s) by string, resolved against `Caps.sinks`/`OpRunOpts.sinks` at run
-time, and a `reconcile` step needs only `caps.store`, which every adapter call already
-supplies — neither needs a live capability inside the spec itself, so both are
-spec-expressible. `ask` is the sole exception still not accepted from a spec, since it
-needs a host-supplied `Ask` implementation a stateless call has no way to provide.
+transform each entry) runs as one call instead of several round trips. A `mapField`
+step runs an inner op over one named field of each element of a named array field,
+reattaching the rest of each element untouched and optionally renaming the array field
+itself — e.g. `unpack -> mapField(arrayField: 'entries', elementField: 'handle',
+renameTo: 'files') -> pack` transforms every archive entry's Handle in between while
+bridging `unpack`'s `entries` output into `pack`'s `files` input, something `map` alone
+can't do since it only replaces a whole array element. A `sink` step names its
+target(s) by string, resolved against `Caps.sinks`/`OpRunOpts.sinks` at run time, and a
+`reconcile` step needs only `caps.store`, which every adapter call already supplies —
+neither needs a live capability inside the spec itself, so both are spec-expressible.
+An `ask` step builds a real `ask()` op node directly from the spec (`prompt`,
+`timeout`, `onTimeout`); with no host-supplied `Ask` capability, `runInline`
+degrades gracefully — it throws on `onTimeout: 'fail'` or proceeds with the
+piped value on `'proceed'`. A
+`catch` step runs its `try` branch and, on any thrown error, re-runs its
+`catch` branch against the original input instead of aborting the whole
+pipe — e.g. `{ tag: 'catch', try: <primary sink>, catch: <fallback sink> }`.
 Handle-shaped values thread
 through as `{ $handle: true, base64, type? }` on the way in and `{ base64, type, size }`
 on the way out. `POST /op/run` and the `run_pipeline` MCP tool take this JSON directly;
@@ -93,6 +105,31 @@ on the way out. `POST /op/run` and the `run_pipeline` MCP tool take this JSON di
 local JSON file, resolving any input value shaped `{ "$file": "<path>", "type"?:
 "<mime>" }` off disk into a Handle ref, and (with `-o <dir>`) writing dehydrated Handle
 results back to files instead of inlining base64 in the printed JSON.
+
+To discover what a spec can currently contain — registered leaf names and their
+declared input/output shapes, sink target names, reconcile modes, and field-merge
+policies — without reading source, all three adapters also expose a read-only schema
+query: `GET /op/schema`, the `describe_pipeline` MCP tool, and `suxlib-fileops pipeline
+describe`. Each merges in any host-registered `opRunLeaves`/`opRunSinks` alongside the
+built-in registry, the same way `POST /op/run`/`run_pipeline`/`pipeline run` do.
+
+To check a spec for structural problems (unknown leaf names, out-of-range
+retries/concurrency, malformed `ask`/`reconcile`/`mapField` fields, mismatched
+pipe-adjacency shapes, ...) without running it, all three adapters also expose a
+non-executing validate: `POST /op/validate`, the `validate_pipeline` MCP tool, and
+`suxlib-fileops pipeline validate <spec-file>`. Unlike `buildOp` (which throws on the
+first problem it finds), validate walks the whole spec and returns every error in one
+pass — `{ valid, errors: [{ path, message }] }` — so a caller composing a nontrivial
+spec doesn't need one round-trip per mistake.
+
+To estimate a spec's blast radius before actually running it, all three adapters also
+expose a non-executing plan: `POST /op/plan`, the `plan_pipeline` MCP tool, and
+`suxlib-fileops pipeline plan <spec-file>`. It reports total node count, the widest
+`map`/`mapField` `concurrency` declared anywhere in the tree, the worst-case
+Σ(retries+1) retry multiplier across every leaf/sink, and which optional capabilities
+(`ask`, `cache` via `opts.memo`, `llm` via `extract`/`summarize`, and named `sink`
+targets) the spec will reach if run — all figures a caller can compute from the spec's
+own shape, without touching `caps.store`/`llm`/`sinks` or building the real `Op` tree.
 
 ## Development
 

@@ -46,8 +46,8 @@ test('runInline forwards gOpts to runGoverned: onEvent fires and custom sleep/ra
   })
   expect(result).toBe('ok')
   expect(events).toEqual([
-    { kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number) },
-    { kind: 'retry-attempt', name: 'flaky', attempt: 1, delayMs: expect.any(Number) },
+    { kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number), runId: expect.any(String), callId: expect.any(String) },
+    { kind: 'retry-attempt', name: 'flaky', attempt: 1, delayMs: expect.any(Number), runId: expect.any(String), callId: expect.any(String) },
   ])
   expect(sleeps.length).toBe(2)
 })
@@ -60,7 +60,7 @@ test('runInline forwards gOpts through pipe and map recursion', async () => {
   const tree = pipe(leaf)
   const result = await runInline(tree, null, caps, { onEvent: (e) => events.push(e), sleep: async () => {} })
   expect(result).toBe('ok')
-  expect(events).toEqual([{ kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number) }])
+  expect(events).toEqual([{ kind: 'retry-attempt', name: 'flaky', attempt: 0, delayMs: expect.any(Number), runId: expect.any(String), callId: expect.any(String) }])
 })
 
 test('runInline gates an effect leaf through caps.governors[name].concurrency, never exceeding its limit', async () => {

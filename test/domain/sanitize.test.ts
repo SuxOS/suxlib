@@ -31,11 +31,24 @@ test('redactText honors the types subset', () => {
   expect(out.redacted).toContain('10.0.0.1')
 })
 
+test('redactText treats an explicit empty types array as "redact none", not "redact all"', () => {
+  const out = redactText('a@b.com', [])
+  expect(out.redacted).toBe('a@b.com')
+  expect(out.counts).toEqual({})
+})
+
 test('redactText only redacts a bare 9-digit SSN when nearby context labels it', () => {
   const labeled = redactText('SSN: 123456789')
   expect(labeled.redacted).toContain('[REDACTED:ssn]')
   const unlabeled = redactText('order number 123456789')
   expect(unlabeled.redacted).toContain('123456789')
+})
+
+test('redactText also redacts a bare 9-digit SSN when the label trails the number', () => {
+  const trailingLabel = redactText('123456789 is my SSN')
+  expect(trailingLabel.redacted).toContain('[REDACTED:ssn]')
+  const trailingPhrase = redactText('Please use 123456789 (this is your social security number)')
+  expect(trailingPhrase.redacted).toContain('[REDACTED:ssn]')
 })
 
 test('redact (Handle-based leaf) round-trips text through a Store and reports the same counts as redactText', async () => {
@@ -78,6 +91,46 @@ test('scrub (Handle-based leaf) round-trips a PNG through a Store and reports th
   expect(detectImageKind(await resolve(store, result.handle))).toBe('png')
 })
 
+test('sanitizeImage drops a PNG eXIf chunk with default Orientation (1) entirely', () => {
+  const png = buildMinimalPng({ exifOrientation: 1 })
+  const result = sanitizeImage(png)
+  expect(findPngChunk(result.bytes, 'eXIf')).toBeNull()
+})
+
+test('sanitizeImage preserves a PNG eXIf chunk carrying a non-default Orientation instead of dropping it', () => {
+  const png = buildMinimalPng({ exifOrientation: 6 })
+  const result = sanitizeImage(png)
+  const exif = findPngChunk(result.bytes, 'eXIf')
+  expect(exif).not.toBeNull()
+  expect(readOrientationLE(exif!)).toBe(6)
+})
+
+test('sanitizeImage drops a PNG eXIf chunk whose Orientation entry has an out-of-range value', () => {
+  const png = buildMinimalPng({ exifOrientation: 42 })
+  const result = sanitizeImage(png)
+  expect(findPngChunk(result.bytes, 'eXIf')).toBeNull()
+})
+
+test('sanitizeImage drops a PNG eXIf chunk whose Orientation entry has the wrong TIFF type', () => {
+  const payload = tiffOrientationPayload(6)
+  payload[12] = 0x04 // type LONG instead of SHORT(3)
+  const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const ihdr = chunk('IHDR', new Uint8Array(13))
+  const exif = chunk('eXIf', payload)
+  const idat = chunk('IDAT', new Uint8Array([0]))
+  const iend = chunk('IEND', new Uint8Array(0))
+  const parts = [sig, ihdr, exif, idat, iend]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const badPng = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    badPng.set(p, off)
+    off += p.length
+  }
+  const result = sanitizeImage(badPng)
+  expect(findPngChunk(result.bytes, 'eXIf')).toBeNull()
+})
+
 test('sanitizeImage rejects an image over MAX_IMAGE_INPUT_BYTES', () => {
   const big = new Uint8Array(MAX_IMAGE_INPUT_BYTES + 1)
   big.set([0x89, 0x50, 0x4e, 0x47])
@@ -99,6 +152,51 @@ test('sanitizeImage keeps an ICC color profile (APP2) while dropping EXIF (APP1)
   const exifTag = Array.from(new TextEncoder().encode('Exif\0\0'))
   const hasExif = bytes.some((_, i) => exifTag.every((b, k) => bytes[i + k] === b))
   expect(hasExif).toBe(false)
+})
+
+test('sanitizeImage keeps an ICC color profile (APP2) placed after the first SOS scan of a progressive JPEG', () => {
+  const soi = new Uint8Array([0xff, 0xd8])
+  const sos1 = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0xaa, 0xbb])
+  const app2Icc = jpegSegment(0xe2, new TextEncoder().encode('ICC_PROFILE\0fake-profile-bytes'))
+  const sos2 = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0xcc, 0xdd, 0xff, 0xd9])
+  const parts = [soi, sos1, app2Icc, sos2]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const jpeg = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    jpeg.set(p, off)
+    off += p.length
+  }
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).toContain('fake-profile-bytes')
+})
+
+test('sanitizeImage strips a metadata segment placed after the first SOS scan of a progressive JPEG', () => {
+  const soi = new Uint8Array([0xff, 0xd8])
+  // First scan: SOS header (len=2, no extra header bytes) + entropy data containing
+  // a stuffed 0xFF00 byte and an in-scan RST0 marker, both of which must be treated
+  // as scan content rather than segment boundaries.
+  const sos1 = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0xaa, 0xff, 0x00, 0xff, 0xd0, 0xbb])
+  const app1Exif = jpegSegment(0xe1, new TextEncoder().encode('Exif\0\0second-scan-exif'))
+  // Second scan, terminated by EOI.
+  const sos2 = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0xcc, 0xdd, 0xff, 0xd9])
+  const parts = [soi, sos1, app1Exif, sos2]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const jpeg = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    jpeg.set(p, off)
+    off += p.length
+  }
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).not.toContain('second-scan-exif')
+  const bytes = Array.from(result.bytes)
+  // The first scan's stuffed 0xFF00 and RST0 marker survive untouched (real entropy content).
+  expect(bytes.slice(6, 12)).toEqual([0xaa, 0xff, 0x00, 0xff, 0xd0, 0xbb])
+  // Second scan's entropy data and EOI still present after the stripped APP1.
+  expect(bytes.slice(-4)).toEqual([0xcc, 0xdd, 0xff, 0xd9])
 })
 
 test('sanitizeImage preserves all segments of a multi-segment (>64KB) ICC profile', () => {
@@ -161,6 +259,85 @@ test('sanitizeImage drops multiple ICC-tagged APP2 segments whose sequence/total
   expect(text).not.toContain('profile-part-2')
 })
 
+test('sanitizeImage preserves EXIF Orientation as a minimal synthetic APP1 while stripping the rest of EXIF (#360)', () => {
+  const orientation = 6
+  const payload = buildExifOrientationPayload(orientation, 'SecretCameraMake')
+  const jpeg = buildJpegWithExif(payload)
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).not.toContain('SecretCameraMake')
+  expect(text).toContain('Exif\0\0')
+  const bytes = Array.from(result.bytes)
+  // tag 0x0112 (LE), type SHORT (3), count 1, value = orientation
+  const orientationEntry = [0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, orientation, 0x00, 0x00, 0x00]
+  const hasOrientationEntry = bytes.some((_, i) => orientationEntry.every((b, k) => bytes[i + k] === b))
+  expect(hasOrientationEntry).toBe(true)
+})
+
+test('sanitizeImage drops EXIF entirely when Orientation is 1 (normal), same as before #360', () => {
+  const payload = buildExifOrientationPayload(1, 'SecretCameraMake')
+  const jpeg = buildJpegWithExif(payload)
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).not.toContain('Exif\0\0')
+  expect(text).not.toContain('SecretCameraMake')
+})
+
+test('sanitizeImage drops EXIF entirely when it has no parseable Orientation tag, same as before #360', () => {
+  // A big-endian TIFF header, IFD0 with zero entries -- no Orientation tag present.
+  const tiff = Uint8Array.from([0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+  const jpeg = buildJpegWithExif(tiff)
+  const result = sanitizeImage(jpeg)
+  const text = new TextDecoder('latin1').decode(result.bytes)
+  expect(text).not.toContain('Exif\0\0')
+})
+
+// ---- EXIF Orientation builders for the #360 tests above ----
+function u16le(v: number): number[] {
+  return [v & 0xff, (v >> 8) & 0xff]
+}
+function u32le(v: number): number[] {
+  return [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff]
+}
+function buildExifOrientationPayload(orientation: number, makeString: string): Uint8Array {
+  const enc = new TextEncoder()
+  const makeBytes = enc.encode(makeString + '\0')
+  const ifd0Offset = 8
+  const entryCount = 2
+  const ifd0Size = 2 + entryCount * 12 + 4
+  const stringOffset = ifd0Offset + ifd0Size
+  const out: number[] = [
+    0x49, 0x49, 0x2a, 0x00, // "II", 42 (little-endian)
+    ...u32le(ifd0Offset),
+    ...u16le(entryCount),
+    // entry: Make (0x010f), ASCII (2), count=makeBytes.length, offset=stringOffset (out-of-line)
+    ...u16le(0x010f), ...u16le(2), ...u32le(makeBytes.length), ...u32le(stringOffset),
+    // entry: Orientation (0x0112), SHORT (3), count=1, value=orientation (inline)
+    ...u16le(0x0112), ...u16le(3), ...u32le(1), orientation & 0xff, 0x00, 0x00, 0x00,
+    ...u32le(0), // next IFD offset
+    ...makeBytes,
+  ]
+  return Uint8Array.from(out)
+}
+function buildJpegWithExif(exifPayload: Uint8Array): Uint8Array {
+  const enc = new TextEncoder()
+  const full = new Uint8Array(6 + exifPayload.length)
+  full.set(enc.encode('Exif\0\0'), 0)
+  full.set(exifPayload, 6)
+  const soi = new Uint8Array([0xff, 0xd8])
+  const app1 = jpegSegment(0xe1, full)
+  const sos = new Uint8Array([0xff, 0xda, 0x00, 0x02, 0x00, 0x01, 0xff, 0xd9])
+  const parts = [soi, app1, sos]
+  const total = parts.reduce((n, p) => n + p.length, 0)
+  const jpeg = new Uint8Array(total)
+  let off = 0
+  for (const p of parts) {
+    jpeg.set(p, off)
+    off += p.length
+  }
+  return jpeg
+}
+
 // ---- minimal JPEG builder for the ICC-preservation test above ----
 function jpegSegment(marker: number, payload: Uint8Array): Uint8Array {
   const len = payload.length + 2
@@ -208,11 +385,41 @@ function chunk(type: string, data: Uint8Array): Uint8Array {
   dv.setUint32(8 + len, crc32(crcInput))
   return out
 }
-function buildMinimalPng(opts: { tEXt?: boolean }): Uint8Array {
+function findPngChunk(bytes: Uint8Array, type: string): Uint8Array | null {
+  let i = 8
+  while (i + 8 <= bytes.length) {
+    const len = ((bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3]) >>> 0
+    const t = String.fromCharCode(bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7])
+    if (t === type) return bytes.slice(i + 8, i + 8 + len)
+    i += 8 + len + 4
+    if (t === 'IEND') break
+  }
+  return null
+}
+function readOrientationLE(tiff: Uint8Array): number {
+  const ifdOffset = tiff[4] | (tiff[5] << 8) | (tiff[6] << 16) | (tiff[7] << 24)
+  const entryOffset = ifdOffset + 2 // first (only) entry
+  return tiff[entryOffset + 8] | (tiff[entryOffset + 9] << 8)
+}
+function tiffOrientationPayload(orientation: number): Uint8Array {
+  return new Uint8Array([
+    0x49, 0x49, // 'II' little-endian
+    0x2a, 0x00, // TIFF magic 42
+    0x08, 0x00, 0x00, 0x00, // offset to IFD0
+    0x01, 0x00, // 1 entry
+    0x12, 0x01, // tag 0x0112 Orientation
+    0x03, 0x00, // type SHORT
+    0x01, 0x00, 0x00, 0x00, // count 1
+    orientation & 0xff, (orientation >> 8) & 0xff, 0x00, 0x00, // value + padding
+    0x00, 0x00, 0x00, 0x00, // next IFD offset
+  ])
+}
+function buildMinimalPng(opts: { tEXt?: boolean; exifOrientation?: number }): Uint8Array {
   const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
   const ihdr = chunk('IHDR', new Uint8Array(13)) // zeroed header, fine for a metadata-strip test
   const parts = [sig, ihdr]
   if (opts.tEXt) parts.push(chunk('tEXt', new TextEncoder().encode('Comment\0hello')))
+  if (opts.exifOrientation !== undefined) parts.push(chunk('eXIf', tiffOrientationPayload(opts.exifOrientation)))
   parts.push(chunk('IDAT', new Uint8Array([0])))
   parts.push(chunk('IEND', new Uint8Array(0)))
   const total = parts.reduce((n, p) => n + p.length, 0)

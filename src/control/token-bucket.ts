@@ -1,10 +1,11 @@
 import type { Clock } from '../effects/types.js'
 import type { GovernorEventHandler } from './events.js'
 import { backoffFullJitter } from './retry.js'
+import { OpAbortError, sleepOrAbort } from './abort.js'
 
 export interface TokenBucket {
   tryTake(cost: number, nowMs: number): boolean
-  take(cost: number, clock: Clock, sleep?: (ms: number) => Promise<void>): Promise<void>
+  take(cost: number, clock: Clock, sleep?: (ms: number) => Promise<void>, signal?: AbortSignal, runId?: string, callId?: string): Promise<void>
   readonly tokens: number
 }
 
@@ -23,21 +24,24 @@ export function tokenBucket(opts: { capacity: number; refillPerMs: number; clock
   const bucket: TokenBucket = {
     get tokens() { return tokens },
     tryTake(cost, nowMs) {
+      if (cost < 0) throw new Error(`tokenBucket.tryTake: cost ${cost} must not be negative`)
       refill(nowMs)
       if (tokens < cost) return false
       tokens -= cost
       return true
     },
-    async take(cost, clock, sleep = defaultSleep) {
+    async take(cost, clock, sleep = defaultSleep, signal, runId, callId) {
+      if (cost < 0) throw new Error(`tokenBucket.take: cost ${cost} must not be negative`)
       if (cost > opts.capacity) {
         throw new Error(`tokenBucket.take: requested cost ${cost} exceeds bucket capacity ${opts.capacity} and can never be satisfied`)
       }
+      if (signal?.aborted) throw new OpAbortError()
       let attempt = 0
       while (!bucket.tryTake(cost, clock.now())) {
         const delayMs = Math.max(1, backoffFullJitter(attempt, { base: 5, cap: 200 }))
-        opts.onEvent?.({ kind: 'token-wait', attempt, delayMs })
+        opts.onEvent?.({ kind: 'token-wait', attempt, delayMs, runId, callId })
         attempt++
-        await sleep(delayMs)
+        await sleepOrAbort(sleep, delayMs, signal)
       }
     },
   }

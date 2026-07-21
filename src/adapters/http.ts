@@ -10,9 +10,12 @@ import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../dom
 import { dispatchTransform, TRANSFORM_FORMATS, type Format } from '../domain/transform.js'
 import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
-import type { OpSpec } from '../op/spec.js'
+import { validateOpSpec, type OpSpec } from '../op/spec.js'
+import { describePipelineSchema } from '../op/introspect.js'
+import { planOpSpec } from '../op/plan.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
-import type { Cache, Store, Llm } from '../effects/types.js'
+import type { Cache, Store, Llm, Ask, Checkpoint } from '../effects/types.js'
+import type { RunGovernedOpts } from '../control/governor.js'
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
@@ -52,7 +55,28 @@ function errorResponse(e: unknown, status = 400): Response {
 // opRunLeaves: host-registered LeafFns merged onto LEAF_REGISTRY (see
 // op-run.ts's OpRunOpts doc), so a spec's `leaf.name` can resolve against
 // logic this library never shipped.
-export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn> }
+//
+// opRunGOpts: a host-supplied RunGovernedOpts (onEvent, custom backoff/sleep/
+// rand), passed through unchanged to runInline's 4th argument -- the only way
+// to observe retry-attempt/memo-hit/memo-miss GovernorEvents (see op-run.ts's
+// OpRunOpts doc). Omitted entirely, runInline's own defaults apply.
+//
+// opRunAsk: a host-supplied Ask implementation, threaded to runOpSpec's
+// `ask` opt so `POST /op/run` can resolve a spec's `ask` step against a real
+// human-in-the-loop capability instead of only ever hitting runInline's
+// no-capability fallback (see op-run.ts's OpRunOpts doc).
+//
+// opRunCheckpoint: a host-supplied Checkpoint implementation (#390/#396),
+// threaded to runOpSpec's `checkpoint` opt so a crashed `POST /op/run` run
+// can be resumed by a later call sharing the same `runId` (returned in the
+// response body once opRunCheckpoint is set). Omitted entirely, `POST
+// /op/run`'s response shape is unchanged from before #396.
+//
+// allowRoutes: restrict routing to these paths (e.g. "/transform",
+// "/sanitize/text") — every route is reachable when omitted. Mirrors
+// mcp.ts's `RegisterFileopsToolsOptions.allow`, so a host embedding this
+// Worker can expose a chosen subset without forking the route table.
+export type Env = { FILEOPS_AUTH_TOKEN?: string; opRunGovernors?: Record<string, Governor>; opRunCache?: Cache; opRunStore?: Store; opRunSinks?: Record<string, SinkTarget>; opRunLlm?: Llm; opRunLeaves?: Record<string, LeafFn>; opRunGOpts?: RunGovernedOpts; opRunAsk?: Ask; opRunCheckpoint?: Checkpoint; allowRoutes?: string[] }
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false
@@ -113,7 +137,7 @@ async function readCappedBody(request: Request): Promise<Uint8Array> {
   return out
 }
 
-type Route = { method: string; path: string; handle: (body: unknown, env: Env) => Promise<Response> }
+type Route = { method: string; path: string; handle: (body: unknown, env: Env, signal?: AbortSignal) => Promise<Response> }
 
 const routes: Route[] = [
   {
@@ -122,8 +146,13 @@ const routes: Route[] = [
     handle: async (rawBody) => {
       const body = rawBody as { format?: string; files?: Array<{ name: string; base64: string; mtime?: number }> }
       const format = (body.format ?? 'zip') as ArchiveFormat
-      if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, or gzip'))
+      if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, gzip, or tar.gz'))
       if (!Array.isArray(body.files) || !body.files.length) return errorResponse(new Error('`files` array required'))
+      for (const f of body.files) {
+        if (f.mtime !== undefined && !(typeof f.mtime === 'number' && Number.isFinite(f.mtime))) {
+          return errorResponse(new Error(`file '${f.name}' has a non-numeric mtime`))
+        }
+      }
       const entries = body.files.map((f) => ({ name: f.name, data: b64ToBytes(f.base64), mtime: f.mtime }))
       const out = archiveCreate(format, entries)
       return json({ format, mime: ARCHIVE_MIME[format], bytes: out.length, base64: bytesToB64(out) })
@@ -136,7 +165,7 @@ const routes: Route[] = [
       const body = rawBody as { format?: string; base64?: string }
       if (typeof body.base64 !== 'string' || !body.base64) return errorResponse(new Error('`base64` required'))
       const format = (body.format ?? 'zip') as ArchiveFormat
-      if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, or gzip'))
+      if (!ARCHIVE_FORMATS.includes(format)) return errorResponse(new Error('format must be zip, tar, gzip, or tar.gz'))
       const { entries, skipped } = archiveExtract(format, b64ToBytes(body.base64))
       return json({
         entries: entries.map((e) => ({ name: e.name, bytes: e.bytes, text: e.text, truncated: e.truncated, mtime: e.mtime, base64: bytesToB64(e.data) })),
@@ -216,11 +245,45 @@ const routes: Route[] = [
   {
     method: 'POST',
     path: '/op/run',
-    handle: async (rawBody, env) => {
-      const body = rawBody as { spec?: unknown; input?: unknown }
+    handle: async (rawBody, env, signal) => {
+      const body = rawBody as { spec?: unknown; input?: unknown; trace?: unknown; runId?: unknown }
       if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
-      const result = await runOpSpec({ spec: body.spec as OpSpec, input: body.input }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves })
-      return json({ result })
+      const trace = body.trace === true
+      const runId = typeof body.runId === 'string' ? body.runId : undefined
+      // The request's own AbortSignal wires into cooperative cancellation
+      // (#279) unless a host-supplied opRunGOpts already declares one.
+      const gOpts = signal ? { ...env.opRunGOpts, signal: env.opRunGOpts?.signal ?? signal } : env.opRunGOpts
+      const outcome = await runOpSpec({ spec: body.spec as OpSpec, input: body.input, trace, runId }, { governors: env.opRunGovernors, cache: env.opRunCache, store: env.opRunStore, sinks: env.opRunSinks, llm: env.opRunLlm, leaves: env.opRunLeaves, gOpts, ask: env.opRunAsk, checkpoint: env.opRunCheckpoint })
+      // runOpSpec already returns a wrapped object (carrying `runId`, and
+      // `trace` when requested) whenever a checkpoint capability is
+      // configured -- see op-run.ts's runOpSpec doc -- so only the bare
+      // dehydrated-result case (no trace, no checkpoint) still needs
+      // wrapping here.
+      return json((trace || env.opRunCheckpoint) ? (outcome as object) : { result: outcome })
+    },
+  },
+  {
+    method: 'GET',
+    path: '/op/schema',
+    handle: async (_rawBody, env) => json(describePipelineSchema(env.opRunLeaves, env.opRunSinks)),
+  },
+  {
+    method: 'POST',
+    path: '/op/validate',
+    handle: async (rawBody, env) => {
+      const body = rawBody as { spec?: unknown }
+      if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
+      const errors = validateOpSpec(body.spec as OpSpec, env.opRunLeaves)
+      return json({ valid: errors.length === 0, errors })
+    },
+  },
+  {
+    method: 'POST',
+    path: '/op/plan',
+    handle: async (rawBody) => {
+      const body = rawBody as { spec?: unknown }
+      if (!body.spec || typeof body.spec !== 'object') return errorResponse(new Error('`spec` (an op-tree JSON description) is required'))
+      return json(planOpSpec(body.spec as OpSpec))
     },
   },
 ]
@@ -228,10 +291,12 @@ const routes: Route[] = [
 export default {
   async fetch(request: Request, env: Env = {}): Promise<Response> {
     const url = new URL(request.url)
+    const allowRoutes = env.allowRoutes ? new Set(env.allowRoutes) : null
+    const activeRoutes = allowRoutes ? routes.filter((r) => allowRoutes.has(r.path)) : routes
     if (request.method === 'GET' && url.pathname === '/') {
-      return json({ ok: true, routes: routes.map((r) => `${r.method} ${r.path}`) })
+      return json({ ok: true, routes: activeRoutes.map((r) => `${r.method} ${r.path}`) })
     }
-    const route = routes.find((r) => r.method === request.method && r.path === url.pathname)
+    const route = activeRoutes.find((r) => r.method === request.method && r.path === url.pathname)
     if (!route) return json({ error: 'not found' }, 404)
     if (!isAuthorized(request, env)) return unauthorizedResponse()
     // Fast path: a declared Content-Length over the cap is rejected without
@@ -255,7 +320,7 @@ export default {
       return errorResponse(e, 400)
     }
     try {
-      return await route.handle(body, env)
+      return await route.handle(body, env, request.signal)
     } catch (e) {
       return errorResponse(e, 400)
     }

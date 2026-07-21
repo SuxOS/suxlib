@@ -1,9 +1,10 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
-import { op, pipe, map, reconcile, sink } from '../../src/op/combinators.js'
-import { fixed } from '../../src/control/aimd.js'
+import { op, pipe, map, mapField, reconcile, sink, catchOp } from '../../src/op/combinators.js'
+import { fixed, aimd } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
+import { createGovernor, OpAbortError } from '../../src/control/governor.js'
 test('runInline threads a pipe: split → map → reconcile → sink', async () => {
   const store = new MemoryStore(); const written: any[] = []
   const caps: any = { store, llm: {}, clock: { now: () => 0 },
@@ -23,4 +24,195 @@ test('runInline throws a clear error for an unregistered sink target', async () 
   const store = new MemoryStore()
   const caps: any = { store, llm: {}, clock: { now: () => 0 }, sinks: { out: { name: 'out', write: async (v: any) => v } } }
   await expect(runInline(sink('missing'), 'value', caps)).rejects.toThrow(/unknown sink "missing".*out/)
+})
+
+test('runInline retries a flaky sink write per its own opts.retries (#247)', async () => {
+  let calls = 0
+  const caps: any = {
+    store: new MemoryStore(), llm: {}, clock: { now: () => 0 },
+    sinks: { out: { name: 'out', write: async (v: any) => { calls++; if (calls < 3) throw new Error('flaky'); return v } } },
+  }
+  const result = await runInline(sink('out', { retries: 3 }), 'value', caps, { sleep: async () => {}, rand: () => 0 })
+  expect(result).toBe('value')
+  expect(calls).toBe(3)
+})
+
+test('runInline lets one sink.fanout target override the fanout-level opts.retries (#251)', async () => {
+  let logCalls = 0; let vaultCalls = 0
+  const caps: any = {
+    store: new MemoryStore(), llm: {}, clock: { now: () => 0 },
+    sinks: {
+      log: { name: 'log', write: async (v: any) => { logCalls++; if (logCalls < 3) throw new Error('flaky'); return v } },
+      vault: { name: 'vault', write: async (v: any) => { vaultCalls++; throw new Error('flaky') } },
+    },
+  }
+  const tree = sink.fanout([{ name: 'log' }, { name: 'vault', opts: { retries: 0 } }], { retries: 3 })
+  await expect(runInline(tree, 'value', caps, { sleep: async () => {}, rand: () => 0 })).rejects.toThrow('flaky')
+  expect(logCalls).toBe(3)
+  expect(vaultCalls).toBe(1)
+})
+
+test('runInline gates a sink target through caps.governors keyed "sink:<name>", separate from a same-named leaf\'s own governor (#247)', async () => {
+  const sinkGovernor = createGovernor('sink:out', { circuitBreaker: { failureThreshold: 1, cooldownMs: 10_000, halfOpenSuccesses: 1 } })
+  const leafGovernor = createGovernor('out', { circuitBreaker: { failureThreshold: 1, cooldownMs: 10_000, halfOpenSuccesses: 1 } })
+  const caps: any = {
+    store: new MemoryStore(), llm: {}, clock: { now: () => 0 },
+    sinks: { out: { name: 'out', write: async () => { throw new Error('boom') } } },
+    governors: { 'sink:out': sinkGovernor, out: leafGovernor },
+  }
+  await expect(runInline(sink('out'), 'v', caps, { sleep: async () => {} })).rejects.toThrow('boom')
+  await expect(runInline(sink('out'), 'v', caps, { sleep: async () => {} })).rejects.toThrow(/circuit open for "sink:out"/)
+  expect(leafGovernor.circuitBreaker!.state).toBe('closed')
+})
+
+test('runInline runs mapField over one named field of each array element, passing the rest through and renaming the array field', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = mapField('entries', 'handle', op('double', async (n: number) => n * 2, { kind: 'pure' }), { concurrency: fixed(2), renameTo: 'files' })
+  const result = await runInline(tree, { entries: [{ name: 'a', handle: 1 }, { name: 'b', handle: 2 }], skipped: ['x'] }, caps)
+  expect(result).toEqual({ skipped: ['x'], files: [{ name: 'a', handle: 2 }, { name: 'b', handle: 4 }] })
+})
+
+test('runInline rejects a mapField renameTo that collides with a pre-existing sibling field instead of silently overwriting it (#331)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = mapField('entries', 'handle', op('id', async (h: number) => h, { kind: 'pure' }), { concurrency: fixed(2), renameTo: 'name' })
+  await expect(runInline(tree, { entries: [{ handle: 1 }], name: 'important-data' }, caps)).rejects.toThrow(/renameTo "name" collides/)
+})
+
+test('runInline does not double-release a map item\'s concurrency slot when a post-success callback throws (#332)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const concurrency = fixed(2)
+  let onEventCalls = 0
+  const throwingConcurrency = {
+    acquire: (signal?: AbortSignal) => concurrency.acquire(signal),
+    release: (ok: boolean) => {
+      concurrency.release(ok)
+      if (ok) { onEventCalls++; throw new Error('onEvent boom') }
+    },
+  }
+  const tree = map(op('id', async (n: number) => n, { kind: 'pure' }), { concurrency: throwingConcurrency as any })
+  await expect(runInline(tree, [1], caps)).rejects.toThrow('onEvent boom')
+  expect(onEventCalls).toBe(1)
+})
+
+test('map/mapField thread runId and callId into concurrency.release, so an aimd limiter\'s GovernorEvents carry them (#387)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const events: any[] = []
+  const limiter = aimd({ start: 1, min: 1, onEvent: (e) => events.push(e) })
+  const tree = map(op('id', async (n: number) => n, { kind: 'pure' }), { concurrency: limiter })
+  const runId = 'fixed-run-id'
+  await runInline(tree, [1, 2], caps, undefined, '', runId)
+  expect(events.length).toBeGreaterThan(0)
+  for (const e of events) {
+    expect(e.runId).toBe(runId)
+    expect(typeof e.callId).toBe('string')
+  }
+})
+
+test('runInline aggregates every concurrent map item failure instead of surfacing only the first by index (#333)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = map(op('fail', async (n: number) => { throw new Error(`item ${n} failed`) }, { kind: 'pure' }), { concurrency: fixed(2) })
+  try {
+    await runInline(tree, [1, 2], caps)
+    expect.unreachable()
+  } catch (err) {
+    expect(err).toBeInstanceOf(AggregateError)
+    expect((err as AggregateError).errors).toHaveLength(2)
+    expect((err as AggregateError).errors.map((e: Error) => e.message).sort()).toEqual(['item 1 failed', 'item 2 failed'])
+  }
+})
+
+test('runInline still throws the bare single error (not an AggregateError) when only one map item fails (#333)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = map(op('maybeFail', async (n: number) => { if (n === 2) throw new Error('boom'); return n }, { kind: 'pure' }), { concurrency: fixed(2) })
+  await expect(runInline(tree, [1, 2], caps)).rejects.toThrow('boom')
+})
+
+test('runInline runs the catch branch against the original input when the try branch throws', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = catchOp(
+    op('boom', async () => { throw new Error('primary failed') }, { kind: 'pure' }),
+    op('fallback', async (n: number) => n * 10, { kind: 'pure' }),
+  )
+  const result = await runInline(tree, 5, caps)
+  expect(result).toBe(50)
+})
+
+test('runInline skips the catch branch entirely when the try branch succeeds', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let fallbackRan = false
+  const tree = catchOp(
+    op('ok', async (n: number) => n + 1, { kind: 'pure' }),
+    op('fallback', async () => { fallbackRan = true; return -1 }, { kind: 'pure' }),
+  )
+  const result = await runInline(tree, 5, caps)
+  expect(result).toBe(6)
+  expect(fallbackRan).toBe(false)
+})
+
+test('runInline propagates the catch branch\'s own error when the fallback also fails', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = catchOp(
+    op('boom', async () => { throw new Error('primary failed') }, { kind: 'pure' }),
+    op('boom2', async () => { throw new Error('fallback failed too') }, { kind: 'pure' }),
+  )
+  await expect(runInline(tree, 5, caps)).rejects.toThrow('fallback failed too')
+})
+
+test('runInline rejects with OpAbortError before running any node when gOpts.signal is already aborted (#279)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let ran = false
+  const controller = new AbortController(); controller.abort()
+  const tree = op('never', async (n: number) => { ran = true; return n }, { kind: 'pure' })
+  await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(ran).toBe(false)
+})
+
+test('runInline stops a pipe from starting its next step once aborted mid-run', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  let secondRan = false
+  const tree = pipe(
+    op('first', async (n: number) => { controller.abort(); return n }, { kind: 'pure' }),
+    op('second', async (n: number) => { secondRan = true; return n }, { kind: 'pure' }),
+  )
+  await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(secondRan).toBe(false)
+})
+
+test('runInline\'s catch does not run the fallback when the try branch fails due to abort (#279)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController(); controller.abort()
+  let fallbackRan = false
+  const tree = catchOp(
+    op('boom', async (n: number) => n, { kind: 'pure' }),
+    op('fallback', async () => { fallbackRan = true; return -1 }, { kind: 'pure' }),
+  )
+  await expect(runInline(tree, 5, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(fallbackRan).toBe(false)
+})
+
+test('runInline cancels a map item still queued behind a full item-level concurrency limiter once aborted (#301)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  let secondRan = false
+  const tree = map(op('maybeAbort', async (n: number) => {
+    if (n === 1) controller.abort()
+    else secondRan = true
+    return n
+  }, { kind: 'pure' }), { concurrency: fixed(1) })
+  await expect(runInline(tree, [1, 2], caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(secondRan).toBe(false)
+})
+
+test('runInline cancels a mapField item still queued behind a full item-level concurrency limiter once aborted (#301)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const controller = new AbortController()
+  let secondRan = false
+  const tree = mapField('entries', 'n', op('maybeAbort', async (n: number) => {
+    if (n === 1) controller.abort()
+    else secondRan = true
+    return n
+  }, { kind: 'pure' }), { concurrency: fixed(1) })
+  await expect(runInline(tree, { entries: [{ n: 1 }, { n: 2 }] }, caps, { signal: controller.signal })).rejects.toThrow(OpAbortError)
+  expect(secondRan).toBe(false)
 })

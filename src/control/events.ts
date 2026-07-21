@@ -10,16 +10,40 @@
  * concept of their own -- `createGovernor` (governor.ts) is what tags a
  * primitive's events with `name`, turning independently-wired `onEvent`
  * callbacks into one leaf-labeled stream.
+ *
+ * `runId` (#348, following #346's TraceEvent precedent) is optional on every
+ * variant, for the same reason `name` is: circuitBreaker/aimd/tokenBucket are
+ * built once per leaf and shared across every runInline call that leaf name
+ * is reached from, so there's no single call-scoped id to bake in at
+ * construction. Instead `runGoverned` (governor.ts) threads the calling
+ * runInline's own runId through each primitive's gating method
+ * (allow/onSuccess/onFailure/take/release) as a call argument, and each
+ * primitive stamps it directly onto the event object it emits -- distinct
+ * from `name`, which is tagged once at construction time via
+ * `createGovernor`'s wrapper. This is what lets a shared onEvent sink (e.g.
+ * src/adapters/otel.ts's exporters) attach a breaker/aimd/token-bucket event
+ * to the exact run that produced it instead of falling back to "the
+ * innermost span sharing that leaf name" when two concurrent runs share one
+ * leaf.
+ *
+ * `callId` (#380, following #366's TraceEvent precedent) closes the last gap
+ * `runId` alone leaves open: two duplicate-named leaves/sink-targets within
+ * the *same* run (e.g. sink.fanout(['a', 'a'])) also share one `runId`, so
+ * `name`+`runId` still can't tell them apart. `runGoverned` is handed the
+ * same per-call `callId` its caller (runInline's `traced()`) minted for that
+ * node's TraceEvent, and stamps it alongside `runId` on every event it
+ * causes a governor primitive to emit -- letting a shared onEvent sink match
+ * an event to the exact call that produced it, not just the exact run.
  */
 export type GovernorEvent =
-  | { kind: 'breaker-open'; nowMs: number; name?: string }
-  | { kind: 'breaker-half-open'; nowMs: number; name?: string }
-  | { kind: 'breaker-close'; nowMs: number; name?: string }
-  | { kind: 'aimd-increase'; limit: number; name?: string }
-  | { kind: 'aimd-decrease'; limit: number; name?: string }
-  | { kind: 'token-wait'; attempt: number; delayMs: number; name?: string }
-  | { kind: 'retry-attempt'; name: string; attempt: number; delayMs: number }
-  | { kind: 'memo-hit'; name: string }
-  | { kind: 'memo-miss'; name: string }
+  | { kind: 'breaker-open'; nowMs: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'breaker-half-open'; nowMs: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'breaker-close'; nowMs: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'aimd-increase'; limit: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'aimd-decrease'; limit: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'token-wait'; attempt: number; delayMs: number; name?: string; runId?: string; callId?: string }
+  | { kind: 'retry-attempt'; name: string; attempt: number; delayMs: number; runId?: string; callId?: string }
+  | { kind: 'memo-hit'; name: string; runId?: string; callId?: string }
+  | { kind: 'memo-miss'; name: string; runId?: string; callId?: string }
 
 export type GovernorEventHandler = (e: GovernorEvent) => void

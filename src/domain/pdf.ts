@@ -5,7 +5,7 @@
 // many source kinds and is out of the fileops-absorption boundary; it reuses
 // loadBoundedPdf below for its own bomb-guarded PDFDocument.load() call).
 
-import { PDFDocument } from 'pdf-lib'
+import { PDFDict, PDFDocument, PDFName, PDFRef, PDFStream } from 'pdf-lib'
 import type { LeafFn } from '../op/types.js'
 import type { Handle } from '../effects/types.js'
 import { resolve, putBytes } from '../handles/handle.js'
@@ -91,7 +91,10 @@ export async function loadBoundedPdf(input: Uint8Array): Promise<PDFDocument> {
 }
 
 export type PdfShrinkOptions = {
-  /** Clear Title/Author/Subject/Keywords/Producer metadata. Default true. */
+  /** Clear Title/Author/Subject/Keywords/Producer metadata (both the classic
+   *  /Info dict and, if present, the catalog's XMP /Metadata stream — a
+   *  second, separate metadata carrier that Acrobat/Office/etc. commonly
+   *  populate and frequently duplicates Title/Author into). Default true. */
   stripMetadata?: boolean
 }
 
@@ -120,6 +123,36 @@ export async function pdfShrink(input: Uint8Array, opts: PdfShrinkOptions = {}):
     doc.setKeywords([])
     doc.setProducer('@suxos/lib')
     doc.setCreator('')
+
+    // setTitle/etc. above only clear the classic /Info dict -- a document's
+    // catalog can separately reference an XMP /Metadata stream (loadBoundedPdf
+    // passes { updateMetadata: false }, so pdf-lib never syncs the two) that
+    // still carries the original dc:title/dc:creator verbatim. Deleting the
+    // catalog's /Metadata key alone isn't enough either: PDFWriter.serializeToBuffer
+    // serializes every object in context.enumerateIndirectObjects() regardless
+    // of reachability from the trailer, so an unreferenced stream's bytes
+    // would still round-trip into the output. Drop the underlying indirect
+    // object from the context too so the XMP bytes never get written at all.
+    const metadataKey = PDFName.of('Metadata')
+    const metadataRef = doc.catalog.get(metadataKey)
+    if (metadataRef !== undefined) {
+      doc.catalog.delete(metadataKey)
+      if (metadataRef instanceof PDFRef) doc.context.delete(metadataRef)
+    }
+
+    // /Metadata can also hang off individual page dicts and XObjects (e.g.
+    // Adobe/InDesign/Illustrator's per-image XMP packets) -- not just the
+    // catalog. Walk every indirect object's own dict (a bare dict, or a
+    // stream's dict) for its own /Metadata key and apply the same
+    // delete-both-the-reference-and-the-indirect-object treatment.
+    for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+      const dict = obj instanceof PDFDict ? obj : obj instanceof PDFStream ? obj.dict : undefined
+      if (!dict || dict === doc.catalog) continue
+      const ref = dict.get(metadataKey)
+      if (ref === undefined) continue
+      dict.delete(metadataKey)
+      if (ref instanceof PDFRef) doc.context.delete(ref)
+    }
   }
 
   const bytes = await doc.save({ useObjectStreams: true })
@@ -144,4 +177,12 @@ export const shrink: LeafFn = async (input, caps) => {
   const bytes = await resolve(caps.store, handle)
   const result = await pdfShrink(bytes, opts)
   return { handle: await putBytes(caps.store, result.bytes, 'application/pdf'), inputBytes: result.inputBytes, outputBytes: result.outputBytes, savedPct: result.savedPct }
+}
+
+// pageCount: Handle-based wrapper around pdfPageCount, following unzip/scrub's
+// bare-Handle-in pattern — resolves the input Handle and returns a bare
+// number, no Handle to put back.
+export const pageCount: LeafFn = async (input, caps) => {
+  const bytes = await resolve(caps.store, input as Handle)
+  return pdfPageCount(bytes)
 }

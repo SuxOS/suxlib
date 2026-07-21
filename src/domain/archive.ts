@@ -274,13 +274,19 @@ function readZipMtimes(bytes: Uint8Array): Record<string, number> {
     const efl = readU16(bytes, o + 30)
     const cml = readU16(bytes, o + 32)
     const name = strFromU8(bytes.subarray(o + 46, o + 46 + fnl))
-    const year = ((modDate >> 9) & 0x7f) + 1980
-    const month = (modDate >> 5) & 0xf
-    const day = modDate & 0x1f
-    const hours = (modTime >> 11) & 0x1f
-    const minutes = (modTime >> 5) & 0x3f
-    const seconds = (modTime & 0x1f) * 2
-    mtimes[name] = new Date(year, month - 1, day, hours, minutes, seconds).getTime()
+    // modDate === 0 (year 1980, month 0, day 0) is some zip writers' "no
+    // timestamp" sentinel, not a real date -- new Date(1980, -1, 0, ...)
+    // would otherwise normalize to a bogus 1979-11-30 instead of leaving the
+    // entry's mtime absent.
+    if (modDate !== 0) {
+      const year = ((modDate >> 9) & 0x7f) + 1980
+      const month = (modDate >> 5) & 0xf
+      const day = modDate & 0x1f
+      const hours = (modTime >> 11) & 0x1f
+      const minutes = (modTime >> 5) & 0x3f
+      const seconds = (modTime & 0x1f) * 2
+      mtimes[name] = new Date(year, month - 1, day, hours, minutes, seconds).getTime()
+    }
     o += 46 + fnl + efl + cml
   }
   return mtimes
@@ -294,12 +300,44 @@ export function zipExtract(bytes: Uint8Array): UnpackedEntry[] {
 
 // ---------- gzip ----------
 
-export function gzipCreate(data: Uint8Array, mtime = 0): Uint8Array {
+// Gzip's on-disk MTIME (RFC 1952 §2.3.1) is an unsigned 4-byte seconds
+// count, the same non-negative-integer shape as tar's mtime field --
+// mirrors assertTarMtimeNotNegative. mtime === 0 is fflate's documented
+// "omit the timestamp" sentinel (see the comment below), not a real
+// pre-1970 value, so it's exempt from this check.
+function assertGzipMtimeNotNegative(mtime: number): void {
+  if (mtime !== 0 && mtime < 0) {
+    throw new Error(`gzip mtime (${mtime}) is negative, which gzip's unsigned MTIME field can't represent — negative mtimes are rejected instead of wrapping to a bogus far-future timestamp.`)
+  }
+}
+
+export function gzipCreate(data: Uint8Array, mtime = 0, filename?: string): Uint8Array {
   if (data.length > MAX_UNPACK_BYTES) throw new Error(`archive input totals more than ${MAX_UNPACK_BYTES} bytes (bomb guard).`)
+  assertGzipMtimeNotNegative(mtime)
   // fflate only omits the header's wall-clock MTIME when mtime is exactly 0
   // (any other value, including undefined, embeds Date.now()) — default to 0
   // so gzipCreate(tarCreate(files)) stays fully deterministic end to end.
-  return gzipSync(data, { level: 6, mtime })
+  return gzipSync(data, filename ? { level: 6, mtime, filename } : { level: 6, mtime })
+}
+
+// Gzip's FLG byte (RFC 1952 §2.3.1, offset 3) has an FNAME bit (0x08) that,
+// when set, embeds the original filename as a null-terminated string right
+// after the fixed 10-byte header (and after FEXTRA, if FLG's 0x04 bit is also
+// set). Returns undefined when FNAME isn't set, the header is truncated, or
+// no null terminator is found, so callers can fall back to a default name.
+function readGzipName(bytes: Uint8Array): string | undefined {
+  if (bytes.length < 10) return undefined
+  const flg = bytes[3]
+  let off = 10
+  if (flg & 0x04) {
+    if (off + 2 > bytes.length) return undefined
+    off += 2 + readU16(bytes, off)
+  }
+  if (!(flg & 0x08) || off >= bytes.length) return undefined
+  let end = off
+  while (end < bytes.length && bytes[end] !== 0) end++
+  if (end >= bytes.length) return undefined
+  return strFromU8(bytes.subarray(off, end))
 }
 
 export function gzipExtract(bytes: Uint8Array): UnpackedEntry {
@@ -308,12 +346,13 @@ export function gzipExtract(bytes: Uint8Array): UnpackedEntry {
   // offset 4; gzipCreate's mtime:0 default means "omitted" (see its comment),
   // so a zero field surfaces as no mtime rather than the epoch.
   const mtimeSecs = bytes.length >= 8 ? readU32(bytes, 4) : 0
-  return decodeEntry('data', data, mtimeSecs > 0 ? mtimeSecs * 1000 : undefined)
+  return decodeEntry(readGzipName(bytes) ?? 'data', data, mtimeSecs > 0 ? mtimeSecs * 1000 : undefined)
 }
 
 // ---------- tar (USTAR, uncompressed) ----------
-// Minimal pure-JS tar reader/writer. No compression — pair with gzip above for
-// .tar.gz if needed (gzipCreate(tarCreate(files))).
+// Minimal pure-JS tar reader/writer. No compression of its own — the
+// 'tar.gz' ArchiveFormat below composes this with gzip above
+// (gzipCreate(tarCreate(files)) / tarExtract(gunzipCapped(bytes))).
 
 const BLOCK = 512
 
@@ -326,9 +365,57 @@ function writeOctal(value: number, length: number): Uint8Array {
   return strToU8(s.slice(0, length))
 }
 
+/**
+ * GNU tar's base-256 extension: whenever a numeric field (size/mtime/uid/gid)
+ * doesn't fit the field's octal width, GNU tar sets the field's first byte's
+ * high bit (0x80) and packs a raw big-endian binary value in the rest of the
+ * field instead of octal ASCII (see #235 — without this, such a field's
+ * first byte is non-ASCII noise that fails octal parsing and silently reads
+ * as 0, desyncing the rest of the archive scan).
+ */
 function readOctal(bytes: Uint8Array): number {
+  if (bytes.length > 0 && (bytes[0] & 0x80) !== 0) {
+    if (bytes[0] === 0xff) return readTwosComplementBase256(bytes)
+    let value = bytes[0] & 0x7f
+    for (let i = 1; i < bytes.length; i++) value = value * 256 + bytes[i]
+    return value
+  }
   const s = strFromU8(bytes).replace(/\0.*$/, '').trim()
   return s ? parseInt(s, 8) || 0 : 0
+}
+
+/**
+ * GNU tar's base-256 negative encoding: a leading byte of exactly 0xff (vs
+ * 0x80 for a positive magnitude) marks a two's-complement value spanning the
+ * whole field -- used for a pre-1970 mtime and other negative numeric
+ * fields. Ported from node-tar's large-numbers.js `twos()`: walking from the
+ * least-significant byte and only accumulating once a non-zero complement
+ * byte flips `flipped` keeps the running sum small even though the field's
+ * leading bytes are 0xff sign-extension padding -- computing the two's
+ * complement magnitude across the full field width up front and subtracting
+ * would lose precision past Number.MAX_SAFE_INTEGER for a typical 12-byte
+ * field.
+ */
+function readTwosComplementBase256(bytes: Uint8Array): number {
+  let sum = 0
+  let flipped = false
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    const byte = bytes[i]
+    let f: number
+    if (flipped) f = 0xff ^ byte
+    else if (byte === 0) f = 0
+    else {
+      flipped = true
+      f = ((0xff ^ byte) + 1) & 0xff
+    }
+    if (f !== 0) sum -= f * Math.pow(256, bytes.length - 1 - i)
+  }
+  return sum
+}
+
+function readCString(bytes: Uint8Array): string {
+  const end = bytes.indexOf(0)
+  return strFromU8(end === -1 ? bytes : bytes.subarray(0, end))
 }
 
 /**
@@ -348,6 +435,21 @@ function headerChecksumValid(header: Uint8Array): boolean {
   return sum === stored
 }
 
+/**
+ * Reject a pre-1970 (negative) mtime rather than silently clamping it to
+ * epoch, mirroring zipCreate's assertZipMtimeInRange guard. writeOctal (used
+ * by tarHeader) only emits plain octal ASCII, with no GNU base-256
+ * two's-complement encoder of its own (readOctal decodes that form on the
+ * extract side, #237, but nothing here writes it), so a negative value
+ * couldn't round-trip anyway — throw instead of producing a tar entry
+ * silently dated 1970-01-01.
+ */
+function assertTarMtimeNotNegative(name: string, mtime: number): void {
+  if (mtime < 0) {
+    throw new Error(`file '${name}' has a pre-1970 mtime (${mtime}), which tar's on-disk format can't represent — negative mtimes are rejected instead of being silently clamped to epoch.`)
+  }
+}
+
 function tarHeader(name: string, size: number, mtime: number): Uint8Array {
   const h = new Uint8Array(BLOCK)
   const nameBytes = strToU8(name.slice(0, 100))
@@ -356,7 +458,7 @@ function tarHeader(name: string, size: number, mtime: number): Uint8Array {
   h.set(writeOctal(0, 8), 108) // uid
   h.set(writeOctal(0, 8), 116) // gid
   h.set(writeOctal(size, 12), 124) // size
-  h.set(writeOctal(Math.max(0, Math.floor(mtime / 1000)), 12), 136) // mtime (Unix seconds, not ms)
+  h.set(writeOctal(Math.floor(mtime / 1000), 12), 136) // mtime (Unix seconds, not ms)
   h.set(strToU8('        '), 148) // checksum placeholder (8 spaces)
   h[156] = '0'.charCodeAt(0) // typeflag: regular file
   h.set(strToU8('ustar\0'), 257) // magic
@@ -382,6 +484,7 @@ export function tarCreate(files: ArchiveFile[]): Uint8Array {
   const parts: Uint8Array[] = []
   let total = 0
   for (const f of files) {
+    if (f.mtime !== undefined) assertTarMtimeNotNegative(f.name, f.mtime)
     const header = tarHeader(f.name, f.data.length, f.mtime ?? 0)
     const paddedSize = padTo(f.data.length, BLOCK)
     const body = new Uint8Array(paddedSize)
@@ -410,6 +513,36 @@ export function tarCreate(files: ArchiveFile[]): Uint8Array {
  */
 export type TarExtractResult = { entries: UnpackedEntry[]; skipped: Array<{ name: string; typeflag: string }> }
 
+/**
+ * Parse a PAX extended header body (typeflag 'x'/'g'): a sequence of
+ * `"<len> <key>=<value>\n"` records, where `<len>` is the decimal byte length
+ * of the whole record (itself included). Only the keys callers actually
+ * consult (currently 'path') need to round-trip correctly, but every
+ * well-formed record is parsed so an unrecognized key is just ignored rather
+ * than desyncing the scan.
+ */
+function parsePaxHeader(data: Uint8Array): Record<string, string> {
+  const result: Record<string, string> = Object.create(null)
+  let i = 0
+  while (i < data.length) {
+    let spaceIdx = -1
+    for (let j = i; j < data.length; j++) {
+      if (data[j] === 0x20) { spaceIdx = j; break }
+    }
+    if (spaceIdx === -1) break
+    const len = parseInt(strFromU8(data.subarray(i, spaceIdx)), 10)
+    if (!(len > 0)) break
+    const record = strFromU8(data.subarray(i, i + len))
+    const eq = record.indexOf('=', spaceIdx - i + 1)
+    if (eq !== -1) {
+      const key = record.slice(spaceIdx - i + 1, eq)
+      result[key] = record.slice(eq + 1).replace(/\n$/, '')
+    }
+    i += len
+  }
+  return result
+}
+
 /** Parse an uncompressed USTAR tar archive. */
 export function tarExtract(bytes: Uint8Array): TarExtractResult {
   const entries: UnpackedEntry[] = []
@@ -417,15 +550,34 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
   let off = 0
   let count = 0
   let declared = 0
+  // GNU longname ('L'), longlink ('K'), and PAX extended header ('x'/'g')
+  // entries are metadata carriers, not content: each overrides the *next*
+  // real entry's name/link-target rather than being an entry of its own,
+  // mirroring the USTAR `prefix` field fix above but for the real-world
+  // long-path mechanisms (see #226, #272).
+  let pendingName: string | undefined
+  let pendingPaxSparse = false
+  // A PAX 'g' global extended header applies to every following entry until
+  // superseded by another 'g' header (unlike 'x', which applies only to the
+  // entry immediately after it) -- kept as running defaults rather than a
+  // pendingName-style one-shot (#230).
+  let globalPax: Record<string, string> = Object.create(null)
   while (off + BLOCK <= bytes.length) {
     const header = bytes.subarray(off, off + BLOCK)
     // Two consecutive zero blocks (or a header of all zero bytes) mark the end.
     if (header.every((b) => b === 0)) break
     if (!headerChecksumValid(header)) throw new Error(`malformed/not a tar archive: invalid header checksum at offset ${off}.`)
-    const nameBytes = header.subarray(0, 100)
-    const nameEnd = nameBytes.indexOf(0)
-    const name = strFromU8(nameEnd === -1 ? nameBytes : nameBytes.subarray(0, nameEnd))
+    // POSIX USTAR splits names over 100 bytes across `prefix` (offset 345,
+    // length 155) + '/' + `name`, so a long-path archive from GNU tar/bsdtar/
+    // Python's tarfile/npm pack round-trips correctly instead of silently
+    // truncating to just the `name` field. Only trust `prefix` when the
+    // magic at offset 257 is the POSIX "ustar\0" this reader/tarCreate both
+    // use -- pre-POSIX/GNU headers reuse that offset range for other fields.
+    const isPosixUstar = strFromU8(header.subarray(257, 262)) === 'ustar' && header[262] === 0
+    const prefix = isPosixUstar ? readCString(header.subarray(345, 500)) : ''
+    const name = prefix ? `${prefix}/${readCString(header.subarray(0, 100))}` : readCString(header.subarray(0, 100))
     const size = readOctal(header.subarray(124, 136))
+    if (size < 0) throw new Error(`malformed tar: entry declares a negative size (${size}).`)
     const mtime = readOctal(header.subarray(136, 148)) * 1000 // header stores Unix seconds; ArchiveFile.mtime is ms
     const typeflag = String.fromCharCode(header[156] || 0)
     off += BLOCK
@@ -438,14 +590,50 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
     const data = bytes.subarray(off, off + size)
     off += padTo(size, BLOCK)
 
+    if (typeflag === 'L') {
+      pendingName = readCString(data)
+      continue
+    }
+    if (typeflag === 'K') {
+      // GNU longlink: carries an oversized symlink/hardlink target for the
+      // entry that follows. We drop symlinks/hardlinks regardless of target
+      // length, so there's nothing to reconstruct here -- just don't let it
+      // fall through to generic entry classification (which would push a
+      // fake 'K' member into `skipped` and clobber a pending 'L' longname).
+      continue
+    }
+    if (typeflag === 'g') {
+      globalPax = { ...globalPax, ...parsePaxHeader(data) }
+      continue
+    }
+    if (typeflag === 'x') {
+      const pax = parsePaxHeader(data)
+      if (pax.path) pendingName = pax.path
+      // GNU sparse (PAX-based, tar --sparse since GNU tar 1.15+) stores the
+      // real file as a hole/data map in these keys; the following regular
+      // entry's `data` is only the packed non-hole bytes, not the real byte
+      // layout. We don't reconstruct the sparse map, so decoding it as-is
+      // would silently return truncated/wrong content -- refuse it instead
+      // (see #274).
+      pendingPaxSparse = Object.keys(pax).some((k) => k.startsWith('GNU.sparse.'))
+      continue
+    }
+
+    const entryName = pendingName ?? globalPax.path ?? name
+    const isSparse = pendingPaxSparse
+    pendingName = undefined
+    pendingPaxSparse = false
+
     // '0' and '\0' (header[156] is never absent, so fromCharCode always yields
     // a real char -- '\0' covers pre-POSIX tar, never an empty string) are
     // regular files; everything else (directories, symlinks, hardlinks, devices,
     // ...) is dropped and recorded in `skipped`.
-    if (typeflag === '0' || typeflag === '\0') {
-      entries.push(decodeEntry(name, new Uint8Array(data), mtime))
+    if (isSparse) {
+      skipped.push({ name: entryName, typeflag: 'S' })
+    } else if (typeflag === '0' || typeflag === '\0') {
+      entries.push(decodeEntry(entryName, new Uint8Array(data), mtime))
     } else {
-      skipped.push({ name, typeflag })
+      skipped.push({ name: entryName, typeflag })
     }
   }
   return { entries, skipped }
@@ -453,7 +641,7 @@ export function tarExtract(bytes: Uint8Array): TarExtractResult {
 
 // ---------- unified entry points ----------
 
-export const ARCHIVE_FORMATS = ['zip', 'gzip', 'tar'] as const
+export const ARCHIVE_FORMATS = ['zip', 'gzip', 'tar', 'tar.gz'] as const
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number]
 
 export function archiveCreate(format: ArchiveFormat, files: ArchiveFile[]): Uint8Array {
@@ -466,9 +654,13 @@ export function archiveCreate(format: ArchiveFormat, files: ArchiveFile[]): Uint
       return zipCreate(files)
     case 'tar':
       return tarCreate(files)
+    case 'tar.gz':
+      return gzipCreate(tarCreate(files))
     case 'gzip':
       if (files.length !== 1) throw new Error(`gzip packs exactly one file — got ${files.length}. Use format='zip' or 'tar' for multiple.`)
-      return gzipCreate(files[0].data, files[0].mtime ?? 0)
+      return gzipCreate(files[0].data, files[0].mtime ?? 0, files[0].name)
+    default:
+      throw new Error(`unknown archive format '${format}' — expected one of ${ARCHIVE_FORMATS.join(', ')}`)
   }
 }
 
@@ -488,15 +680,29 @@ export function archiveExtract(format: ArchiveFormat, bytes: Uint8Array): Archiv
       const { entries, skipped } = tarExtract(bytes)
       return skipped.length ? { entries, skipped } : { entries }
     }
+    case 'tar.gz': {
+      const { entries, skipped } = tarExtract(gunzipCapped(bytes))
+      return skipped.length ? { entries, skipped } : { entries }
+    }
     case 'gzip':
       return { entries: [gzipExtract(bytes)] }
+    default:
+      throw new Error(`unknown archive format '${format}' — expected one of ${ARCHIVE_FORMATS.join(', ')}`)
   }
 }
 
+// 'tar.gz' and 'gzip' share 'application/gzip' -- gzip is a byte-stream codec
+// with no format-level tar marker, so there's no MIME value that distinguishes
+// a tar bundle piped through gzip from a single gzip'd file. Don't add a
+// MIME-based format auto-detection path against this map; a caller's own
+// format tag (as CLI's inferArchiveFormat already uses, off the filename
+// extension) is the only reliable signal -- distinguishing the two from bytes
+// alone needs peeking the decompressed stream for a valid tar header.
 export const ARCHIVE_MIME: Record<ArchiveFormat, string> = {
   zip: 'application/zip',
   gzip: 'application/gzip',
   tar: 'application/x-tar',
+  'tar.gz': 'application/gzip',
 }
 
 // ---------- op-engine leaf ----------

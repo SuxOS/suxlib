@@ -1,6 +1,6 @@
 import type { LeafFn } from './types.js'
 import { pack, unpack, unzip } from '../domain/archive.js'
-import { shrink } from '../domain/pdf.js'
+import { shrink, pageCount } from '../domain/pdf.js'
 import { redact, scrub } from '../domain/sanitize.js'
 import { convert } from '../domain/transform.js'
 import { extract, summarize } from '../domain/text.js'
@@ -23,7 +23,7 @@ import { wrapHandle, unwrapHandle, stampLeaf } from './reshape.js'
 // JSON op spec (src/op/spec.ts's buildOp), same class of bug CLAUDE.md
 // documents for fieldMerge/parseXml/canonicalize/op-run.ts's hydrate.
 export const LEAF_REGISTRY: Readonly<Record<string, LeafFn>> = Object.freeze(
-  Object.assign(Object.create(null), { pack, unpack, unzip, shrink, redact, scrub, convert, extract, summarize, wrapHandle, unwrapHandle, stamp: stampLeaf }),
+  Object.assign(Object.create(null), { pack, unpack, unzip, shrink, pageCount, redact, scrub, convert, extract, summarize, wrapHandle, unwrapHandle, stamp: stampLeaf }),
 )
 
 /**
@@ -58,6 +58,7 @@ export const LEAF_SHAPES: Readonly<Record<string, { input: LeafShape; output: Le
   unpack: { input: { object: { format: 'unknown', handle: 'handle' } }, output: { object: { entries: { arrayObject: { name: 'unknown', handle: 'handle', mtime: 'unknown' } }, skipped: 'unknown' } } },
   unzip: { input: 'handle', output: 'handle[]' },
   shrink: { input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } },
+  pageCount: { input: 'handle', output: 'unknown' },
   redact: { input: { object: { handle: 'handle' } }, output: { object: { handle: 'handle' } } },
   scrub: { input: 'handle', output: { object: { handle: 'handle' } } },
   convert: { input: { object: { handle: 'handle' } }, output: 'handle' },
@@ -66,6 +67,25 @@ export const LEAF_SHAPES: Readonly<Record<string, { input: LeafShape; output: Le
   wrapHandle: { input: 'handle', output: { object: { handle: 'handle' } } },
   unwrapHandle: { input: { object: { handle: 'handle' } }, output: 'handle' },
   stamp: { input: 'handle', output: 'handle' },
+})
+
+/**
+ * Per-leaf declared capability usage beyond `store`/`clock` (load-bearing for
+ * every leaf, so not worth flagging) -- currently just which leaves touch
+ * `caps.llm` (text.ts's `extract`/`summarize`, the only two LLM-`effect`
+ * leaves in LEAF_REGISTRY, see CLAUDE.md's domain-layout note). Used by
+ * src/op/plan.ts's planOpSpec (#361) to report which optional Caps fields a
+ * spec will actually reach -- `ask`/`sinks`/`cache` are all visible directly
+ * on an OpSpec's own shape and don't need a table like this one. A name
+ * absent here (any leaf not listed, including a host-registered extraLeaves
+ * leaf) is assumed to touch no capability beyond store/clock, the same
+ * permissive-default pattern LEAF_SHAPES uses for shape; keep this in sync
+ * with LEAF_REGISTRY by hand, same drift-risk tradeoff CLAUDE.md's
+ * LEAF_SHAPES/LEAF_REGISTRY note already flags for shape.
+ */
+export const LEAF_CAPS: Readonly<Record<string, readonly 'llm'[]>> = Object.freeze({
+  extract: ['llm'],
+  summarize: ['llm'],
 })
 
 /**

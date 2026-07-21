@@ -1,10 +1,11 @@
 import { test, expect } from 'vitest'
 import { zipSync } from 'fflate'
 import { PDFDocument } from 'pdf-lib'
-import { buildOp, type OpSpec } from '../../src/op/spec.js'
+import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, type OpSpec } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
-import { putBytes, resolveText } from '../../src/handles/handle.js'
+import { putBytes, resolve, resolveText } from '../../src/handles/handle.js'
+import { archiveExtract } from '../../src/domain/archive.js'
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
   const len = new Uint8Array(4)
@@ -129,8 +130,8 @@ test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })
 
-test('buildOp rejects an unsupported tag (e.g. ask, which needs a host Ask capability)', () => {
-  expect(() => buildOp({ tag: 'ask' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "ask"/)
+test('buildOp rejects an unsupported tag', () => {
+  expect(() => buildOp({ tag: 'nope' } as unknown as OpSpec)).toThrow(/unsupported op spec tag "nope"/)
 })
 
 test('buildOp builds a reconcile node that merges Handles via caps.store, no extra host capability needed', async () => {
@@ -174,6 +175,43 @@ test('buildOp rejects a sink spec with a non-string target', () => {
   expect(() => buildOp({ tag: 'sink', targets: [1 as unknown as string] })).toThrow(/targets/)
 })
 
+test('buildOp rejects an out-of-range sink `opts.retries` (#247)', () => {
+  expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { retries: -1 } })).toThrow(/opts\.retries/)
+  expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { retries: MAX_LEAF_RETRIES + 1 } })).toThrow(/opts\.retries/)
+})
+
+test('buildOp threads a sink spec\'s opts.retries into a retried write via caps.governors["sink:<name>"] (#247)', async () => {
+  let calls = 0
+  const spec: OpSpec = { tag: 'sink', targets: ['out'], opts: { retries: 2 } }
+  const tree = buildOp(spec)
+  const result = await runInline(tree, 'value', {
+    store: caps().store, llm: {} as any, clock: { now: () => 0 },
+    sinks: { out: { name: 'out', write: async (v: any) => { calls++; if (calls < 2) throw new Error('flaky'); return v } } },
+  }, { sleep: async () => {}, rand: () => 0 })
+  expect(result).toBe('value')
+  expect(calls).toBe(2)
+})
+
+test('buildOp rejects a sink spec with an invalid per-target `opts.retries` (#251)', () => {
+  expect(() => buildOp({ tag: 'sink', targets: [{ name: 'out', opts: { retries: -1 } }] })).toThrow(/targets/)
+  expect(() => buildOp({ tag: 'sink', targets: [{ name: '' }] })).toThrow(/targets/)
+})
+
+test('buildOp threads a per-target sink opts.retries, overriding the fanout-level default (#251)', async () => {
+  let logCalls = 0; let vaultCalls = 0
+  const spec: OpSpec = { tag: 'sink', targets: ['log', { name: 'vault', opts: { retries: 0 } }], opts: { retries: 3 } }
+  const tree = buildOp(spec)
+  await expect(runInline(tree, 'value', {
+    store: caps().store, llm: {} as any, clock: { now: () => 0 },
+    sinks: {
+      log: { name: 'log', write: async (v: any) => { logCalls++; if (logCalls < 3) throw new Error('flaky'); return v } },
+      vault: { name: 'vault', write: async () => { vaultCalls++; throw new Error('flaky') } },
+    },
+  }, { sleep: async () => {}, rand: () => 0 })).rejects.toThrow('flaky')
+  expect(logCalls).toBe(3)
+  expect(vaultCalls).toBe(1)
+})
+
 test('buildOp rejects an empty pipe', () => {
   expect(() => buildOp({ tag: 'pipe', steps: [] })).toThrow(/non-empty `steps`/)
 })
@@ -185,6 +223,21 @@ test('buildOp rejects an out-of-range map concurrency', () => {
 
 test('buildOp rejects an out-of-range leaf retries', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { retries: 6 } })).toThrow(/retries/)
+})
+
+test('buildOp rejects a non-boolean leaf `opts.heavy`/`opts.memo` instead of silently misrouting it (#318)', () => {
+  expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { heavy: 'false' as any } })).toThrow(/opts\.heavy/)
+  expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { memo: '0' as any } })).toThrow(/opts\.memo/)
+})
+
+test('buildOp rejects a non-boolean sink `opts.heavy`/`opts.memo`, including on a per-target opts (#318)', () => {
+  expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { heavy: 'false' as any } })).toThrow(/opts\.heavy/)
+  expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { memo: '0' as any } })).toThrow(/opts\.memo/)
+  expect(() => buildOp({ tag: 'sink', targets: [{ name: 'out', opts: { heavy: 'false' as any } }] })).toThrow(/targets/)
+})
+
+test('buildOp rejects an invalid leaf `opts.kind` instead of silently bypassing reliability gating (#262)', () => {
+  expect(() => buildOp({ tag: 'leaf', name: 'scrub', opts: { kind: 'nope' as any } })).toThrow(/opts\.kind/)
 })
 
 test('buildOp resolves a host-registered leaf via its `extraLeaves` param', async () => {
@@ -313,4 +366,211 @@ test('wrapHandle/unwrapHandle bridge unzip\'s bare-Handle output into shrink\'s 
   const result = await runInline(tree, zipHandle, { store, ...rest })
   expect(result).toHaveLength(1)
   expect(result[0]).toMatchObject({ type: 'application/pdf' })
+})
+
+test('mapField op spec makes unpack -> transform each entry -> pack expressible as a single pipeline (#168): entries -> files, each handle stamped in between', async () => {
+  const { store, ...rest } = caps()
+  const zip = zipSync({ 'a.txt': new TextEncoder().encode('hello'), 'b.txt': new TextEncoder().encode('world') })
+  const zipHandle = await putBytes(store, zip, 'application/zip')
+
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'wrapHandle' },
+      { tag: 'leaf', name: 'unpack', params: { format: 'zip' } },
+      { tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2, renameTo: 'files' },
+      { tag: 'leaf', name: 'pack', params: { format: 'zip' } },
+    ],
+  }
+  const tree = buildOp(spec)
+  const packedHandle = await runInline(tree, zipHandle, { store, ...rest })
+  const packedBytes = await resolve(store, packedHandle)
+  const { entries } = archiveExtract('zip', packedBytes)
+  expect(entries.map((e) => ({ name: e.name, text: e.text }))).toEqual(
+    expect.arrayContaining([{ name: 'a.txt', text: 'hello' }, { name: 'b.txt', text: 'world' }]),
+  )
+})
+
+test('mapField rejects a spec missing `arrayField`/`elementField`/`op`, and an out-of-range concurrency', () => {
+  expect(() => buildOp({ tag: 'mapField', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 } as unknown as OpSpec)).toThrow(/arrayField/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 } as unknown as OpSpec)).toThrow(/elementField/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: 'handle', concurrency: 2 } as unknown as OpSpec)).toThrow(/requires an `op`/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 0 })).toThrow(/concurrency/)
+})
+
+test('buildOp\'s shape check passes unpack -> mapField(renameTo: \'files\') -> pack, unlike unpack -> pack directly (#161)', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unpack', params: { format: 'zip' } },
+      { tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2, renameTo: 'files' },
+      { tag: 'leaf', name: 'pack', params: { format: 'zip' } },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp\'s shape check still rejects mapField feeding pack when the array field isn\'t renamed to `files`', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'unpack', params: { format: 'zip' } },
+      { tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 },
+      { tag: 'leaf', name: 'pack', params: { format: 'zip' } },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 2 \("pack"\) expects \{format, files\} input, but step 1 \("mapField"\) produces \{entries\}/)
+})
+
+test('buildOp builds a catch node that falls back to a secondary sink when the primary sink fails (#183)', async () => {
+  const { store } = caps()
+  const written: string[] = []
+  const spec: OpSpec = {
+    tag: 'catch',
+    try: { tag: 'sink', targets: ['primary'] },
+    catch: { tag: 'sink', targets: ['secondary'] },
+  }
+  const tree = buildOp(spec)
+  const sinks = {
+    primary: { name: 'primary', write: async () => { throw new Error('primary is down') } },
+    secondary: { name: 'secondary', write: async (v: any) => { written.push(v); return v } },
+  }
+  const result = await runInline(tree, 'payload', { store, llm: {} as any, clock: { now: () => 0 }, sinks })
+  expect(written).toEqual(['payload'])
+  expect(result).toBe('payload')
+})
+
+test('buildOp\'s catch node lets a successful try branch skip the catch branch entirely', async () => {
+  const { store } = caps()
+  const written: string[] = []
+  const spec: OpSpec = {
+    tag: 'catch',
+    try: { tag: 'sink', targets: ['primary'] },
+    catch: { tag: 'sink', targets: ['secondary'] },
+  }
+  const tree = buildOp(spec)
+  const sinks = {
+    primary: { name: 'primary', write: async (v: any) => { written.push(`primary:${v}`); return v } },
+    secondary: { name: 'secondary', write: async (v: any) => { written.push(`secondary:${v}`); return v } },
+  }
+  await runInline(tree, 'payload', { store, llm: {} as any, clock: { now: () => 0 }, sinks })
+  expect(written).toEqual(['primary:payload'])
+})
+
+test('buildOp rejects a catch spec missing `try`/`catch`', () => {
+  expect(() => buildOp({ tag: 'catch', catch: { tag: 'leaf', name: 'scrub' } } as unknown as OpSpec)).toThrow(/requires a `try`/)
+  expect(() => buildOp({ tag: 'catch', try: { tag: 'leaf', name: 'scrub' } } as unknown as OpSpec)).toThrow(/requires a `catch`/)
+})
+
+test('buildOp\'s shape check treats a catch node\'s boundary as \'unknown\' when its try/catch branches disagree, so it never blocks a downstream pipe step', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'catch', try: { tag: 'leaf', name: 'unzip' }, catch: { tag: 'leaf', name: 'scrub' } },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp\'s shape check catches a downstream mismatch when a catch node\'s try/catch branches agree on a bare-`handle` output', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'catch', try: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } }, catch: { tag: 'leaf', name: 'extract' } },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("catch"\) produces handle/)
+})
+
+test('mapField rejects `__proto__` as `arrayField`/`elementField`/`renameTo`', () => {
+  expect(() => buildOp({ tag: 'mapField', arrayField: '__proto__', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/arrayField/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: '__proto__', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/elementField/)
+  expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2, renameTo: '__proto__' })).toThrow(/renameTo/)
+})
+
+test('buildOp builds an ask node that degrades gracefully with no Ask capability (#181)', async () => {
+  const store = new MemoryStore()
+  const askOp: OpSpec = { tag: 'ask', prompt: 'proceed?', timeout: '5m', onTimeout: 'proceed' }
+  expect(await runInline(buildOp(askOp), 'piped-through', { store, llm: undefined as any, clock: { now: () => 0 }, sinks: {} })).toBe('piped-through')
+
+  const failOp: OpSpec = { tag: 'ask', prompt: 'proceed?', timeout: '5m', onTimeout: 'fail' }
+  await expect(runInline(buildOp(failOp), 'x', { store, llm: undefined as any, clock: { now: () => 0 }, sinks: {} })).rejects.toThrow(/ask timed out/)
+})
+
+test('buildOp rejects an ask spec missing `prompt`/`timeout` or with a bad `onTimeout`', () => {
+  expect(() => buildOp({ tag: 'ask', timeout: '5m', onTimeout: 'proceed' } as unknown as OpSpec)).toThrow(/prompt/)
+  expect(() => buildOp({ tag: 'ask', prompt: 'x', onTimeout: 'proceed' } as unknown as OpSpec)).toThrow(/timeout/)
+  expect(() => buildOp({ tag: 'ask', prompt: 'x', timeout: '5m', onTimeout: 'nope' } as unknown as OpSpec)).toThrow(/onTimeout/)
+})
+
+test('validateOpSpec returns an empty array for a well-formed spec, mirroring buildOp not throwing (#208)', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'unzip' }, { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 2 }] }
+  expect(validateOpSpec(spec)).toEqual([])
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('validateOpSpec collects every structural error in one pass instead of stopping at the first, unlike buildOp', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'leaf', name: 'nope', opts: { retries: 99 } },
+      { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 0 },
+      { tag: 'sink', targets: [] },
+    ],
+  }
+  const errors = validateOpSpec(spec)
+  expect(errors.length).toBeGreaterThanOrEqual(3)
+  expect(errors.some((e) => /unknown leaf "nope"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /retries/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /concurrency/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /targets/.test(e.message))).toBe(true)
+  // buildOp, by contrast, throws on just the first problem it hits.
+  expect(() => buildOp(spec)).toThrow(/unknown leaf "nope"/)
+})
+
+test('validateOpSpec descends into nested branches (pipe steps, map/mapField op, catch try/catch) even when a sibling node also errors', () => {
+  const spec: OpSpec = {
+    tag: 'catch',
+    try: { tag: 'leaf', name: 'nope-try' },
+    catch: { tag: 'leaf', name: 'nope-catch' },
+  }
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => e.path === '$.try' && /unknown leaf "nope-try"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => e.path === '$.catch' && /unknown leaf "nope-catch"/.test(e.message))).toBe(true)
+})
+
+test('validateOpSpec reports a pipe-adjacency shape mismatch the same way buildOp\'s throw does', () => {
+  const spec: OpSpec = { tag: 'pipe', steps: [{ tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } }, { tag: 'leaf', name: 'unwrapHandle' }] }
+  const errors = validateOpSpec(spec)
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("convert"\) produces handle/)
+})
+
+test('validateOpSpec resolves extraLeaves the same way buildOp does', () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+  expect(validateOpSpec(spec)).not.toEqual([])
+  expect(validateOpSpec(spec, { shout: async (i) => i })).toEqual([])
+})
+
+test('validateOpSpec reports an invalid leaf `opts.kind` the same way buildOp\'s throw does (#262)', () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'scrub', opts: { kind: 'nope' as any } }
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => /opts\.kind/.test(e.message))).toBe(true)
+})
+
+test('validateOpSpec reports a non-boolean leaf `opts.heavy`/`opts.memo` the same way buildOp\'s throw does (#318)', () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'scrub', opts: { heavy: 'false' as any, memo: '0' as any } }
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => /opts\.heavy/.test(e.message))).toBe(true)
+  expect(errors.some((e) => /opts\.memo/.test(e.message))).toBe(true)
+})
+
+test('validateOpSpec reports an out-of-range sink `opts.retries` the same way buildOp\'s throw does (#247)', () => {
+  const spec: OpSpec = { tag: 'sink', targets: ['out'], opts: { retries: MAX_LEAF_RETRIES + 1 } }
+  const errors = validateOpSpec(spec)
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(/opts\.retries/)
+  expect(() => buildOp(spec)).toThrow(/opts\.retries/)
 })

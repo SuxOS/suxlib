@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { registerFileopsTools } from '../../src/adapters/mcp.js'
 import { MemoryStore } from '../../src/effects/types.js'
-import { bytesToB64 } from '../../src/adapters/base64.js'
+import { b64ToBytes, bytesToB64 } from '../../src/adapters/base64.js'
 
 const b64 = (s: string) => btoa(s)
 
@@ -33,7 +33,7 @@ describe('mcp adapter', () => {
 
   it('lists the expected tools', async () => {
     const { tools } = await client.listTools()
-    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline'].sort())
+    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline', 'describe_pipeline', 'validate_pipeline', 'plan_pipeline'].sort())
   })
 
   it('transform: happy path json -> yaml', async () => {
@@ -130,6 +130,39 @@ describe('mcp adapter', () => {
     expect(atob(body.base64)).toBe('a: 1')
   })
 
+  it('run_pipeline: trace: true returns a TraceEvent[] trace alongside result', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: { tag: 'leaf', name: 'convert' },
+        input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+        trace: true,
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { result: { base64: string }; trace: Array<{ kind: string }> }
+    expect(atob(body.result.base64)).toBe('a: 1')
+    expect(body.trace.map((e) => e.kind)).toEqual(['node-enter', 'node-exit'])
+  })
+
+  it('run_pipeline: streams live per-node progress notifications when the client requests one via progressToken', async () => {
+    const progress: number[] = []
+    const result = await client.callTool(
+      {
+        name: 'run_pipeline',
+        arguments: {
+          spec: { tag: 'leaf', name: 'convert' },
+          input: { handle: { $handle: true, base64: b64('{"a":1}'), type: 'application/json' }, from: 'json', to: 'yaml' },
+        },
+      },
+      undefined,
+      { onprogress: (p) => progress.push(p.progress) },
+    )
+    expect(result.isError).toBeFalsy()
+    expect(progress.length).toBeGreaterThan(0)
+    expect(progress).toEqual([...progress].sort((a, b) => a - b))
+  })
+
   it('run_pipeline: a leaf spec\'s `params` reach the leaf through the MCP tool schema, not just buildOp directly (unzip -> map(wrapHandle, convert))', async () => {
     const zipMod = await import('fflate')
     const zip = zipMod.zipSync({ 'a.json': new TextEncoder().encode('{"a":1}') })
@@ -172,6 +205,30 @@ describe('mcp adapter', () => {
     expect(parseResult(result)).toEqual({ a: 1 })
   })
 
+  it('run_pipeline: a mapField spec reaches buildOp through the MCP tool schema (not silently stripped), bridging unpack\'s `entries` into pack\'s `files` (#168)', async () => {
+    const zipMod = await import('fflate')
+    const zip = zipMod.zipSync({ 'a.txt': new TextEncoder().encode('hello') })
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: {
+          tag: 'pipe',
+          steps: [
+            { tag: 'leaf', name: 'wrapHandle' },
+            { tag: 'leaf', name: 'unpack', params: { format: 'zip' } },
+            { tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2, renameTo: 'files' },
+            { tag: 'leaf', name: 'pack', params: { format: 'zip' } },
+          ],
+        },
+        input: { $handle: true, base64: bytesToB64(zip), type: 'application/zip' },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { base64: string }
+    const unzipped = zipMod.unzipSync(b64ToBytes(body.base64))
+    expect(new TextDecoder().decode(unzipped['a.txt'])).toBe('hello')
+  })
+
   it('run_pipeline: a reconcile spec reaches buildOp through the MCP tool schema (not silently stripped)', async () => {
     const input = [
       { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"x":1}')), type: 'application/json' },
@@ -184,6 +241,77 @@ describe('mcp adapter', () => {
     expect(result.isError).toBeFalsy()
     const body = parseResult(result) as { base64: string }
     expect(JSON.parse(atob(body.base64))).toEqual({ x: 2, y: 3 })
+  })
+
+  it('run_pipeline: a catch spec reaches buildOp through the MCP tool schema (not silently stripped), falling back to a secondary sink when the try branch\'s leaf throws at run time (#183)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        // unwrapHandle throws on a plain object with no `handle` field, exercising the catch fallback
+        spec: { tag: 'catch', try: { tag: 'leaf', name: 'unwrapHandle' }, catch: { tag: 'sink', targets: ['store'] } },
+        input: { a: 1 },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ a: 1 })
+  })
+
+  it('run_pipeline: an ask spec reaches buildOp through the MCP tool schema (not silently stripped), degrading gracefully with no Ask capability wired (#181)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'ask', prompt: 'approve?', timeout: '5m', onTimeout: 'proceed' }, input: { a: 1 } },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ a: 1 })
+  })
+
+  it('describe_pipeline: reports the built-in leaf registry, sink targets, reconcile modes, and field policies', async () => {
+    const result = await client.callTool({ name: 'describe_pipeline', arguments: {} })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { leaves: Record<string, unknown>; sinks: string[]; reconcileModes: string[]; fieldPolicies: string[] }
+    expect(Object.keys(body.leaves)).toContain('convert')
+    expect(body.sinks).toEqual(['store'])
+    expect(body.reconcileModes).toContain('field-merge')
+    expect(body.fieldPolicies).toContain('union')
+  })
+
+  it('validate_pipeline: a well-formed spec reports valid with no errors, without running it', async () => {
+    const result = await client.callTool({
+      name: 'validate_pipeline',
+      arguments: { spec: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } } },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual({ valid: true, errors: [] })
+  })
+
+  it('validate_pipeline: collects every structural error in one pass instead of stopping at the first (#208)', async () => {
+    // Two distinct unknown-leaf errors, not an out-of-range retries/concurrency
+    // (the MCP tool's own zod inputSchema already range-checks those before a
+    // call ever reaches this handler, unlike an unknown leaf name -- opSpecSchema
+    // only requires `name` be a string, see CLAUDE.md's OpSpec-validation
+    // footgun note about buildOp/opSpecSchema being two separate layers).
+    const result = await client.callTool({
+      name: 'validate_pipeline',
+      arguments: { spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'nope-1' }, { tag: 'leaf', name: 'nope-2' }] } },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { valid: boolean; errors: Array<{ path: string; message: string }> }
+    expect(body.valid).toBe(false)
+    expect(body.errors.some((e) => /unknown leaf "nope-1"/.test(e.message))).toBe(true)
+    expect(body.errors.some((e) => /unknown leaf "nope-2"/.test(e.message))).toBe(true)
+  })
+
+  it('plan_pipeline: reports a non-executing cost/capability audit (#361)', async () => {
+    const result = await client.callTool({
+      name: 'plan_pipeline',
+      arguments: { spec: { tag: 'map', op: { tag: 'leaf', name: 'extract' }, concurrency: 3 } },
+    })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { nodeCount: number; maxConcurrency: number; usesLlm: boolean; llmLeaves: string[] }
+    expect(body.nodeCount).toBe(2)
+    expect(body.maxConcurrency).toBe(3)
+    expect(body.usesLlm).toBe(true)
+    expect(body.llmLeaves).toEqual(['extract'])
   })
 })
 
@@ -251,6 +379,50 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await sinkServer.close()
   })
 
+  it('run_pipeline: a sink spec\'s opts.retries reaches buildOp through the MCP tool schema (not silently stripped), retrying a flaky write (#247)', async () => {
+    let calls = 0
+    const flakyServer = new McpServer({ name: 'test-flaky-sink', version: '0.0.0' })
+    registerFileopsTools(flakyServer, { opRunSinks: { flaky: { name: 'flaky', write: async (v) => { calls++; if (calls < 2) throw new Error('flaky'); return v } } } })
+    const flakyClient = new Client({ name: 'test-flaky-sink-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([flakyServer.connect(serverTransport), flakyClient.connect(clientTransport)])
+
+    const result = await flakyClient.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'sink', targets: ['flaky'], opts: { retries: 1 } }, input: { a: 1 } },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(calls).toBe(2)
+
+    await flakyClient.close()
+    await flakyServer.close()
+  })
+
+  it('run_pipeline: a sink spec\'s per-target `{ name, opts }` pair reaches buildOp through the MCP tool schema (not silently stripped), overriding the fanout-level opts.retries (#251)', async () => {
+    let logCalls = 0; let vaultCalls = 0
+    const fanoutServer = new McpServer({ name: 'test-fanout-sink', version: '0.0.0' })
+    registerFileopsTools(fanoutServer, {
+      opRunSinks: {
+        log: { name: 'log', write: async (v) => { logCalls++; if (logCalls < 3) throw new Error('flaky'); return v } },
+        vault: { name: 'vault', write: async () => { vaultCalls++; throw new Error('flaky') } },
+      },
+    })
+    const fanoutClient = new Client({ name: 'test-fanout-sink-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([fanoutServer.connect(serverTransport), fanoutClient.connect(clientTransport)])
+
+    const result = await fanoutClient.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'sink', targets: ['log', { name: 'vault', opts: { retries: 0 } }], opts: { retries: 3 } }, input: { a: 1 } },
+    })
+    expect(result.isError).toBeTruthy()
+    expect(logCalls).toBe(3)
+    expect(vaultCalls).toBe(1)
+
+    await fanoutClient.close()
+    await fanoutServer.close()
+  })
+
   it('run_pipeline: opts.opRunLlm wires a real Llm capability through to the summarize leaf', async () => {
     const llmServer = new McpServer({ name: 'test-llm', version: '0.0.0' })
     registerFileopsTools(llmServer, { opRunLlm: { markdownFromPdf: async () => { throw new Error('unused') }, summarize: async (text) => `summary of ${text}` } })
@@ -269,6 +441,24 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
     await llmServer.close()
   })
 
+  it('run_pipeline: opts.opRunAsk wires a real Ask capability through to an ask step', async () => {
+    const askServer = new McpServer({ name: 'test-ask', version: '0.0.0' })
+    registerFileopsTools(askServer, { opRunAsk: { request: async () => ({ answered: true, value: 'human answer' }) } })
+    const askClient = new Client({ name: 'test-ask-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([askServer.connect(serverTransport), askClient.connect(clientTransport)])
+
+    const result = await askClient.callTool({
+      name: 'run_pipeline',
+      arguments: { spec: { tag: 'ask', prompt: 'pick one', timeout: '10s', onTimeout: 'fail' }, input: 'default' },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toBe('human answer')
+
+    await askClient.close()
+    await askServer.close()
+  })
+
   it('run_pipeline: opts.opRunLeaves lets a host register a custom leaf a spec can name', async () => {
     const leavesServer = new McpServer({ name: 'test-leaves', version: '0.0.0' })
     registerFileopsTools(leavesServer, { opRunLeaves: { shout: async (input) => ({ shouted: input }) } })
@@ -282,6 +472,35 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
 
     await leavesClient.close()
     await leavesServer.close()
+  })
+
+  it('run_pipeline: a mid-flight MCP cancellation stops the next pipe step from running on the server (#279)', async () => {
+    const abortServer = new McpServer({ name: 'test-abort', version: '0.0.0' })
+    let secondRan = false
+    registerFileopsTools(abortServer, {
+      opRunLeaves: {
+        pauseThenContinue: async (input) => { await new Promise(resolve => setTimeout(resolve, 20)); return input },
+        neverRuns: async (input) => { secondRan = true; return input },
+      },
+    })
+    const abortClient = new Client({ name: 'test-abort-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([abortServer.connect(serverTransport), abortClient.connect(clientTransport)])
+
+    const controller = new AbortController()
+    const callPromise = abortClient.callTool(
+      { name: 'run_pipeline', arguments: { spec: { tag: 'pipe', steps: [{ tag: 'leaf', name: 'pauseThenContinue' }, { tag: 'leaf', name: 'neverRuns' }] }, input: { a: 1 } } },
+      undefined,
+      { signal: controller.signal },
+    )
+    await new Promise(resolve => setTimeout(resolve, 5)) // let the request reach the server and enter the first leaf
+    controller.abort() // client-side: rejects callPromise and sends a cancellation notification to the server
+    await callPromise.catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 30)) // give the server's in-flight run time to observe extra.signal and stop
+    expect(secondRan).toBe(false)
+
+    await abortClient.close()
+    await abortServer.close()
   })
 
   it('run_pipeline\'s tool description lists opts.opRunLeaves-registered leaves alongside the built-in registry (#158)', async () => {
@@ -314,5 +533,28 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
 
     await sinksClient.close()
     await sinksServer.close()
+  })
+
+  it('describe_pipeline reports opts.opRunLeaves/opRunSinks-registered names alongside the built-in registry', async () => {
+    const describeServer = new McpServer({ name: 'test-describe', version: '0.0.0' })
+    registerFileopsTools(describeServer, {
+      opRunLeaves: { shout: async (input) => input },
+      opRunSinks: { log: { name: 'log', write: async (v) => v } },
+    })
+    const describeClient = new Client({ name: 'test-describe-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([describeServer.connect(serverTransport), describeClient.connect(clientTransport)])
+
+    const result = await describeClient.callTool({ name: 'describe_pipeline', arguments: {} })
+    expect(result.isError).toBeFalsy()
+    const body = parseResult(result) as { leaves: Record<string, unknown>; sinks: string[] }
+    expect(Object.keys(body.leaves)).toContain('shout')
+    expect(body.sinks).toContain('log')
+
+    const validated = await describeClient.callTool({ name: 'validate_pipeline', arguments: { spec: { tag: 'leaf', name: 'shout' } } })
+    expect(parseResult(validated)).toEqual({ valid: true, errors: [] })
+
+    await describeClient.close()
+    await describeServer.close()
   })
 })

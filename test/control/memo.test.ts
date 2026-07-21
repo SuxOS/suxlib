@@ -14,3 +14,9 @@ test('memoKey does not collide with idempotencyKey for the same name+input', asy
   const name = 'shrink'; const input = { a: 1 }
   expect(await memoKey(name, input)).not.toBe(await idempotencyKey(name, input))
 })
+
+test('memoKey does not collide on differing Date fields', async () => {
+  const k1 = await memoKey('x', { scheduledFor: new Date('2020-01-01') })
+  const k2 = await memoKey('x', { scheduledFor: new Date('2030-06-15') })
+  expect(k1).not.toBe(k2)
+})
