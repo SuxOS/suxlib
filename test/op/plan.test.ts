@@ -27,6 +27,18 @@ test('planOpSpec reports the widest map/mapField concurrency without guessing at
   expect(plan.maxConcurrency).toBe(9)
 })
 
+test('planOpSpec reports an aimd concurrency spec\'s own `max`, defaulting to MAX_MAP_CONCURRENCY when unspecified (#195)', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'aimd', start: 2, min: 1, max: 16 } },
+      { tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: { kind: 'aimd' } },
+    ],
+  }
+  const plan = planOpSpec(spec)
+  expect(plan.maxConcurrency).toBe(32) // the unspecified-`max` mapField wins, defaulting to MAX_MAP_CONCURRENCY
+})
+
 test('planOpSpec reports sink targets and sums each target\'s own effective retries', () => {
   const spec: OpSpec = {
     tag: 'sink',

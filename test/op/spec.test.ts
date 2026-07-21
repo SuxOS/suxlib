@@ -1,7 +1,7 @@
 import { test, expect } from 'vitest'
 import { zipSync } from 'fflate'
 import { PDFDocument } from 'pdf-lib'
-import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, type OpSpec } from '../../src/op/spec.js'
+import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, MAX_SINK_TARGETS, type OpSpec, type OpSpecConcurrency } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
 import { putBytes, resolve, resolveText } from '../../src/handles/handle.js'
@@ -126,6 +126,25 @@ test('buildOp rejects `params` on a bare-Handle-input leaf, so a caller cannot o
   expect(() => buildOp({ tag: 'leaf', name: 'stamp', params: { r2Key: 'cas/other-key' } })).toThrow(/`params` cannot be used on a bare-Handle input/)
 })
 
+test('buildOp rejects `params` on a host-registered extraLeaves leaf with no declared LEAF_SHAPES entry, closing the same bypass for an undeclared shape that might be a bare Handle (#174)', () => {
+  const shout: (input: unknown) => Promise<unknown> = async (input) => ({ shouted: input })
+  expect(() => buildOp({ tag: 'leaf', name: 'shout', params: { r2Key: 'cas/other-key' } }, { shout }))
+    .toThrow(/leaf "shout": `params` cannot be used on a leaf with no declared LEAF_SHAPES entry/)
+})
+
+test('validateOpSpec reports the same extraLeaves `params` denial buildOp throws (#174)', () => {
+  const shout: (input: unknown) => Promise<unknown> = async (input) => ({ shouted: input })
+  const errors = validateOpSpec({ tag: 'leaf', name: 'shout', params: { r2Key: 'cas/other-key' } }, { shout })
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(/`params` cannot be used on a leaf with no declared LEAF_SHAPES entry/)
+})
+
+test('validateOpSpec still reports the built-in bare-Handle `params` denial the same way buildOp does (#172)', () => {
+  const errors = validateOpSpec({ tag: 'leaf', name: 'scrub', params: { r2Key: 'cas/other-key' } })
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(/`params` cannot be used on a bare-Handle input/)
+})
+
 test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })
@@ -175,6 +194,20 @@ test('buildOp rejects a sink spec with a non-string target', () => {
   expect(() => buildOp({ tag: 'sink', targets: [1 as unknown as string] })).toThrow(/targets/)
 })
 
+test('buildOp bounds sink.fanout `targets` width so an unbounded fan-out can\'t reach an unlimited number of concurrent writes (#307)', () => {
+  const tooMany = Array.from({ length: MAX_SINK_TARGETS + 1 }, (_, i) => `t${i}`)
+  expect(() => buildOp({ tag: 'sink', targets: tooMany })).toThrow(new RegExp(`cannot exceed ${MAX_SINK_TARGETS} entries`))
+  const justRight = Array.from({ length: MAX_SINK_TARGETS }, (_, i) => `t${i}`)
+  expect(() => buildOp({ tag: 'sink', targets: justRight })).not.toThrow()
+})
+
+test('validateOpSpec reports the same sink `targets` width cap buildOp throws (#307)', () => {
+  const tooMany = Array.from({ length: MAX_SINK_TARGETS + 1 }, (_, i) => `t${i}`)
+  const errors = validateOpSpec({ tag: 'sink', targets: tooMany })
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(new RegExp(`cannot exceed ${MAX_SINK_TARGETS} entries`))
+})
+
 test('buildOp rejects an out-of-range sink `opts.retries` (#247)', () => {
   expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { retries: -1 } })).toThrow(/opts\.retries/)
   expect(() => buildOp({ tag: 'sink', targets: ['out'], opts: { retries: MAX_LEAF_RETRIES + 1 } })).toThrow(/opts\.retries/)
@@ -219,6 +252,30 @@ test('buildOp rejects an empty pipe', () => {
 test('buildOp rejects an out-of-range map concurrency', () => {
   expect(() => buildOp({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 0 })).toThrow(/concurrency/)
   expect(() => buildOp({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: 33 })).toThrow(/concurrency/)
+})
+
+test('buildOp accepts an `{ kind: \'aimd\' }` concurrency spec for map/mapField, mirroring governor.ts\'s ConcurrencySpec (#195)', () => {
+  const mapTree = buildOp({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'aimd', start: 2, min: 1, max: 8 } }) as unknown as { concurrency: { limit: number } }
+  expect(mapTree.concurrency.limit).toBe(2)
+  const mapFieldTree = buildOp({
+    tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: { kind: 'aimd' },
+  }) as unknown as { concurrency: { limit: number } }
+  expect(mapFieldTree.concurrency.limit).toBe(4) // aimd()'s own default `start`
+})
+
+test('buildOp rejects an invalid aimd concurrency spec: unknown `kind`, out-of-range bounds, or `min` exceeding `max` (#195)', () => {
+  expect(() => buildOp({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'nope' } as unknown as OpSpecConcurrency })).toThrow(/concurrency/)
+  expect(() => buildOp({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'aimd', max: 999 } })).toThrow(/concurrency/)
+  expect(() => buildOp({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'aimd', min: 10, max: 2 } })).toThrow(/`min` cannot exceed `max`/)
+  expect(() => buildOp({
+    tag: 'mapField', arrayField: 'entries', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: { kind: 'aimd', min: 10, max: 2 },
+  })).toThrow(/`min` cannot exceed `max`/)
+})
+
+test('validateOpSpec reports the same aimd concurrency errors buildOp throws (#195)', () => {
+  const errors = validateOpSpec({ tag: 'map', op: { tag: 'leaf', name: 'scrub' }, concurrency: { kind: 'aimd', min: 10, max: 2 } })
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(/`min` cannot exceed `max`/)
 })
 
 test('buildOp rejects an out-of-range leaf retries', () => {

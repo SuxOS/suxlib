@@ -20,3 +20,15 @@ test('memoKey does not collide on differing Date fields', async () => {
   const k2 = await memoKey('x', { scheduledFor: new Date('2030-06-15') })
   expect(k1).not.toBe(k2)
 })
+
+test('memoKey ignores producedAt on a Handle-shaped object nested anywhere in input', async () => {
+  const k1 = await memoKey('shrink', { handle: { r2Key: 'cas/abc', sha256: 'abc', type: 'application/pdf', size: 3, producedAt: 111 } })
+  const k2 = await memoKey('shrink', { handle: { r2Key: 'cas/abc', sha256: 'abc', type: 'application/pdf', size: 3, producedAt: 222 } })
+  expect(k1).toBe(k2)
+})
+
+test('memoKey still hashes a producedAt field on a non-Handle-shaped object', async () => {
+  const k1 = await memoKey('shrink', { producedAt: 111 })
+  const k2 = await memoKey('shrink', { producedAt: 222 })
+  expect(k1).not.toBe(k2)
+})

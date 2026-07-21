@@ -1,19 +1,25 @@
-import type { Op, LeafFn, LeafOpts } from './types.js'
+import type { Op, LeafFn, LeafOpts, Concurrency } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
 import { op, pipe, map, mapField, sink, reconcile, catchOp, ask } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
-import { fixed } from '../control/aimd.js'
+import { fixed, aimd } from '../control/aimd.js'
 
 export type OpSpecLeafOpts = { retries?: number; heavy?: boolean; memo?: boolean; kind?: 'pure' | 'effect' }
 export type OpSpecSinkOpts = { retries?: number; heavy?: boolean; memo?: boolean }
 // Mirrors src/op/types.ts's SinkFanoutTarget -- a bare name falls back to the
 // sink spec's own `opts`, a `{ name, opts }` pair overrides per-field (#251).
 export type OpSpecSinkTarget = string | { name: string; opts?: OpSpecSinkOpts }
+// A plain number is shorthand for `{ kind: 'fixed', n }` (the only shape this
+// field supported before #195) -- an object form mirrors governor.ts's own
+// ConcurrencySpec discriminated union so a JSON spec can request adaptive
+// backpressure (aimd) the same way an in-process caller building an Op tree
+// by hand already could.
+export type OpSpecConcurrency = number | { kind: 'aimd'; start?: number; min?: number; max?: number }
 export type OpSpec =
   | { tag: 'leaf'; name: string; opts?: OpSpecLeafOpts; params?: Record<string, unknown> }
   | { tag: 'pipe'; steps: OpSpec[] }
-  | { tag: 'map'; op: OpSpec; concurrency: number }
-  | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: number; renameTo?: string }
+  | { tag: 'map'; op: OpSpec; concurrency: OpSpecConcurrency }
+  | { tag: 'mapField'; arrayField: string; elementField: string; op: OpSpec; concurrency: OpSpecConcurrency; renameTo?: string }
   | { tag: 'sink'; targets: OpSpecSinkTarget[]; opts?: OpSpecSinkOpts }
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
@@ -37,6 +43,11 @@ export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconci
 // into an unbounded retry storm or a huge fan-out.
 export const MAX_LEAF_RETRIES = 5
 export const MAX_MAP_CONCURRENCY = 32
+// sink.fanout runs every target fully concurrently (Promise.allSettled, no
+// limiter, unlike map/mapField's MAX_MAP_CONCURRENCY-capped `fixed()`), so a
+// caller-supplied `targets` array needs its own width cap for the same reason
+// (#307) -- reachable from the unauthenticated-by-default POST /op/run.
+export const MAX_SINK_TARGETS = 32
 
 function shapeLabel(s: LeafShape): string {
   if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
@@ -192,6 +203,37 @@ export type OpSpecError = { path: string; message: string }
 
 const isBadFieldName = (f: unknown): boolean => typeof f !== 'string' || !f || f === '__proto__' || f === 'constructor' || f === 'prototype'
 
+const isInMapConcurrencyRange = (n: unknown): boolean => n === undefined || (Number.isInteger(n) && (n as number) >= 1 && (n as number) <= MAX_MAP_CONCURRENCY)
+
+// A map/mapField `concurrency` field is either a plain number (fixed()
+// shorthand, range-checked exactly as before #195) or an `{ kind: 'aimd', ... }`
+// spec mirroring governor.ts's ConcurrencySpec -- mirrored by buildOpNode's
+// map/mapField cases below, same one-source-of-truth tradeoff isValidSinkTarget
+// above already accepts. Returns an error message, or undefined if valid.
+function concurrencySpecError(tagLabel: string, c: unknown): string | undefined {
+  if (typeof c === 'number') {
+    if (!Number.isInteger(c) || c < 1 || c > MAX_MAP_CONCURRENCY) {
+      return `${tagLabel} spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}, or an \`{ kind: 'aimd', start?, min?, max? }\` spec`
+    }
+    return undefined
+  }
+  if (!c || typeof c !== 'object' || Array.isArray(c) || (c as { kind?: unknown }).kind !== 'aimd') {
+    return `${tagLabel} spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}, or an \`{ kind: 'aimd', start?, min?, max? }\` spec`
+  }
+  const { start, min, max } = c as { start?: unknown; min?: unknown; max?: unknown }
+  if (!isInMapConcurrencyRange(start) || !isInMapConcurrencyRange(min) || !isInMapConcurrencyRange(max)) {
+    return `${tagLabel} spec's \`concurrency\` aimd \`start\`/\`min\`/\`max\`, if present, must each be an integer between 1 and ${MAX_MAP_CONCURRENCY}`
+  }
+  if (typeof min === 'number' && typeof max === 'number' && min > max) {
+    return `${tagLabel} spec's \`concurrency\` aimd \`min\` cannot exceed \`max\``
+  }
+  return undefined
+}
+
+function buildConcurrency(c: OpSpecConcurrency): Concurrency {
+  return typeof c === 'number' ? fixed(c) : aimd({ start: c.start, min: c.min, max: c.max })
+}
+
 // A sink target is either a bare non-empty name, or a `{ name, opts? }` pair
 // whose own opts.retries (if present) is range-checked the same way the
 // fanout-level opts.retries already is (#251) -- mirrored by buildOpNode's
@@ -272,6 +314,13 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       }
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         errors.push({ path, message: `leaf "${spec.name}": \`params\` must be an object` })
+      } else if (spec.params !== undefined) {
+        const shapeEntry = LEAF_SHAPES[spec.name]
+        if (!shapeEntry) {
+          errors.push({ path, message: `leaf "${spec.name}": \`params\` cannot be used on a leaf with no declared LEAF_SHAPES entry -- a host-registered extraLeaves leaf's undeclared shape defaults to denying \`params\` since it might take a bare Handle input, the same Store-read bypass #172 closed for built-ins (#174)` })
+        } else if (shapeEntry.input === 'handle' || shapeEntry.input === 'handle[]') {
+          errors.push({ path, message: `leaf "${spec.name}": \`params\` cannot be used on a bare-Handle input -- merging onto a Handle's own fields (r2Key/sha256/...) would let a caller overwrite its identity/location and read arbitrary Store entries (#172)` })
+        }
       }
       return
     }
@@ -297,9 +346,8 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
     case 'map': {
       if (!spec.op) errors.push({ path, message: 'map spec requires an `op`' })
       else collectSpecErrors(spec.op, leaves, `${path}.op`, errors)
-      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
-        errors.push({ path, message: `map spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}` })
-      }
+      const concurrencyErr = concurrencySpecError('map', spec.concurrency)
+      if (concurrencyErr) errors.push({ path, message: concurrencyErr })
       return
     }
     case 'mapField': {
@@ -314,14 +362,15 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       }
       if (!spec.op) errors.push({ path, message: 'mapField spec requires an `op`' })
       else collectSpecErrors(spec.op, leaves, `${path}.op`, errors)
-      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
-        errors.push({ path, message: `mapField spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}` })
-      }
+      const concurrencyErr = concurrencySpecError('mapField', spec.concurrency)
+      if (concurrencyErr) errors.push({ path, message: concurrencyErr })
       return
     }
     case 'sink': {
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
         errors.push({ path, message: 'sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES })
+      } else if (spec.targets.length > MAX_SINK_TARGETS) {
+        errors.push({ path, message: `sink spec's \`targets\` array cannot exceed ${MAX_SINK_TARGETS} entries (got ${spec.targets.length}) -- sink.fanout runs every target fully concurrently with no limiter` })
       }
       const so = spec.opts?.retries
       if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
@@ -399,9 +448,14 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       if (spec.params !== undefined && (typeof spec.params !== 'object' || spec.params === null || Array.isArray(spec.params))) {
         throw new Error(`leaf "${spec.name}": \`params\` must be an object`)
       }
-      const inputShape = LEAF_SHAPES[spec.name]?.input
-      if (spec.params !== undefined && (inputShape === 'handle' || inputShape === 'handle[]')) {
-        throw new Error(`leaf "${spec.name}": \`params\` cannot be used on a bare-Handle input -- merging onto a Handle's own fields (r2Key/sha256/...) would let a caller overwrite its identity/location and read arbitrary Store entries (#172)`)
+      if (spec.params !== undefined) {
+        const shapeEntry = LEAF_SHAPES[spec.name]
+        if (!shapeEntry) {
+          throw new Error(`leaf "${spec.name}": \`params\` cannot be used on a leaf with no declared LEAF_SHAPES entry -- a host-registered extraLeaves leaf's undeclared shape defaults to denying \`params\` since it might take a bare Handle input, the same Store-read bypass #172 closed for built-ins (#174)`)
+        }
+        if (shapeEntry.input === 'handle' || shapeEntry.input === 'handle[]') {
+          throw new Error(`leaf "${spec.name}": \`params\` cannot be used on a bare-Handle input -- merging onto a Handle's own fields (r2Key/sha256/...) would let a caller overwrite its identity/location and read arbitrary Store entries (#172)`)
+        }
       }
       const opts: LeafOpts = { kind: o.kind ?? 'effect', retries: o.retries ?? 0, heavy: o.heavy, memo: o.memo }
       const params = spec.params
@@ -432,10 +486,9 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
     }
     case 'map': {
       if (!spec.op) throw new Error('map spec requires an `op`')
-      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
-        throw new Error(`map spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
-      }
-      return map(buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency) })
+      const concurrencyErr = concurrencySpecError('map', spec.concurrency)
+      if (concurrencyErr) throw new Error(concurrencyErr)
+      return map(buildOpNode(spec.op, leaves), { concurrency: buildConcurrency(spec.concurrency) })
     }
     case 'mapField': {
       if (!spec.op) throw new Error('mapField spec requires an `op`')
@@ -449,14 +502,16 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       if (spec.renameTo !== undefined && isBadFieldName(spec.renameTo)) {
         throw new Error('mapField spec\'s `renameTo`, if present, must be a non-empty string (not `__proto__`/`constructor`/`prototype`)')
       }
-      if (!Number.isInteger(spec.concurrency) || spec.concurrency < 1 || spec.concurrency > MAX_MAP_CONCURRENCY) {
-        throw new Error(`mapField spec's \`concurrency\` must be an integer between 1 and ${MAX_MAP_CONCURRENCY}`)
-      }
-      return mapField(spec.arrayField, spec.elementField, buildOpNode(spec.op, leaves), { concurrency: fixed(spec.concurrency), renameTo: spec.renameTo })
+      const concurrencyErr = concurrencySpecError('mapField', spec.concurrency)
+      if (concurrencyErr) throw new Error(concurrencyErr)
+      return mapField(spec.arrayField, spec.elementField, buildOpNode(spec.op, leaves), { concurrency: buildConcurrency(spec.concurrency), renameTo: spec.renameTo })
     }
     case 'sink': {
       if (!Array.isArray(spec.targets) || !spec.targets.length || !spec.targets.every(isValidSinkTarget)) {
         throw new Error('sink spec requires a non-empty `targets` array, each a non-empty string or `{ name, opts? }` with `opts.retries` (if present) an integer between 0 and ' + MAX_LEAF_RETRIES)
+      }
+      if (spec.targets.length > MAX_SINK_TARGETS) {
+        throw new Error(`sink spec's \`targets\` array cannot exceed ${MAX_SINK_TARGETS} entries (got ${spec.targets.length}) -- sink.fanout runs every target fully concurrently with no limiter`)
       }
       const so = spec.opts?.retries
       if (so !== undefined && (!Number.isInteger(so) || so < 0 || so > MAX_LEAF_RETRIES)) {
