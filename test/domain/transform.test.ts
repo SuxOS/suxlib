@@ -99,6 +99,23 @@ test('parseYaml reads a block scalar nested under a sequence item\'s own key', (
   expect(parseYaml('items:\n  - note: |\n      hi\n      there\n    other: x\n')).toEqual({ items: [{ note: 'hi\nthere\n', other: 'x' }] })
 })
 
+test('parseYaml preserves a blank line embedded inside a literal block scalar body (#392)', () => {
+  expect(parseYaml('note: |\n  para1\n\n  para2\nkey: value\n')).toEqual({ note: 'para1\n\npara2\n', key: 'value' })
+})
+
+test('parseYaml folds a blank line inside a folded block scalar body into a paragraph break (#392)', () => {
+  expect(parseYaml('note: >\n  para1\n\n  para2\nkey: value\n')).toEqual({ note: 'para1\n\npara2\n', key: 'value' })
+})
+
+test('parseYaml trims leading/trailing blank lines around a block scalar body, keeping only embedded ones (#392)', () => {
+  expect(parseYaml('note: |-\n  para1\n\n  para2\n\n\nkey: value\n')).toEqual({ note: 'para1\n\npara2', key: 'value' })
+})
+
+test('parseYaml skips a blank line between sibling map keys and between sequence items', () => {
+  expect(parseYaml('a: 1\n\nb: 2\n')).toEqual({ a: 1, b: 2 })
+  expect(parseYaml('- 1\n\n- 2\n')).toEqual([1, 2])
+})
+
 test('parseYaml and parseXml guard against prototype pollution via __proto__ keys', () => {
   const y = parseYaml('__proto__:\n  polluted: true\nq: hi') as Record<string, unknown>
   expect(({} as Record<string, unknown>).polluted).toBeUndefined()
