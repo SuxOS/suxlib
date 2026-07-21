@@ -723,12 +723,12 @@ test('buildOp builds a race node that settles once `need` branches succeed, coll
   expect(result).toHaveLength(2)
 })
 
-test('buildOp defaults race\'s `need` to 1 (first success wins)', async () => {
+test('buildOp defaults race\'s `need` to 1 (first success wins), resolving the bare winning value (#431)', async () => {
   const spec: OpSpec = { tag: 'race', ops: [{ tag: 'leaf', name: 'stamp' }] }
   const store = new MemoryStore()
   const handle = await putBytes(store, new Uint8Array([1, 2, 3]), 'application/octet-stream')
   const result = await runInline(buildOp(spec), handle, { store, llm: {} as any, clock: { now: () => 0 }, sinks: {} })
-  expect(result).toHaveLength(1)
+  expect(Array.isArray(result)).toBe(false)
 })
 
 test('buildOp rejects a race spec with an empty `ops` array', () => {
@@ -761,7 +761,18 @@ test('validateOpSpec reports the same race `ops`/`need` errors buildOp throws, d
   expect(errors.some((e) => e.path === '$.ops[1]' && /unknown leaf "nope-b"/.test(e.message))).toBe(true)
 })
 
-test('buildOp\'s race-boundary shape check derives `handle[]` when every branch\'s own output is a bare `handle`, catching a downstream mismatch (#429)', () => {
+test('buildOp\'s race-boundary shape check derives `handle[]` when `need` > 1 and every branch\'s own output is a bare `handle`, catching a downstream mismatch (#429)', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'race', ops: [{ tag: 'leaf', name: 'extract' }, { tag: 'leaf', name: 'extract' }], need: 2 },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("race"\) produces handle\[\]/)
+})
+
+test('buildOp\'s race-boundary shape check follows cond/catch\'s bare-value rule at the need:1 default, so a downstream step matching the branches\' own shape is accepted, not flagged as a mismatch (#431)', () => {
   const spec: OpSpec = {
     tag: 'pipe',
     steps: [
@@ -769,7 +780,7 @@ test('buildOp\'s race-boundary shape check derives `handle[]` when every branch\
       { tag: 'leaf', name: 'unwrapHandle' },
     ],
   }
-  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("race"\) produces handle\[\]/)
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("race"\) produces handle$/)
 })
 
 test('buildOp\'s race-boundary shape check falls back to \'unknown\' (never blocks a downstream step) when branches disagree on output shape', () => {

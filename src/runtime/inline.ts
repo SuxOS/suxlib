@@ -385,7 +385,14 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
                 settled++
                 if (done) return
                 wins.push(v)
-                if (wins.length >= need) { done = true; raceController.abort(); resolve(wins) }
+                // need:1 (the default, "first success wins") resolves the
+                // bare winning value instead of a length-1 array -- matching
+                // cond/catch's convention of resolving to whichever single
+                // branch actually ran, and JS's own Promise.any, rather than
+                // forcing every caller to unwrap `result[0]` for the common
+                // case (#431). need > 1 still collects the full quorum into
+                // an array, since there's no single bare value to resolve.
+                if (wins.length >= need) { done = true; raceController.abort(); resolve(need === 1 ? wins[0] : wins) }
               },
               (e) => {
                 settled++

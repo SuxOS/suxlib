@@ -239,13 +239,13 @@ test('runInline feeds parallel\'s array-of-results straight into reconcile, comp
   expect(text).toContain('from-b')
 })
 
-test('runInline\'s race resolves with an array holding the first branch to succeed by default (need: 1) (#429)', async () => {
+test('runInline\'s race resolves the bare value of the first branch to succeed by default (need: 1) (#429, #431)', async () => {
   const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
   const tree = race([
     op('slow', async () => { await new Promise((r) => setTimeout(r, 20)); return 'slow' }, { kind: 'pure' }),
     op('fast', async () => 'fast', { kind: 'pure' }),
   ])
-  expect(await runInline(tree, 'v', caps)).toEqual(['fast'])
+  expect(await runInline(tree, 'v', caps)).toBe('fast')
 })
 
 test('runInline\'s race settles once `need` branches succeed, without waiting for a still-slower branch (#429)', async () => {
@@ -316,7 +316,7 @@ test('runInline\'s race stops a losing pipe branch from starting its next step o
     ),
   ])
   const result = await runInline(tree, 'in', caps)
-  expect(result).toEqual(['fast'])
+  expect(result).toBe('fast')
   // Gives the still-running losing branch's timer a chance to fire -- the
   // internal race signal aborted the moment 'fast' won, so its pipe's second
   // step must never start even once its first step finishes.
