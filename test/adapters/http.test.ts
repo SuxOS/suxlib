@@ -313,7 +313,7 @@ describe('http adapter', () => {
     const env: Env = { opRunCheckpoint: new MemoryCheckpoint() }
     const res = await post('op/run/status', { spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 }, runId: 'never-ran' }, {}, env)
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ done: false })
+    expect(await res.json()).toEqual({ done: false, started: false })
   })
 
   it('POST /op/run/status: reports { done: true, result } for a finished checkpointed run (#409)', async () => {

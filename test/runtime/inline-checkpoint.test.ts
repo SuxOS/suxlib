@@ -127,6 +127,31 @@ test('runInline checkpoints a sink target independently of its siblings, so a re
   expect(vaultAttempts).toBe(2)
 })
 
+test('runInline writes an in-progress marker at node-enter, distinguishable from never-started, even before the node finishes (#425)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const leaf = op('id', async (n: number) => n + 1, { kind: 'pure' })
+  const caps = baseCaps(checkpoint)
+  const runId = 'run-1'
+  expect(await checkpoint.get(runId, '')).toBeUndefined()
+  await runInline(leaf, 1, caps, undefined, '', runId)
+  expect(await checkpoint.get(runId, '')).toEqual({ done: true, value: 2 })
+})
+
+test('runInline re-runs a node whose checkpoint entry is only the in-progress marker (crashed before node-exit) instead of treating it as done (#425)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  let calls = 0
+  const leaf = op('id', async (n: number) => { calls++; return n + 1 }, { kind: 'pure' })
+  const caps = baseCaps(checkpoint)
+  const runId = 'run-1'
+  // Simulate a crash after node-enter recorded the marker but before node-exit
+  // ever ran put().
+  await checkpoint.start(runId, '')
+  expect(await checkpoint.get(runId, '')).toEqual({ done: false })
+  expect(await runInline(leaf, 1, caps, undefined, '', runId)).toBe(2)
+  expect(calls).toBe(1)
+  expect(await checkpoint.get(runId, '')).toEqual({ done: true, value: 2 })
+})
+
 test('runInline resumes a sink.fanout with duplicate target names, re-running only the copy that never finished (#423)', async () => {
   const checkpoint = new MemoryCheckpoint()
   let attempts = 0

@@ -686,7 +686,7 @@ describe('mcp adapter: check_pipeline_status (#409)', () => {
 
     const spec = { tag: 'leaf', name: 'shout' }
     const neverRan = await checkpointClient.callTool({ name: 'check_pipeline_status', arguments: { spec, input: { a: 1 }, runId: 'never-ran' } })
-    expect(parseResult(neverRan)).toEqual({ done: false })
+    expect(parseResult(neverRan)).toEqual({ done: false, started: false })
 
     const runResult = await checkpointClient.callTool({ name: 'run_pipeline', arguments: { spec, input: { a: 1 } } })
     const { runId } = parseResult(runResult) as { runId: string }

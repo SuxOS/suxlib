@@ -73,15 +73,25 @@ let traceCallSeq = 0
 //
 // Checkpoint resume (#390): when caps.checkpoint is supplied, every node --
 // not just 'leaf' -- consults it by (runId, path) before doing any work at
-// all, and persists its result after. A hit short-circuits entirely (no
-// callId minted, no trace event, no governor call, `fn` never invoked), so a
-// runInline call sharing a prior run's runId skips re-executing any subtree
-// already recorded -- a completed leaf, sink target, or a whole finished
-// composite node. Since `path` already addresses individual map/mapField
-// items and sink fanout targets, this gives partial-fanout resume for free:
-// only the still-unfinished items of an in-flight fan-out actually re-run.
-// With no caps.checkpoint (the common case), this is a pure no-op -- same
-// degrade-gracefully contract as caps.ask/caps.cache.
+// all, and persists its result after. A `{ done: true }` hit short-circuits
+// entirely (no callId minted, no trace event, no governor call, `fn` never
+// invoked), so a runInline call sharing a prior run's runId skips
+// re-executing any subtree already recorded -- a completed leaf, sink
+// target, or a whole finished composite node. Since `path` already addresses
+// individual map/mapField items and sink fanout targets, this gives
+// partial-fanout resume for free: only the still-unfinished items of an
+// in-flight fan-out actually re-run. With no caps.checkpoint (the common
+// case), this is a pure no-op -- same degrade-gracefully contract as
+// caps.ask/caps.cache.
+//
+// In-progress marker (#425): a `{ done: false }` hit (started but never
+// finished, e.g. a prior crash) does NOT short-circuit -- `run()` calls
+// `checkpoint.start(runId, path)` again right before invoking `fn`, and lets
+// the node re-execute normally. `start()` is what lets a status query
+// distinguish "never started" (checkpoint.get returns `undefined`) from
+// "started, no result yet" (`{ done: false }`, covering both a still-running
+// and a crashed run -- indistinguishable from ledger state alone) at any
+// path a caller cares to check, not just the root.
 //
 // `runSig` (#398) namespaces that (runId, path) ledger by a hash of the run's
 // spec/root input -- runId alone is a caller-supplied string a network caller
@@ -124,10 +134,11 @@ async function traced<T>(tag: string, name: string | undefined, path: string, ru
   const checkpointRunId = checkpointKey(runId, runSig)
   if (checkpoint) {
     const recorded = await checkpoint.get(checkpointRunId, path)
-    if (recorded) return recorded.value as T
+    if (recorded?.done) return recorded.value as T
   }
   const callId = String(++traceCallSeq)
   const run = async (): Promise<T> => {
+    if (checkpoint) await checkpoint.start(checkpointRunId, path)
     const result = await fn(callId)
     if (checkpoint) await checkpoint.put(checkpointRunId, path, result)
     return result

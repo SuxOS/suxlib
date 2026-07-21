@@ -396,8 +396,9 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         description:
           'Cheaply check whether a previously checkpointed `run_pipeline` call has finished, without re-executing it (#409). ' +
           'Requires the exact `spec`/`input` the run used (to recompute its runSig, the same #398 guard `run_pipeline` itself applies) ' +
-          'and the `runId` that call returned. Requires `opRunCheckpoint` to be configured server-side; returns `{ done: false }` for a ' +
-          'run that is still in progress, crashed mid-run, or never started -- those aren\'t distinguishable from each other yet.',
+          'and the `runId` that call returned. Requires `opRunCheckpoint` to be configured server-side; returns `{ done: false, started }` ' +
+          '-- `started: false` for a run that was never started, `started: true` for one that is still in progress or crashed mid-run ' +
+          '(those two remain indistinguishable from each other).',
         inputSchema: { spec: opSpecSchema, input: z.unknown(), runId: z.string() },
       },
       async ({ spec, input, runId }) => {

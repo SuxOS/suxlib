@@ -46,6 +46,11 @@ const checkpointConfigModule =
   '  const m = new Map()\n' +
   '  return {\n' +
   '    async get(runId, path) { return m.get(runId)?.get(path) },\n' +
+  '    async start(runId, path) {\n' +
+  '      let byPath = m.get(runId)\n' +
+  '      if (!byPath) { byPath = new Map(); m.set(runId, byPath) }\n' +
+  '      if (!byPath.has(path)) byPath.set(path, { done: false })\n' +
+  '    },\n' +
   '    async put(runId, path, value) {\n' +
   '      let byPath = m.get(runId)\n' +
   '      if (!byPath) { byPath = new Map(); m.set(runId, byPath) }\n' +
@@ -709,7 +714,7 @@ describe('cli `pipeline status` (real CLI entry point)', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     await main(['node', 'suxlib-fileops', 'pipeline', 'status', specPath, '--run-id', 'never-ran', '--config', configPath], { leaves: { shout: async (input) => input } })
     expect(process.exitCode).toBeFalsy()
-    expect(JSON.parse(logSpy.mock.calls[0][0] as string)).toEqual({ done: false })
+    expect(JSON.parse(logSpy.mock.calls[0][0] as string)).toEqual({ done: false, started: false })
 
     const configModule = (await import(pathToFileURL(resolve(configPath)).href)) as { default: { checkpoint: Checkpoint } }
     await runOpSpec({ spec, input: { a: 1 }, runId: 'known-run-id' }, { leaves: { shout: async (input) => input }, checkpoint: configModule.default.checkpoint })

@@ -322,7 +322,7 @@ export async function runOpSpec({ spec, input, trace, runId }: OpRunRequest, opt
 
 export type OpRunStatusRequest = { spec: OpSpec; input: unknown; runId: string }
 export type OpRunStatusOpts = { checkpoint: Checkpoint; store?: Store }
-export type OpRunStatus = { done: true; result: unknown } | { done: false }
+export type OpRunStatus = { done: true; result: unknown } | { done: false; started: boolean }
 
 /**
  * Cheap "has this checkpointed run finished, and if so what did it return"
@@ -335,13 +335,13 @@ export type OpRunStatus = { done: true; result: unknown } | { done: false }
  * request naming a stranger's `runId` alongside a mismatched spec/input
  * misses the ledger entirely rather than reading that run's result.
  *
- * Deliberately narrow: `Checkpoint.get`/`put` only distinguish "done" from
- * "no entry yet" (src/effects/types.ts), so this can only ever answer `{
- * done: false }` for a run that's still in progress, crashed mid-run, or
- * never started -- there is no separate in-progress marker to report on.
- * Giving those cases distinct answers needs a real `Checkpoint` interface
- * extension (touching every implementation and every `traced()` call site),
- * which is out of scope here -- see #409's own issue text.
+ * `started` (#425) distinguishes "never started" (`false`, no root-node
+ * checkpoint entry at all) from "started, no result recorded yet" (`true`,
+ * `traced()`'s in-progress marker) when `done` is `false`. It can't tell a
+ * still-executing run apart from one that crashed mid-run -- that needs a
+ * liveness signal this ledger doesn't carry -- but "never touched this
+ * runId" vs "made it past node-enter" is now a real distinction instead of
+ * both collapsing to the same `{ done: false }`.
  *
  * `opts.store`, when supplied, dehydrates a Handle-shaped recorded result
  * back to base64 the same way `runOpSpec` does -- omit it only when the
@@ -351,6 +351,7 @@ export type OpRunStatus = { done: true; result: unknown } | { done: false }
 export async function runOpSpecStatus({ spec, input, runId }: OpRunStatusRequest, opts: OpRunStatusOpts): Promise<OpRunStatus> {
   const runSig = await runIdentity(spec, input)
   const recorded = await opts.checkpoint.get(checkpointKey(runId, runSig), '')
-  if (!recorded) return { done: false }
+  if (!recorded) return { done: false, started: false }
+  if (!recorded.done) return { done: false, started: true }
   return { done: true, result: opts.store ? await dehydrate(opts.store, recorded.value) : recorded.value }
 }
