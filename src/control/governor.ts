@@ -38,6 +38,12 @@ export interface RunGovernedOpts {
   // for why this is a separate stream from onEvent above. runGoverned itself
   // never reads this field; runInline's `traced()` wrapper is what emits it.
   onTrace?: TraceEventHandler
+  // Opt-in alongside onTrace (#234): also persists a Handle snapshot of each
+  // node's actual input/output through caps.store and attaches it to the
+  // TraceEvent as inputRef/outputRef. No effect without onTrace also set --
+  // see src/control/trace.ts's header comment for why this is a second,
+  // separately-gated cost rather than folded into onTrace itself.
+  traceSnapshots?: boolean
   // Cooperative-cancellation signal (#279): checked at runGoverned's retry
   // loop and at runInline's per-node traced() wrapper. A leaf/sink write's
   // in-flight effect call itself is never preempted -- this only stops the

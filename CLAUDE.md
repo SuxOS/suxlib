@@ -151,6 +151,17 @@ There is no linter in this repo. Run both locally before pushing.
   log output; it's almost certainly a real finding to address, not the old
   infra gap. If the missing-script error ever reappears, it needs a fresh
   issue, not a reopen of these two (their history is long and mostly moot).
+- **A suxbot-filed issue about the low-tier dispatcher re-selecting a
+  specific blocked issue (e.g. #313 on #264) is usually fixable directly
+  from suxlib, without touching `SuxOS/.github`'s reusable
+  `issue-build.yml`**: just `gh issue edit <n> --add-label hold` (or
+  `needs-human`) on the offending issue. Both labels are already an EXPAND
+  exclusion signal this task's own instructions honor ("not already
+  labelled `building`/`hold`/`needs-human`"), so the batch dispatcher almost
+  certainly honors them the same way — confirmed by #320/#337 themselves,
+  which stopped being re-claimed once labelled `needs-human` (#314). Check
+  this before assuming a dispatcher-loop meta-issue needs a cross-repo code
+  change.
 
 ## Consumers
 
@@ -790,3 +801,21 @@ There is no linter in this repo. Run both locally before pushing.
   string — don't assume it's safe to use directly as, say, a DB row key
   without accounting for the embedded `\0` and its length (a 64-hex-char
   SHA-256 digest tacked on).
+- Trace-snapshot convention (#234): `RunGovernedOpts.traceSnapshots` is a
+  second, independent opt-in layered on top of `onTrace` — when both are set,
+  `traced()` (`src/runtime/inline.ts`) additionally persists a JSON snapshot
+  of each node's actual input/output through `caps.store` (`snapshotValue`,
+  `src/control/trace.ts`) and attaches the resulting `Handle` to the
+  `TraceEvent` as `inputRef`/`outputRef`. `snapshotValue` caps snapshot size
+  at `MAX_SNAPSHOT_BYTES` (skip, don't throw, on oversize or
+  non-JSON-serializable input) — folded in from the start rather than left as
+  a follow-up, since an unbounded per-node Store write is exactly the kind of
+  bomb-guard gap this repo's security review has flagged before elsewhere.
+  `OpRunRequest.trace: 'full'` (distinct from the existing boolean `true`) is
+  the adapter-level opt-in, wired through `POST /op/run`, `run_pipeline`, and
+  `pipeline run --trace full` alike; `runOpSpec` dehydrates the collected
+  trace array through the same `dehydrate()` pass the bare result already
+  gets — `dehydrate` recurses into arbitrary objects/arrays, so this needs no
+  TraceEvent-specific unwrapping, it just needs to be called on the array
+  too. Any future addition to `TraceEvent`'s shape should re-check the same
+  three literal-shape test files #366's note above already names.

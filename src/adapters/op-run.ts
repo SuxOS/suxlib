@@ -144,6 +144,15 @@ async function runIdentity(spec: OpSpec, input: unknown): Promise<string> {
  * present -- `trace: true` doesn't replace a live callback, it adds a
  * buffered one.
  *
+ * `trace: 'full'` (#234) additionally turns on `gOpts.traceSnapshots`, so
+ * every collected `TraceEvent` may carry an `inputRef`/`outputRef` Handle
+ * snapshotting the value that actually flowed through that node -- and,
+ * since those Handles resolve against this call's own `store`, the
+ * collected `trace` array is run through `dehydrate()` (the same pass the
+ * bare `result` already gets) before being returned, so a JSON caller sees
+ * plain `{ base64, type, size }` refs instead of a Handle it has no Store to
+ * resolve against.
+ *
  * `runId`: opt-in, for a caller that wants to *resume* a previously
  * checkpointed run (#396) -- pass back the `runId` a prior call returned (see
  * `OpRunOpts.checkpoint` below) to share that run's checkpoint ledger,
@@ -156,7 +165,7 @@ async function runIdentity(spec: OpSpec, input: unknown): Promise<string> {
  * misses the ledger entirely rather than reading that other run's results --
  * see `runIdentity` below (#398).
  */
-export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean; runId?: string }
+export type OpRunRequest = { spec: OpSpec; input: unknown; trace?: boolean | 'full'; runId?: string }
 
 /**
  * Governors/cache/store a host wants shared across calls (createGovernor per
@@ -278,12 +287,19 @@ export async function runOpSpec({ spec, input, trace, runId }: OpRunRequest, opt
         }
         userOnTrace?.(e)
       },
+      traceSnapshots: trace === 'full' || opts.gOpts?.traceSnapshots,
     }
   }
   const result = await runInline(tree, hydrated, caps, gOpts, '', effectiveRunId, runSig)
   const dehydrated = await dehydrate(store, result)
+  // events may carry Handle-shaped inputRef/outputRef snapshots (trace:
+  // 'full') -- dehydrate() recurses into arbitrary objects/arrays, so
+  // running the whole collected array through it turns any nested Handle
+  // into a plain base64 ref the same way the bare result already is, and is
+  // a pure no-op for every other TraceEvent field.
+  const dehydratedEvents = events ? await dehydrate(store, events) as TraceEvent[] : undefined
   if (opts.checkpoint) {
-    return trace ? { result: dehydrated, trace: events, runId: effectiveRunId } : { result: dehydrated, runId: effectiveRunId }
+    return trace ? { result: dehydrated, trace: dehydratedEvents, runId: effectiveRunId } : { result: dehydrated, runId: effectiveRunId }
   }
-  return trace ? { result: dehydrated, trace: events } : dehydrated
+  return trace ? { result: dehydrated, trace: dehydratedEvents } : dehydrated
 }

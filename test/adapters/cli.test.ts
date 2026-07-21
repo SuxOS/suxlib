@@ -514,13 +514,12 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     errSpy.mockRestore()
   })
 
-  // Last `pipeline run` test in this describe block deliberately: pipelineRunCmd
-  // is a module-level Commander singleton (CLAUDE.md's "cli.ts's main() gotcha"),
-  // so any flag left implicit here would inherit whatever a *prior* test in this
-  // block last set it to, not its true default -- explicitly pass every flag a
-  // previous test has ever set (-o, --config) alongside --trace, rather than
-  // relying on any of them being freshly undefined. A stale --run-id may also
-  // linger from the resume test above, but it's inert here (no checkpoint is
+  // Deliberately not the last `pipeline run` test in this describe block
+  // anymore (see the next test's own comment) -- explicitly passes every
+  // flag a previous test has ever set (-o, --config) alongside --trace,
+  // rather than relying on any of them being freshly undefined, per
+  // CLAUDE.md's "cli.ts's main() gotcha". A stale --run-id may also linger
+  // from the resume test above, but it's inert here (no checkpoint is
   // configured, so runOpSpec never reads it).
   it('--trace includes a TraceEvent[] trace alongside the result', async () => {
     const work = tmpDir()
@@ -545,6 +544,40 @@ describe('cli `pipeline run` (real CLI entry point)', () => {
     expect(existsSync(join(outDir, printed.result.file))).toBe(true)
     expect(readFileSync(join(outDir, printed.result.file), 'utf8')).toBe('a: 1')
     expect(printed.trace.map((e) => e.kind)).toEqual(['node-enter', 'node-exit'])
+    logSpy.mockRestore()
+  })
+
+  // Last `pipeline run` test in this describe block deliberately (see
+  // CLAUDE.md's "cli.ts's main() gotcha") -- explicitly passes every flag a
+  // previous test has ever set (-o, --config, --trace) rather than relying
+  // on any of them being freshly undefined.
+  it('--trace full additionally attaches inputRef/outputRef snapshots', async () => {
+    const work = tmpDir()
+    const outDir = join(work, 'out')
+    const dataPath = join(work, 'data.json')
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(dataPath, '{"a":1}')
+    writeFileSync(configPath, 'export default {}\n')
+    writeFileSync(
+      specPath,
+      JSON.stringify({
+        spec: { tag: 'leaf', name: 'convert' },
+        input: { handle: { $file: 'data.json', type: 'application/json' }, from: 'json', to: 'yaml' },
+      }),
+    )
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'run', specPath, '-o', outDir, '--trace', 'full', '--config', configPath])
+    expect(process.exitCode).toBeFalsy()
+    const printed = JSON.parse(logSpy.mock.calls[0][0] as string) as {
+      result: { file: string }
+      trace: Array<{ kind: string; inputRef?: { base64: string }; outputRef?: { base64: string } }>
+    }
+    const enter = printed.trace.find((e) => e.kind === 'node-enter')!
+    const exit = printed.trace.find((e) => e.kind === 'node-exit')!
+    expect(enter.inputRef?.base64).toBeTypeOf('string')
+    expect(exit.outputRef?.base64).toBeTypeOf('string')
     logSpy.mockRestore()
   })
 })

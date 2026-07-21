@@ -105,6 +105,36 @@ test('runOpSpec: trace: true still invokes a caller-supplied gOpts.onTrace along
   expect(outcome.trace).toHaveLength(2)
 })
 
+test('runOpSpec: trace: \'full\' attaches inputRef/outputRef snapshots, dehydrated to plain base64 refs like the result', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const outcome = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+    trace: 'full',
+  }) as { trace: Array<{ kind: string; inputRef?: { base64: string }; outputRef?: { base64: string } }> }
+  const enter = outcome.trace.find((e) => e.kind === 'node-enter')!
+  const exit = outcome.trace.find((e) => e.kind === 'node-exit')!
+  expect(enter.inputRef?.base64).toBeTypeOf('string')
+  expect(exit.outputRef?.base64).toBeTypeOf('string')
+  const snapshottedInput = JSON.parse(Buffer.from(enter.inputRef!.base64, 'base64').toString('utf8'))
+  expect(snapshottedInput).toMatchObject({ from: 'json', to: 'yaml' })
+  const snapshottedOutput = JSON.parse(Buffer.from(exit.outputRef!.base64, 'base64').toString('utf8'))
+  expect(snapshottedOutput.sha256).toBeTypeOf('string')
+})
+
+test('runOpSpec: trace: true (not \'full\') attaches no inputRef/outputRef', async () => {
+  const spec: OpSpec = { tag: 'leaf', name: 'convert' }
+  const outcome = await runOpSpec({
+    spec,
+    input: { handle: { $handle: true, base64: bytesToB64(new TextEncoder().encode('{"a":1}')), type: 'application/json' }, from: 'json', to: 'yaml' },
+    trace: true,
+  }) as { trace: Array<{ inputRef?: unknown; outputRef?: unknown }> }
+  for (const e of outcome.trace) {
+    expect(e.inputRef).toBeUndefined()
+    expect(e.outputRef).toBeUndefined()
+  }
+})
+
 test('runOpSpec: opts.cache is a long-lived instance a host reuses across calls, so a memo leaf runs only once for repeated input', async () => {
   let gets = 0
   let puts = 0
