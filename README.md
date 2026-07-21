@@ -118,13 +118,19 @@ the same way, but settles as soon as `need` (default 1, i.e. first-success-wins)
 succeed instead of waiting on every branch — e.g. calling three redundant summarize
 backends and taking whichever answers first, or writing to 3 sinks and requiring 2-of-3
 for a durability quorum, without hand-assembling several separate `run_pipeline`/
-`POST /op/run` calls. It resolves with an array of the winning branches' results in
-*settle* order (always length `need`), and rejects once success becomes mathematically
-unreachable rather than waiting for every branch to finish. A losing branch still
-in-flight when the node settles keeps running to completion — cancellation here is
-cooperative, per the op engine's cancellation convention, so it only stops a branch from
-*starting* further work, never preempts one already running. `race`'s declared output
-shape mirrors `parallel`'s `handle[]` rule identically.
+`POST /op/run` calls. With `need` at its default of 1, it resolves the bare winning
+branch's value directly — matching `cond`/`catch`'s convention of resolving to
+whichever single branch actually ran, and JS's own `Promise.any` — rather than an
+array a caller would otherwise have to unwrap. With `need` > 1 it resolves an array of
+the winning branches' results in *settle* order (always length `need`), since there's
+no single bare value to resolve. Either way it rejects once success becomes
+mathematically unreachable rather than waiting for every branch to finish. A losing
+branch still in-flight when the node settles keeps running to completion —
+cancellation here is cooperative, per the op engine's cancellation convention, so it
+only stops a branch from *starting* further work, never preempts one already running.
+`race`'s declared output shape mirrors `parallel`'s `handle[]` rule only when `need` >
+1; at the `need: 1` default it instead follows `cond`/`catch`'s rule (representable
+only when every branch agrees on shape).
 Handle-shaped values thread
 through as `{ $handle: true, base64, type? }` on the way in and `{ base64, type, size }`
 on the way out. `POST /op/run` and the `run_pipeline` MCP tool take this JSON directly;

@@ -129,7 +129,12 @@ function shapesEqual(a: LeafShape, b: LeafShape): boolean {
  * a downstream check use" has no single right answer the way "the branch
  * that actually ran" does for cond/catch; picking one branch's shape would
  * be an arbitrary, possibly-wrong requirement on the step upstream of it.
- * `race`'s boundary follows the identical rule to `parallel`'s (see the
+ * `race`'s boundary depends on its `need` (#431): with `need` absent or 1 (the
+ * "first success wins" default), it resolves the bare winning branch's value
+ * at runtime, so its shape follows `cond`/`catch`'s rule instead -- only
+ * representable when every branch agrees on shape, since any one of them
+ * could be the one that wins. With `need` > 1 it still collects a quorum
+ * into an array, following the identical rule to `parallel`'s (see the
  * combined check below) -- its narrower, `need`-sized winning subset doesn't
  * change whether every branch was declared `handle`-shaped in the first place.
  */
@@ -153,13 +158,20 @@ function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
     return shapes.every((sh) => shapesEqual(sh, shapes[0])) ? shapes[0] : 'unknown'
   }
   if (s.tag === 'parallel' || s.tag === 'race') {
-    // race's output is an array of only its winning subset of branches
-    // (length `need`, not `ops.length`), but that doesn't change this check
-    // -- whichever branches happen to win, every one of them was already
-    // declared to output a bare `handle`, so the resulting array is
-    // `handle[]`-shaped regardless of which/how-many branches settle first.
     if (side === 'input') return 'unknown'
     if (!Array.isArray(s.ops) || !s.ops.length) return 'unknown'
+    // race's need:1 default (#431) resolves the bare winning branch's value
+    // at runtime, not an array -- so its declared shape follows cond/catch's
+    // rule instead of parallel's: only representable when every branch
+    // agrees on shape, since any one of them could be the one that actually
+    // wins. need > 1 still collects a quorum into an array (whichever
+    // branches happen to win, every one was already declared a bare
+    // `handle`, so the resulting array is `handle[]`-shaped regardless of
+    // which/how-many branches settle first), same as `parallel`.
+    if (s.tag === 'race' && (s.need === undefined || s.need === 1)) {
+      const shapes = s.ops.map((o) => stepShape(o, 'output'))
+      return shapes.every((sh) => shapesEqual(sh, shapes[0])) ? shapes[0] : 'unknown'
+    }
     return s.ops.every((o) => stepShape(o, 'output') === 'handle') ? 'handle[]' : 'unknown'
   }
   return 'unknown'
