@@ -800,7 +800,35 @@ There is no linter in this repo. Run both locally before pushing.
   already be this `runId\0runSig` composite, not a bare caller-supplied
   string — don't assume it's safe to use directly as, say, a DB row key
   without accounting for the embedded `\0` and its length (a 64-hex-char
-  SHA-256 digest tacked on).
+  SHA-256 digest tacked on). Update (#423): the `sink.fanout(['a', 'a'])`
+  duplicate-name gap above is now closed, but *not* via the `callId`
+  disambiguation the note predicted — `callId` is a fresh per-process
+  monotonic counter (`traceCallSeq`), so it isn't stable across a
+  crash-and-resume and can't be part of a durable checkpoint key. Fixed
+  instead by keying each `sink-target`'s checkpoint path by the target's
+  array index (`childPath(path, i)`, `src/runtime/inline.ts`'s `case
+  'sink'`) rather than its name — the same indexed-path scheme `map`/
+  `mapField` already use for their own per-item paths, and deterministic
+  across resumes of the same `OpSpec` unlike `callId`. A future primitive
+  facing this same "two concurrent same-named nodes, one checkpoint key"
+  shape should reach for a stable structural discriminant (index, declared
+  id) rather than assuming `callId`-style disambiguation always transfers
+  from the trace/event side to the checkpoint side.
+- Run-status query (#409): `checkpointKey(runId, runSig)` (`src/runtime/
+  inline.ts`) is exported specifically so a second call site can address the
+  exact root-node `(checkpointRunId, '')` entry `traced()` itself writes,
+  without re-deriving the `\0`-namespacing rule. `runOpSpecStatus`
+  (`src/adapters/op-run.ts`) uses it to answer "has this checkpointed run
+  finished, and if so what did it return" — `{ done: true, result }` / `{
+  done: false }` — by reading that one entry, without building or executing
+  the op tree at all; exposed as `POST /op/run/status`, `check_pipeline_status`,
+  and `pipeline status`. Deliberately narrow, matching `Checkpoint.get`/`put`'s
+  own "done vs no entry" distinction: a still-in-progress, crashed-mid-run, and
+  never-started run are all indistinguishable and all report `{ done: false }`
+  — giving those three separate answers needs a real `Checkpoint` interface
+  extension (an in-progress marker written at node-*enter*, touching every
+  implementation and `traced()` call site), which stays a separate, real
+  design pass rather than being bolted on here.
 - Trace-snapshot convention (#234): `RunGovernedOpts.traceSnapshots` is a
   second, independent opt-in layered on top of `onTrace` — when both are set,
   `traced()` (`src/runtime/inline.ts`) additionally persists a JSON snapshot
