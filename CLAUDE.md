@@ -501,7 +501,21 @@ There is no linter in this repo. Run both locally before pushing.
   landed `releaseCancelled` code — `git merge-base --is-ancestor 3f7ecaa
   origin/main` (exit 1) caught that it's only on the stale, closed-unmerged
   `bot/issue-build-29707704140` branch. Dropped both again, unbuilt, not
-  superseded.
+  superseded. Update (#429): the `race` op-tree combinator (settles once
+  `need`-of-`ops.length` branches succeed) is the first node whose own
+  cancellation isn't just "propagate the caller's `gOpts.signal` downward" --
+  it also needs to *originate* an abort once its own outcome (quorum met, or
+  mathematically unreachable) is decided, so a still-running losing branch
+  stops starting further work. `runInline`'s `'race'` case builds its own
+  `AbortController`, chained off any caller-supplied `gOpts.signal` (so an
+  outer abort still reaches every branch), and passes that as the `signal` on
+  a shallow-cloned `gOpts` threaded into each branch's `runInline` call --
+  the same "checkpoint, not preemptive" contract every other node honors, not
+  a new cancellation model. A future early-settling combinator (anything that
+  resolves before every fanned-out branch finishes) should reach for this
+  same pattern -- an internal controller chained off the inherited signal --
+  rather than assuming `gOpts.signal` alone is enough, since only a node that
+  already had an external canceller to forward ever needed that assumption.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than

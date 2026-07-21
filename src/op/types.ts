@@ -54,3 +54,20 @@ export type Op =
   // `pipe(parallel([opA, opB, opC]), reconcile(...))` to transform one
   // document three different ways and merge the results (#289).
   | { tag: 'parallel'; ops: Op[] }
+  // Fans one input into N branches like `parallel`, but settles as soon as
+  // `need` (default 1, i.e. first-success-wins) of them succeed instead of
+  // waiting on every branch -- redundant-provider patterns (three redundant
+  // LLM backends, take whichever answers first; write to 3 sinks, require
+  // 2-of-3 for a durability quorum) that `parallel`'s wait-for-all and
+  // `cond`'s pick-exactly-one-ahead-of-time can't express (#429). Resolves
+  // with an array of the winning branches' results in *settle* order (not
+  // declaration order -- there's no other order early settlement could use),
+  // always length `need` regardless of `need`'s value, so a downstream step
+  // gets one consistent shape rather than an ergonomic bare-value special
+  // case for `need: 1`. Rejects once success becomes mathematically
+  // unreachable (too many branches have already failed), not just once every
+  // branch has settled -- a losing branch that's still mid-flight when the
+  // node settles keeps running to completion (cooperative cancellation only
+  // stops it from *starting* further work, same #279 contract every other
+  // node honors); it is never preemptively killed.
+  | { tag: 'race'; ops: Op[]; need?: number }

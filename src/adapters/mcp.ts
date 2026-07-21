@@ -13,7 +13,7 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec, runOpSpecStatus } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, MAX_SINK_TARGETS, MAX_COND_CASES, MAX_PARALLEL_BRANCHES, validateOpSpec, type OpSpec } from '../op/spec.js'
+import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, MAX_SINK_TARGETS, MAX_COND_CASES, MAX_PARALLEL_BRANCHES, MAX_RACE_BRANCHES, validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import { planOpSpec } from '../op/plan.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
@@ -115,6 +115,11 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
     default: opSpecSchema.optional(),
   }),
   z.object({ tag: z.literal('parallel'), ops: z.array(opSpecSchema).min(1).max(MAX_PARALLEL_BRANCHES) }),
+  // buildOp re-validates `need` against `ops.length` itself (same "stop it
+  // being silently stripped before it gets there" reasoning as
+  // opSpecConcurrencySchema/condPredicateSchema above) -- zod can't easily
+  // cross-reference a sibling array's length inline here.
+  z.object({ tag: z.literal('race'), ops: z.array(opSpecSchema).min(1).max(MAX_RACE_BRANCHES), need: z.number().int().min(1).optional() }),
 ]))
 
 export type RegisterFileopsToolsOptions = {

@@ -1,7 +1,7 @@
 import { test, expect } from 'vitest'
 import { zipSync } from 'fflate'
 import { PDFDocument } from 'pdf-lib'
-import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, MAX_SINK_TARGETS, MAX_COND_CASES, MAX_PARALLEL_BRANCHES, type OpSpec, type OpSpecConcurrency } from '../../src/op/spec.js'
+import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, MAX_SINK_TARGETS, MAX_COND_CASES, MAX_PARALLEL_BRANCHES, MAX_RACE_BRANCHES, type OpSpec, type OpSpecConcurrency } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
 import { putBytes, resolve, resolveText } from '../../src/handles/handle.js'
@@ -702,6 +702,81 @@ test('buildOp\'s parallel-boundary shape check falls back to \'unknown\' (never 
     tag: 'pipe',
     steps: [
       { tag: 'parallel', ops: [{ tag: 'leaf', name: 'extract' }, { tag: 'leaf', name: 'unzip' }] },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp builds a race node that settles once `need` branches succeed, collecting their results into an array (#429)', async () => {
+  const spec: OpSpec = {
+    tag: 'race',
+    ops: [
+      { tag: 'leaf', name: 'stamp' },
+      { tag: 'leaf', name: 'wrapHandle' },
+    ],
+    need: 2,
+  }
+  const store = new MemoryStore()
+  const handle = await putBytes(store, new Uint8Array([1, 2, 3]), 'application/octet-stream')
+  const result = await runInline(buildOp(spec), handle, { store, llm: {} as any, clock: { now: () => 0 }, sinks: {} })
+  expect(result).toHaveLength(2)
+})
+
+test('buildOp defaults race\'s `need` to 1 (first success wins)', async () => {
+  const spec: OpSpec = { tag: 'race', ops: [{ tag: 'leaf', name: 'stamp' }] }
+  const store = new MemoryStore()
+  const handle = await putBytes(store, new Uint8Array([1, 2, 3]), 'application/octet-stream')
+  const result = await runInline(buildOp(spec), handle, { store, llm: {} as any, clock: { now: () => 0 }, sinks: {} })
+  expect(result).toHaveLength(1)
+})
+
+test('buildOp rejects a race spec with an empty `ops` array', () => {
+  expect(() => buildOp({ tag: 'race', ops: [] } as unknown as OpSpec)).toThrow(/non-empty `ops`/)
+})
+
+test('buildOp bounds race\'s `ops` width so an unbounded branch list can\'t reach an unlimited build-time cost or fan-out (#429)', () => {
+  const tooMany: OpSpec[] = Array.from({ length: MAX_RACE_BRANCHES + 1 }, () => ({ tag: 'leaf', name: 'scrub' }))
+  expect(() => buildOp({ tag: 'race', ops: tooMany })).toThrow(new RegExp(`cannot exceed ${MAX_RACE_BRANCHES} entries`))
+  const justRight: OpSpec[] = Array.from({ length: MAX_RACE_BRANCHES }, () => ({ tag: 'leaf', name: 'scrub' }))
+  expect(() => buildOp({ tag: 'race', ops: justRight })).not.toThrow()
+})
+
+test('buildOp rejects a race spec whose `need` is out of range for its `ops` length', () => {
+  const spec: OpSpec = { tag: 'race', ops: [{ tag: 'leaf', name: 'stamp' }, { tag: 'leaf', name: 'wrapHandle' }], need: 3 }
+  expect(() => buildOp(spec)).toThrow(/`need`.*between 1 and.*2/)
+  expect(() => buildOp({ tag: 'race', ops: [{ tag: 'leaf', name: 'stamp' }], need: 0 })).toThrow(/`need`/)
+})
+
+test('validateOpSpec reports the same race `ops`/`need` errors buildOp throws, descending into every branch (#429)', () => {
+  const tooMany: OpSpec[] = Array.from({ length: MAX_RACE_BRANCHES + 1 }, () => ({ tag: 'leaf', name: 'scrub' }))
+  expect(validateOpSpec({ tag: 'race', ops: tooMany })[0].message).toMatch(new RegExp(`cannot exceed ${MAX_RACE_BRANCHES} entries`))
+
+  const badNeed: OpSpec = { tag: 'race', ops: [{ tag: 'leaf', name: 'stamp' }], need: 5 }
+  expect(validateOpSpec(badNeed).some((e) => /`need`/.test(e.message))).toBe(true)
+
+  const spec: OpSpec = { tag: 'race', ops: [{ tag: 'leaf', name: 'nope-a' }, { tag: 'leaf', name: 'nope-b' }] }
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => e.path === '$.ops[0]' && /unknown leaf "nope-a"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => e.path === '$.ops[1]' && /unknown leaf "nope-b"/.test(e.message))).toBe(true)
+})
+
+test('buildOp\'s race-boundary shape check derives `handle[]` when every branch\'s own output is a bare `handle`, catching a downstream mismatch (#429)', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'race', ops: [{ tag: 'leaf', name: 'extract' }, { tag: 'leaf', name: 'extract' }] },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("race"\) produces handle\[\]/)
+})
+
+test('buildOp\'s race-boundary shape check falls back to \'unknown\' (never blocks a downstream step) when branches disagree on output shape', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'race', ops: [{ tag: 'leaf', name: 'extract' }, { tag: 'leaf', name: 'unzip' }] },
       { tag: 'leaf', name: 'unwrapHandle' },
     ],
   }
