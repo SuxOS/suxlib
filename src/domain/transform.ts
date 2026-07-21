@@ -189,6 +189,30 @@ function parseBlockScalarHeader(s: string): { folded: boolean; chomp: 'strip' | 
   }
 }
 
+// Quote-aware "skip past a mapping key, return the rest" scan -- shared by
+// splitKey (the real parser, inside parseYaml) and detectBlockScalarMinIndent
+// (the comment-stripping pre-pass) so a colon embedded inside a quoted key
+// (`"a: b": |`) isn't mistaken for the key/value separator by either. `body`
+// is already indent-stripped.
+function splitMappingKey(body: string): { key: string; rest: string } | null {
+  const q = body[0]
+  if (q === '"' || q === "'") {
+    let j = 1
+    for (; j < body.length; j++) {
+      if (q === '"' && body[j] === '\\') j++
+      else if (body[j] === q) {
+        if (q === "'" && body[j + 1] === "'") j++
+        else break
+      }
+    }
+    const after = body.slice(j + 1).replace(/^\s*/, '')
+    if (after[0] !== ':') return null
+    return { key: String(parseScalar(body.slice(0, j + 1))), rest: after.slice(1) }
+  }
+  const m = body.match(/^([^:]+?):\s*(.*)$/)
+  return m ? { key: m[1].trim(), rest: m[2] } : null
+}
+
 // Given a (comment-already-stripped) line that turns out to open a block
 // scalar, returns the `minIndent` floor its body must be read at -- mirrors
 // the two call shapes readBlockScalar's own callers use (mergeMap/depth-0
@@ -203,12 +227,13 @@ function detectBlockScalarMinIndent(line: string): number | null {
   if (isSeqItem) {
     const rest = line.slice(ind + 1).replace(/^\s*/, '')
     if (/^-(\s|$)/.test(rest)) return null // nested seq -- not a header
-    const m = /^[^"'[{][^:]*:(\s|$)/.test(rest) ? rest.match(/^([^:]+):\s*(.*)$/) : null
-    valueCandidate = m ? m[2].trim() : rest.trim()
+    const looksLikeKey = /^["']/.test(rest) || /^[^"'[{][^:]*:(\s|$)/.test(rest)
+    const kv = looksLikeKey ? splitMappingKey(rest) : null
+    valueCandidate = kv ? kv.rest.trim() : rest.trim()
   } else {
     const body = line.slice(ind)
-    const m = body.match(/^([^:]+?):\s*(.*)$/)
-    valueCandidate = m ? m[2].trim() : body.trim()
+    const kv = splitMappingKey(body)
+    valueCandidate = kv ? kv.rest.trim() : body.trim()
   }
   return parseBlockScalarHeader(valueCandidate) ? minIndent : null
 }
@@ -349,18 +374,19 @@ export function parseYaml(text: string): unknown {
     if (depth > MAX_TRANSFORM_DEPTH) throw new Error(`transform nests more than ${MAX_TRANSFORM_DEPTH} levels deep (bomb guard).`)
     if (rest === '') return parseBlock(ind + 1, depth + 1)
     if (/^-(\s|$)/.test(rest)) return parseNestedSeq(rest, ind + 2, depth + 1)
-    if (/^[^"'\[{][^:]*:(\s|$)/.test(rest)) {
-      const m = rest.match(/^([^:]+):\s*(.*)$/)!
+    const looksLikeInlineKey = /^["']/.test(rest) || /^[^"'\[{][^:]*:(\s|$)/.test(rest)
+    const kv = looksLikeInlineKey ? splitMappingKey(rest) : null
+    if (kv) {
       const obj: Record<string, unknown> = {}
       const childIndent = ind + 2
-      const key = m[1].trim()
+      const key = kv.key
       const dangerous = key === '__proto__' || key === 'constructor' || key === 'prototype'
-      if (m[2].trim() === '') {
+      if (kv.rest.trim() === '') {
         const block = parseBlock(childIndent, depth + 1)
         if (!dangerous) obj[key] = block
       } else {
-        const bs = parseBlockScalarHeader(m[2].trim())
-        const value = bs ? readBlockScalar(bs, childIndent) : parseScalar(m[2])
+        const bs = parseBlockScalarHeader(kv.rest.trim())
+        const value = bs ? readBlockScalar(bs, childIndent) : parseScalar(kv.rest)
         if (!dangerous) obj[key] = value
       }
       mergeMap(obj, childIndent, depth + 1)
@@ -395,23 +421,7 @@ export function parseYaml(text: string): unknown {
     return obj
   }
   function splitKey(line: string): { key: string; rest: string } | null {
-    const body = line.slice(indentOf(line))
-    const q = body[0]
-    if (q === '"' || q === "'") {
-      let j = 1
-      for (; j < body.length; j++) {
-        if (q === '"' && body[j] === '\\') j++
-        else if (body[j] === q) {
-          if (q === "'" && body[j + 1] === "'") j++
-          else break
-        }
-      }
-      const after = body.slice(j + 1).replace(/^\s*/, '')
-      if (after[0] !== ':') return null
-      return { key: String(parseScalar(body.slice(0, j + 1))), rest: after.slice(1) }
-    }
-    const m = body.match(/^([^:]+?):\s*(.*)$/)
-    return m ? { key: m[1].trim(), rest: m[2] } : null
+    return splitMappingKey(line.slice(indentOf(line)))
   }
   function mergeMap(obj: Record<string, unknown>, minIndent: number, depth: number) {
     while (i < lines.length) {
