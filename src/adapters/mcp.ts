@@ -318,7 +318,7 @@ export function registerFileopsTools(server: McpServer, opts: RegisterFileopsToo
         inputSchema: {
           spec: opSpecSchema,
           input: z.unknown(),
-          trace: z.boolean().default(false).describe('Include a TraceEvent[] execution trace alongside the result.'),
+          trace: z.union([z.boolean(), z.literal('full')]).default(false).describe('Include a TraceEvent[] execution trace alongside the result. Pass "full" to also snapshot each node\'s actual input/output value (inputRef/outputRef Handle refs).'),
           runId: z.string().optional().describe('Resume a previously checkpointed run by passing back its runId (requires opRunCheckpoint to be configured server-side).'),
         },
       },

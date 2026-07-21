@@ -766,3 +766,21 @@ There is no linter in this repo. Run both locally before pushing.
   string — don't assume it's safe to use directly as, say, a DB row key
   without accounting for the embedded `\0` and its length (a 64-hex-char
   SHA-256 digest tacked on).
+- Trace-snapshot convention (#234): `RunGovernedOpts.traceSnapshots` is a
+  second, independent opt-in layered on top of `onTrace` — when both are set,
+  `traced()` (`src/runtime/inline.ts`) additionally persists a JSON snapshot
+  of each node's actual input/output through `caps.store` (`snapshotValue`,
+  `src/control/trace.ts`) and attaches the resulting `Handle` to the
+  `TraceEvent` as `inputRef`/`outputRef`. `snapshotValue` caps snapshot size
+  at `MAX_SNAPSHOT_BYTES` (skip, don't throw, on oversize or
+  non-JSON-serializable input) — folded in from the start rather than left as
+  a follow-up, since an unbounded per-node Store write is exactly the kind of
+  bomb-guard gap this repo's security review has flagged before elsewhere.
+  `OpRunRequest.trace: 'full'` (distinct from the existing boolean `true`) is
+  the adapter-level opt-in, wired through `POST /op/run`, `run_pipeline`, and
+  `pipeline run --trace full` alike; `runOpSpec` dehydrates the collected
+  trace array through the same `dehydrate()` pass the bare result already
+  gets — `dehydrate` recurses into arbitrary objects/arrays, so this needs no
+  TraceEvent-specific unwrapping, it just needs to be called on the array
+  too. Any future addition to `TraceEvent`'s shape should re-check the same
+  three literal-shape test files #366's note above already names.

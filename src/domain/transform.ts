@@ -978,14 +978,47 @@ function sanitizeUrl(raw: string): string {
   return url.replace(/"/g, '&quot;')
 }
 
+// A regex capture group can't count balanced parens, so `[text](href)`'s href
+// portion is scanned by hand, tracking nesting depth, instead of the old
+// `([^)]*)` capture that stopped at the very first `)` -- breaking any
+// real-world URL containing a literal `)`, most commonly Wikipedia-style
+// `https://en.wikipedia.org/wiki/Foo_(bar)` (#310). A `[` with no matching
+// `](` immediately after its `]`, or whose href never returns to depth 0
+// (an unterminated/malformed link), is left as literal text -- same
+// fall-through behavior the old regex had on a non-match.
+function replaceLinks(s: string, codes: string[]): string {
+  let out = ''
+  let i = 0
+  while (i < s.length) {
+    if (s[i] === '[') {
+      const closeBracket = s.indexOf(']', i + 1)
+      if (closeBracket !== -1 && s[closeBracket + 1] === '(') {
+        let depth = 0
+        let j = closeBracket + 1
+        for (; j < s.length; j++) {
+          if (s[j] === '(') depth++
+          else if (s[j] === ')') { depth--; if (depth === 0) break }
+        }
+        if (depth === 0) {
+          const txt = s.slice(i + 1, closeBracket)
+          const href = s.slice(closeBracket + 2, j)
+          out += `<a href="\x00${codes.push(sanitizeUrl(href)) - 1}\x00">${txt}</a>`
+          i = j + 1
+          continue
+        }
+      }
+    }
+    out += s[i]
+    i++
+  }
+  return out
+}
+
 function inlineMdToHtml(s: string): string {
   const codes: string[] = []
-  return encodeEntitiesXml(s)
+  const withCode = encodeEntitiesXml(s)
     .replace(/`([^`]+)`/g, (_m, c) => `\x00${codes.push(`<code>${c}</code>`) - 1}\x00`)
-    .replace(
-      /\[([^\]]*)\]\(([^)]*)\)/g,
-      (_m, txt, href) => `<a href="\x00${codes.push(sanitizeUrl(href)) - 1}\x00">${txt}</a>`,
-    )
+  return replaceLinks(withCode, codes)
     .replace(/\*\*([^<>]+?)\*\*/g, '<strong>$1</strong>')
     .replace(/__([^<>]+?)__/g, '<strong>$1</strong>')
     .replace(/\*([^*<>]+)\*/g, '<em>$1</em>')
