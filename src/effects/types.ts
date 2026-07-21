@@ -9,6 +9,21 @@ export interface Ask { request(prompt: string, timeout: string): Promise<{ answe
 // means "no entry" -- no leaf output is legitimately undefined, so that's an
 // unambiguous miss signal.
 export interface Cache { get(key: string): Promise<unknown>; put(key: string, value: unknown): Promise<void> }
+// Checkpoint records a run's authoritative per-node execution ledger, keyed by
+// (runId, path) -- so a resumed runInline call sharing the same runId can
+// skip re-executing any node (leaf, sink target, or a whole already-finished
+// composite subtree) whose result was already recorded before a prior crash,
+// rather than re-running the entire tree from scratch. Deliberately a
+// different key space from Cache's `memoKey(name, input)`: Cache dedupes a
+// leaf's *(name, input)* pair across unrelated calls/runs, Checkpoint dedupes
+// *this one run's* own already-completed nodes. `{ done: true; value }` wraps
+// the stored value so a legitimately `undefined` node result is still
+// distinguishable from "no checkpoint recorded yet" (get() returning
+// `undefined`).
+export interface Checkpoint {
+  get(runId: string, path: string): Promise<{ done: true; value: unknown } | undefined>
+  put(runId: string, path: string, value: unknown): Promise<void>
+}
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const d = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
@@ -33,4 +48,15 @@ export class MemoryCache implements Cache {
   private m = new Map<string, unknown>()
   async get(key: string): Promise<unknown> { return this.m.get(key) }
   async put(key: string, value: unknown): Promise<void> { this.m.set(key, value) }
+}
+export class MemoryCheckpoint implements Checkpoint {
+  private m = new Map<string, Map<string, { done: true; value: unknown }>>()
+  async get(runId: string, path: string): Promise<{ done: true; value: unknown } | undefined> {
+    return this.m.get(runId)?.get(path)
+  }
+  async put(runId: string, path: string, value: unknown): Promise<void> {
+    let byPath = this.m.get(runId)
+    if (!byPath) { byPath = new Map(); this.m.set(runId, byPath) }
+    byPath.set(path, { done: true, value })
+  }
 }

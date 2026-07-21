@@ -712,3 +712,28 @@ There is no linter in this repo. Run both locally before pushing.
   items an array-shaped input actually holds at run time (e.g. past
   `unzip`'s `handle[]` output) is runtime data no structural pass can see, so
   `planOpSpec` deliberately refuses to estimate it rather than guess.
+- Checkpoint convention (#390): `Caps.checkpoint` (`src/effects/types.ts`'s
+  `Checkpoint` interface, optional like `ask`/`cache`) is consulted by
+  `traced()` (`src/runtime/inline.ts`) for *every* node tag, not just `leaf`
+  — unlike `memo`, this isn't a per-leaf opt-in flag, since resuming a
+  crashed run needs the whole tree's progress, not one leaf's. A hit at
+  `(runId, path)` short-circuits before `fn` runs at all (no governor call,
+  no retries, no trace event) and returns the recorded value; a miss runs
+  `fn` and persists a success under that key after. Since `path` already
+  addresses individual `map`/`mapField` items and `sink` fanout targets, a
+  caller resuming a crashed run with the *same* `runId` gets partial-fanout
+  resume for free — only items/targets that never finished re-run. No
+  `OpSpec`/`plan.ts` change accompanies this: eligibility isn't a per-node
+  declared property the way `memo`/`ask`/`sinks` are, so there's nothing new
+  for `validateOpSpec`/`planOpSpec` to report beyond the existing
+  `nodeCount`. Only an in-memory `MemoryCheckpoint` ships here (inline/test
+  use, keyed by a nested `Map<runId, Map<path, value>>` — no serialization,
+  matching `MemoryCache`'s own scope); a future `sux`-side durable
+  implementation owns persisting past process death. Known gap, not solved
+  here: two *concurrent* nodes sharing one `path` at the same `runId` (e.g.
+  `sink.fanout(['a', 'a'])`) can race on the same checkpoint key, since
+  `Checkpoint.get`/`put` take `(runId, path)` only — not the `callId` that
+  already disambiguates this exact case for `TraceEvent`/`GovernorEvent`
+  (#366/#380). Follow the same incremental pattern those two took (ship
+  `(runId, path)` first, add `callId` disambiguation later) rather than
+  solving it preemptively.

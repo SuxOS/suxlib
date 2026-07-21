@@ -1,10 +1,14 @@
-import type { Store, Llm, Clock, Ask, Cache } from '../effects/types.js'
+import type { Store, Llm, Clock, Ask, Cache, Checkpoint } from '../effects/types.js'
 import type { ReconcileOpts } from './reconcile.js'
 import type { TokenBucket } from '../control/token-bucket.js'
 import type { CircuitBreaker } from '../control/circuit-breaker.js'
 export interface SinkTarget { name: string; write(input: any, caps: Caps): Promise<any> }
 export interface Governor { tokenBucket?: TokenBucket; circuitBreaker?: CircuitBreaker; concurrency?: Concurrency; heavyConcurrency?: Concurrency }
-export interface Caps { store: Store; llm: Llm; clock: Clock; sinks: Record<string, SinkTarget>; governors?: Record<string, Governor>; ask?: Ask; cache?: Cache }
+// `checkpoint` is optional, same degrade-gracefully pattern as `ask`/`cache`:
+// with none supplied, runInline's traced() (src/runtime/inline.ts) never
+// consults it and every node re-executes on every call, today's behavior
+// unchanged.
+export interface Caps { store: Store; llm: Llm; clock: Clock; sinks: Record<string, SinkTarget>; governors?: Record<string, Governor>; ask?: Ask; cache?: Cache; checkpoint?: Checkpoint }
 // releaseNeutral() is for a slot abandoned by cancellation (OpAbortError), not by
 // leaf success/failure -- it must free the slot without counting toward an aimd
 // limiter's success-streak or failure-halving, since the leaf never actually ran
