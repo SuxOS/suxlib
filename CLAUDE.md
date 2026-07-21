@@ -519,7 +519,23 @@ There is no linter in this repo. Run both locally before pushing.
   pattern as `caps.ask`) — this repo doesn't decide *which* leaves opt in
   (that's `sux`'s op-tree construction call site, same as `heavy`/`kind`) or
   ship a durable `Cache` implementation, only `MemoryCache`
-  (`src/effects/types.ts`) for inline/test use.
+  (`src/effects/types.ts`) for inline/test use. Update (#311): two concurrent
+  calls sharing a memo key (e.g. duplicate items in one `map`/`mapField`
+  fan-out) now coalesce onto a single in-flight run instead of both
+  independently executing the leaf, via a per-`Cache`-instance in-flight
+  `Map` in `governor.ts`. Gotcha for any future singleflight/dedup pattern in
+  this codebase: the in-flight map is keyed by a new *synchronous*
+  `memoKeyMaterial(name, input)` (`src/control/memo.ts`), not the existing
+  async (SHA-256-hashed) `memoKey` — registering only after `await`ing the
+  real `memoKey` left a real race window where a fast-settling call (a
+  `pure` leaf with no retries settles in a handful of microtasks) could
+  register *and* already run its `finally`-block cleanup before a second
+  concurrent caller's own `memoKey` digest had even resolved, silently
+  defeating the dedup for exactly the fast-leaf case most likely to race in
+  practice. Any future check-then-register coordination keyed off an
+  `async` hash/digest needs the same fix: derive the coordination key from a
+  synchronous pre-hash step (or otherwise avoid an `await` between the
+  check and the register), not the hashed value itself.
 - Leaf composability gotcha: each Handle-based leaf wrapper's input shape is
   chosen independently (`shrink`/`redact`/`convert` want `{handle, ...opts}`,
   `pack` wants `{format, files}`, `scrub`/`unzip` take a bare `Handle`), so only
