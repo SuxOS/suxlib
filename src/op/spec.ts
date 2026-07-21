@@ -1,6 +1,6 @@
 import type { Op, LeafFn, LeafOpts, Concurrency, CondPredicate } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, mapField, sink, reconcile, catchOp, ask, cond } from './combinators.js'
+import { op, pipe, map, mapField, sink, reconcile, catchOp, ask, cond, parallel } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed, aimd } from '../control/aimd.js'
 
@@ -25,6 +25,7 @@ export type OpSpec =
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
   | { tag: 'cond'; cases: { when: CondPredicate; then: OpSpec }[]; default?: OpSpec }
+  | { tag: 'parallel'; ops: OpSpec[] }
 
 // Exported (not module-private) so mcp.ts's opSpecSchema and op/introspect.ts's
 // describePipelineSchema derive their field-policy/reconcile-mode enums from
@@ -37,7 +38,7 @@ export const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merg
 // run_pipeline tool description, README's tag union prose) from this one
 // array instead of re-enumerating the tag literals, which drifted twice
 // already (#166, #158) before drifting a third time for reconcile/ask (#213).
-export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask', 'cond'] as const satisfies readonly OpSpec['tag'][]
+export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask', 'cond', 'parallel'] as const satisfies readonly OpSpec['tag'][]
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -49,6 +50,15 @@ export const MAX_MAP_CONCURRENCY = 32
 // caller-supplied `targets` array needs its own width cap for the same reason
 // (#307) -- reachable from the unauthenticated-by-default POST /op/run.
 export const MAX_SINK_TARGETS = 32
+// buildOp/validateOpSpec/planOpSpec all eagerly map/forEach/recurse over every
+// cond case at build time (regardless of how many actually run), same
+// unbounded-build-cost DoS class #307 fixed for sink fanout -- reachable from
+// the unauthenticated-by-default POST /op/run (#422).
+export const MAX_COND_CASES = 32
+// parallel runs every branch fully concurrently (Promise.allSettled, no
+// limiter, same shape as sink.fanout), so a caller-supplied `ops` array needs
+// the same width cap for the same reason (#289).
+export const MAX_PARALLEL_BRANCHES = 32
 
 function shapeLabel(s: LeafShape): string {
   if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
@@ -105,7 +115,16 @@ function shapesEqual(a: LeafShape, b: LeafShape): boolean {
  * against, same permissive fallback as an unrepresentable map/mapField case. A
  * `cond` node's own boundary follows the identical rule one level wider: only
  * representable when every case's `then` (and `default`, if present) agree on
- * a shape, since any one of them could run at runtime.
+ * a shape, since any one of them could run at runtime. `parallel`'s output
+ * boundary mirrors `map`'s one-array-level-up rule, but across its fixed
+ * `ops` branches instead of a runtime-variable array: representable as
+ * `handle[]` only when every branch's own output is a bare `handle` (the one
+ * array shape this scheme can represent), 'unknown' otherwise. Its *input*
+ * side always reads 'unknown' -- unlike cond/catch, every branch receives the
+ * *same* input concurrently, so "which branch's declared input shape should
+ * a downstream check use" has no single right answer the way "the branch
+ * that actually ran" does for cond/catch; picking one branch's shape would
+ * be an arbitrary, possibly-wrong requirement on the step upstream of it.
  */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (!s || typeof s !== 'object') return 'unknown'
@@ -125,6 +144,11 @@ function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
     const shapes = s.cases.map((c) => stepShape(c.then, side))
     if (s.default) shapes.push(stepShape(s.default, side))
     return shapes.every((sh) => shapesEqual(sh, shapes[0])) ? shapes[0] : 'unknown'
+  }
+  if (s.tag === 'parallel') {
+    if (side === 'input') return 'unknown'
+    if (!Array.isArray(s.ops) || !s.ops.length) return 'unknown'
+    return s.ops.every((o) => stepShape(o, 'output') === 'handle') ? 'handle[]' : 'unknown'
   }
   return 'unknown'
 }
@@ -452,6 +476,8 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
     case 'cond': {
       if (!Array.isArray(spec.cases) || !spec.cases.length) {
         errors.push({ path, message: 'cond spec requires a non-empty `cases` array' })
+      } else if (spec.cases.length > MAX_COND_CASES) {
+        errors.push({ path, message: `cond spec's \`cases\` array cannot exceed ${MAX_COND_CASES} entries (got ${spec.cases.length})` })
       } else {
         spec.cases.forEach((c, i) => {
           if (!c || typeof c !== 'object' || !isValidCondPredicate(c.when)) {
@@ -462,6 +488,16 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
         })
       }
       if (spec.default !== undefined) collectSpecErrors(spec.default, leaves, `${path}.default`, errors)
+      return
+    }
+    case 'parallel': {
+      if (!Array.isArray(spec.ops) || !spec.ops.length) {
+        errors.push({ path, message: 'parallel spec requires a non-empty `ops` array' })
+      } else if (spec.ops.length > MAX_PARALLEL_BRANCHES) {
+        errors.push({ path, message: `parallel spec's \`ops\` array cannot exceed ${MAX_PARALLEL_BRANCHES} entries (got ${spec.ops.length})` })
+      } else {
+        spec.ops.forEach((o, i) => collectSpecErrors(o, leaves, `${path}.ops[${i}]`, errors))
+      }
       return
     }
     default:
@@ -602,6 +638,9 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
     }
     case 'cond': {
       if (!Array.isArray(spec.cases) || !spec.cases.length) throw new Error('cond spec requires a non-empty `cases` array')
+      if (spec.cases.length > MAX_COND_CASES) {
+        throw new Error(`cond spec's \`cases\` array cannot exceed ${MAX_COND_CASES} entries (got ${spec.cases.length})`)
+      }
       const cases = spec.cases.map((c) => {
         if (!c || !isValidCondPredicate(c.when)) {
           throw new Error('cond case\'s `when` must be `{ field?, equals }` or `{ field?, in }` (exactly one of `equals`/`in`, each a JSON scalar or array of scalars, `field` not `__proto__`/`constructor`/`prototype`)')
@@ -610,6 +649,13 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
         return { when: c.when, then: buildOpNode(c.then, leaves) }
       })
       return cond(cases, spec.default ? buildOpNode(spec.default, leaves) : undefined)
+    }
+    case 'parallel': {
+      if (!Array.isArray(spec.ops) || !spec.ops.length) throw new Error('parallel spec requires a non-empty `ops` array')
+      if (spec.ops.length > MAX_PARALLEL_BRANCHES) {
+        throw new Error(`parallel spec's \`ops\` array cannot exceed ${MAX_PARALLEL_BRANCHES} entries (got ${spec.ops.length})`)
+      }
+      return parallel(spec.ops.map((o) => buildOpNode(o, leaves)))
     }
     default:
       throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: ${OP_SPEC_TAGS.join(', ')})`)

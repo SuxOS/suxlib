@@ -127,6 +127,19 @@ test('planOpSpec walks every cond case\'s `then` and its `default` (#196)', () =
   expect(plan.sinkTargets).toEqual(['fallback', 'store', 'vault'])
 })
 
+test('planOpSpec walks every parallel branch (#289)', () => {
+  const spec: OpSpec = {
+    tag: 'parallel',
+    ops: [
+      { tag: 'sink', targets: ['store'] },
+      { tag: 'sink', targets: ['vault'] },
+    ],
+  }
+  const plan = planOpSpec(spec)
+  expect(plan.nodeCount).toBe(3) // parallel + 2 sinks
+  expect(plan.sinkTargets).toEqual(['store', 'vault'])
+})
+
 test('planOpSpec never builds an Op tree or otherwise executes anything -- a spec naming an unregistered leaf is fine', () => {
   const spec: OpSpec = { tag: 'leaf', name: 'not-a-real-leaf' }
   expect(() => planOpSpec(spec)).not.toThrow()

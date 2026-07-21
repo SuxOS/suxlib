@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
-import { op, pipe, map, mapField, reconcile, sink, catchOp, cond } from '../../src/op/combinators.js'
+import { op, pipe, map, mapField, reconcile, sink, catchOp, cond, parallel } from '../../src/op/combinators.js'
 import { fixed, aimd } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
@@ -186,6 +186,57 @@ test('runInline\'s cond matches an `in` predicate, and compares the piped value 
   ], op('default', async () => 'default', { kind: 'pure' }))
   expect(await runInline(tree, 'y', caps)).toBe('matched:y')
   expect(await runInline(tree, 'z', caps)).toBe('default')
+})
+
+test('runInline runs every parallel branch concurrently over the same input, collecting results in `ops` order (#289)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = parallel([
+    op('upper', async (v: string) => v.toUpperCase(), { kind: 'pure' }),
+    op('lower', async (v: string) => v.toLowerCase(), { kind: 'pure' }),
+    op('len', async (v: string) => v.length, { kind: 'pure' }),
+  ])
+  expect(await runInline(tree, 'Mixed', caps)).toEqual(['MIXED', 'mixed', 5])
+})
+
+test('runInline aggregates every concurrent parallel branch failure instead of surfacing only the first by index (#289)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = parallel([
+    op('failA', async () => { throw new Error('branch a failed') }, { kind: 'pure' }),
+    op('failB', async () => { throw new Error('branch b failed') }, { kind: 'pure' }),
+  ])
+  try {
+    await runInline(tree, 'v', caps)
+    expect.unreachable()
+  } catch (err) {
+    expect(err).toBeInstanceOf(AggregateError)
+    expect((err as AggregateError).errors).toHaveLength(2)
+    expect((err as AggregateError).errors.map((e: Error) => e.message).sort()).toEqual(['branch a failed', 'branch b failed'])
+  }
+})
+
+test('runInline still throws the bare single error (not an AggregateError) when only one parallel branch fails (#289)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = parallel([
+    op('ok', async (v: string) => v, { kind: 'pure' }),
+    op('fail', async () => { throw new Error('boom') }, { kind: 'pure' }),
+  ])
+  await expect(runInline(tree, 'v', caps)).rejects.toThrow('boom')
+})
+
+test('runInline feeds parallel\'s array-of-results straight into reconcile, composing "transform N ways then merge" as one pipeline (#289)', async () => {
+  const store = new MemoryStore()
+  const caps: any = { store, llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = pipe(
+    parallel([
+      op('a', async () => putText(store, 'from-a'), { kind: 'effect' }),
+      op('b', async () => putText(store, 'from-b'), { kind: 'effect' }),
+    ]),
+    reconcile({ mode: 'faithful-union' }),
+  )
+  const result = await runInline(tree, null, caps)
+  const text = await resolveText(store, result)
+  expect(text).toContain('from-a')
+  expect(text).toContain('from-b')
 })
 
 test('runInline rejects with OpAbortError before running any node when gOpts.signal is already aborted (#279)', async () => {

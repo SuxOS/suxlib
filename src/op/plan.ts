@@ -149,6 +149,12 @@ function walkPlan(spec: OpSpec, plan: OpPlan, llmLeaves: Set<string>, sinkTarget
       plan.usesAsk = true
       return
     }
+    case 'parallel': {
+      if (Array.isArray(spec.ops)) {
+        for (const o of spec.ops) walkPlan(o, plan, llmLeaves, sinkTargets)
+      }
+      return
+    }
     case 'reconcile':
     default:
       return

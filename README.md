@@ -1,7 +1,7 @@
 # @suxos/lib
 
 SuxOS's shared, dependency-light **pure core + adapters** library — the home of the
-**op engine** (`op`/`map`/`mapField`/`reconcile`/`pipe`/`sink`/`ask`/`catch`/`cond`, the
+**op engine** (`op`/`map`/`mapField`/`reconcile`/`pipe`/`sink`/`ask`/`catch`/`cond`/`parallel`, the
 `runInline` graduated runtime) and of `sux-fileops`'s absorbed domain logic
 (archive/pdf/sanitize/transform), exposed identically over CLI, HTTP, and MCP.
 
@@ -76,7 +76,7 @@ on) and only differs in how it reads input and shapes output:
 ### Composable pipelines: `POST /op/run` and the `run_pipeline` MCP tool
 
 Beyond one-shot single-leaf calls, all three adapters also expose the op engine
-itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask' | 'cond', ... }`
+itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask' | 'cond' | 'parallel', ... }`
 spec (`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`'s
 `LEAF_REGISTRY` (`pack`/`unpack`/`unzip`/`shrink`/`pageCount`/`redact`/`scrub`/
 `convert`/`extract`/`summarize`/`wrapHandle`/`unwrapHandle`/`stamp`), which gets built into a
@@ -104,6 +104,15 @@ constrained, declarative predicate (`{ field?, equals }` or `{ field?, in }` ove
 JSON scalar, never eval'd code), running the first match's `then` branch against
 the original input; `default` runs when nothing matches (or the node throws if
 `default` is absent) — e.g. `{ tag: 'cond', cases: [{ when: { field: 'format', equals: 'zip' }, then: <unzip path> }], default: <passthrough> }`.
+A `parallel` step fans one input into N arbitrary op branches, run concurrently over the
+*same* piped value (unlike `map`'s one-op-per-array-element fan-out), collecting each
+branch's result into an array in `ops` order — e.g. `pipe(parallel([opA, opB, opC]),
+reconcile({ mode: 'faithful-union' }))` transforms one document three different ways and
+merges the results in a single pipeline, something that otherwise needs several separate
+`run_pipeline`/`POST /op/run` calls hand-assembled by the caller. Its declared output
+shape is `handle[]` only when every branch's own output is a bare `handle` (mirroring
+`map`'s one-array-level-up rule), so a spec chaining `parallel` straight into `reconcile`
+or `map` gets the same build-time shape-mismatch checking other op-tree steps do.
 Handle-shaped values thread
 through as `{ $handle: true, base64, type? }` on the way in and `{ base64, type, size }`
 on the way out. `POST /op/run` and the `run_pipeline` MCP tool take this JSON directly;

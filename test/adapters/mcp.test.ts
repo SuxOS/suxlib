@@ -311,6 +311,21 @@ describe('mcp adapter', () => {
     expect(parseResult(result)).toEqual({ kind: 'z', a: 1 })
   })
 
+  it('run_pipeline: a parallel spec reaches buildOp through the MCP tool schema (not silently stripped), fanning one input into N branches (#289)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: {
+          tag: 'parallel',
+          ops: [{ tag: 'sink', targets: ['store'] }, { tag: 'sink', targets: ['store'] }],
+        },
+        input: { a: 1 },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual([{ a: 1 }, { a: 1 }])
+  })
+
   it('run_pipeline: an ask spec reaches buildOp through the MCP tool schema (not silently stripped), degrading gracefully with no Ask capability wired (#181)', async () => {
     const result = await client.callTool({
       name: 'run_pipeline',

@@ -478,6 +478,42 @@ test('a failed attempt is not cached: a later call retries fn', async () => {
   expect(calls).toBe(2)
 })
 
+test('concurrent memo calls sharing a key singleflight into one fn execution instead of each running it (#311)', async () => {
+  let calls = 0
+  let resolveFn: (v: string) => void
+  const fn = async () => { calls++; return new Promise<string>((resolve) => { resolveFn = resolve }) }
+  const c = { ...caps(), cache: new MemoryCache() }
+  const p1 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  const p2 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  const p3 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  // memoKey does real async crypto.subtle.digest work before fn is reachable
+  // -- poll until fn has actually started rather than assuming a fixed
+  // number of microtask ticks is enough.
+  while (calls < 1) await new Promise((r) => setTimeout(r, 0))
+  resolveFn!('ok')
+  const [r1, r2, r3] = await Promise.all([p1, p2, p3])
+  expect(calls).toBe(1)
+  expect([r1, r2, r3]).toEqual(['ok', 'ok', 'ok'])
+})
+
+test('a concurrent memo dedup rejects every joined caller when the in-flight call fails, then clears so a later call retries', async () => {
+  let calls = 0
+  let rejectFn: (e: Error) => void
+  const fn = async () => { calls++; return new Promise<string>((_resolve, reject) => { rejectFn = reject }) }
+  const c = { ...caps(), cache: new MemoryCache() }
+  const p1 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  const p2 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
+  while (calls < 1) await new Promise((r) => setTimeout(r, 0))
+  rejectFn!(new Error('boom'))
+  await expect(p1).rejects.toThrow('boom')
+  await expect(p2).rejects.toThrow('boom')
+  expect(calls).toBe(1)
+  const fn2 = async () => { calls++; return 'ok' }
+  const result = await runGoverned('shrink', { kind: 'pure', memo: true }, fn2, { a: 1 }, c, undefined, noSleep)
+  expect(result).toBe('ok')
+  expect(calls).toBe(2)
+})
+
 test('a throw from post-success bookkeeping (e.g. breaker onSuccess -> onEvent) propagates without double-releasing the concurrency slot or reopening the breaker (#275)', async () => {
   const releases: boolean[] = []
   const concurrency = {

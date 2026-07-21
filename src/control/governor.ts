@@ -54,6 +54,24 @@ export interface RunGovernedOpts {
 
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
+// Singleflight in-flight-promise tracking for runGoverned's memo branch
+// (#311): keyed off the `caps.cache` instance itself (a WeakMap so an
+// unreferenced cache's tracking map is GC'd along with it), one Map<memoKey,
+// Promise> per cache. Without this, two concurrent calls sharing a memo key
+// -- e.g. map/mapField fanning out via Promise.allSettled over duplicate
+// input -- both see a caps.cache.get() miss before either finishes and both
+// actually run the (possibly heavy/effect) leaf. A later caller now awaits
+// the first call's in-flight promise instead; the entry is cleared as soon
+// as that promise settles (success or failure) so a genuinely later,
+// non-overlapping call still misses normally and retries fresh.
+const memoInFlight = new WeakMap<object, Map<string, Promise<any>>>()
+
+function memoInFlightMap(cache: object): Map<string, Promise<any>> {
+  let m = memoInFlight.get(cache)
+  if (!m) { m = new Map(); memoInFlight.set(cache, m) }
+  return m
+}
+
 export type ConcurrencySpec = { kind: 'fixed'; n: number } | { kind: 'aimd'; start?: number; min?: number; max?: number }
 
 export interface GovernorSpec {
@@ -137,11 +155,18 @@ export async function runGoverned(
   callId?: string,
 ): Promise<any> {
   if (opts.memo && caps.cache) {
+    const cache = caps.cache
     const key = await memoKey(name, input)
-    const cached = await caps.cache.get(key)
+    const cached = await cache.get(key)
     if (cached !== undefined) { gOpts.onEvent?.({ kind: 'memo-hit', name, runId, callId }); return cached }
-    const result = await runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts, runId, callId)
-    await caps.cache.put(key, result)
+    const inFlight = memoInFlightMap(cache)
+    const joined = inFlight.get(key)
+    if (joined) { gOpts.onEvent?.({ kind: 'memo-hit', name, runId, callId }); return joined }
+    const pending = runGoverned(name, { ...opts, memo: false }, fn, input, caps, governor, gOpts, runId, callId)
+      .then(async (result) => { await cache.put(key, result); return result })
+      .finally(() => { inFlight.delete(key) })
+    inFlight.set(key, pending)
+    const result = await pending
     gOpts.onEvent?.({ kind: 'memo-miss', name, runId, callId })
     return result
   }
