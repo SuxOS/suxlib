@@ -1,7 +1,7 @@
 # @suxos/lib
 
 SuxOS's shared, dependency-light **pure core + adapters** library — the home of the
-**op engine** (`op`/`map`/`mapField`/`reconcile`/`pipe`/`sink`/`ask`/`catch`/`cond`/`parallel`, the
+**op engine** (`op`/`map`/`mapField`/`reconcile`/`pipe`/`sink`/`ask`/`catch`/`cond`/`parallel`/`race`, the
 `runInline` graduated runtime) and of `sux-fileops`'s absorbed domain logic
 (archive/pdf/sanitize/transform), exposed identically over CLI, HTTP, and MCP.
 
@@ -76,7 +76,7 @@ on) and only differs in how it reads input and shapes output:
 ### Composable pipelines: `POST /op/run` and the `run_pipeline` MCP tool
 
 Beyond one-shot single-leaf calls, all three adapters also expose the op engine
-itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask' | 'cond' | 'parallel', ... }`
+itself: a JSON `{ tag: 'leaf' | 'pipe' | 'map' | 'mapField' | 'sink' | 'reconcile' | 'catch' | 'ask' | 'cond' | 'parallel' | 'race', ... }`
 spec (`src/op/spec.ts`) describes a pipeline over the leaves in `src/op/registry.ts`'s
 `LEAF_REGISTRY` (`pack`/`unpack`/`unzip`/`shrink`/`pageCount`/`redact`/`scrub`/
 `convert`/`extract`/`summarize`/`wrapHandle`/`unwrapHandle`/`stamp`), which gets built into a
@@ -113,6 +113,18 @@ merges the results in a single pipeline, something that otherwise needs several 
 shape is `handle[]` only when every branch's own output is a bare `handle` (mirroring
 `map`'s one-array-level-up rule), so a spec chaining `parallel` straight into `reconcile`
 or `map` gets the same build-time shape-mismatch checking other op-tree steps do.
+A `race` step is `parallel`'s quorum-settling sibling: it fans one input into N branches
+the same way, but settles as soon as `need` (default 1, i.e. first-success-wins) of them
+succeed instead of waiting on every branch — e.g. calling three redundant summarize
+backends and taking whichever answers first, or writing to 3 sinks and requiring 2-of-3
+for a durability quorum, without hand-assembling several separate `run_pipeline`/
+`POST /op/run` calls. It resolves with an array of the winning branches' results in
+*settle* order (always length `need`), and rejects once success becomes mathematically
+unreachable rather than waiting for every branch to finish. A losing branch still
+in-flight when the node settles keeps running to completion — cancellation here is
+cooperative, per the op engine's cancellation convention, so it only stops a branch from
+*starting* further work, never preempts one already running. `race`'s declared output
+shape mirrors `parallel`'s `handle[]` rule identically.
 Handle-shaped values thread
 through as `{ $handle: true, base64, type? }` on the way in and `{ base64, type, size }`
 on the way out. `POST /op/run` and the `run_pipeline` MCP tool take this JSON directly;

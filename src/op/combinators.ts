@@ -34,3 +34,9 @@ export const cond = (cases: { when: CondPredicate; then: Op }[], defaultOp?: Op)
 // into an array in `ops` order -- complements map (one op, N array elements)
 // with the opposite shape: N ops, one shared input (#289).
 export const parallel = (ops: Op[]): Op => ({ tag: 'parallel', ops })
+// Like `parallel`, but settles once `need` (default 1) branches succeed
+// instead of waiting for all of them -- a quorum/first-success-wins fan-out
+// (#429). `need` is validated against `ops.length` at build time
+// (buildOp/validateOpSpec, ./spec.ts), not here -- this combinator, like
+// `cond`/`parallel` before it, is a plain structural constructor.
+export const race = (ops: Op[], opts?: { need?: number }): Op => ({ tag: 'race', ops, ...(opts?.need !== undefined ? { need: opts.need } : {}) })

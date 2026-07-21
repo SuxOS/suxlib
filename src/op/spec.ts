@@ -1,6 +1,6 @@
 import type { Op, LeafFn, LeafOpts, Concurrency, CondPredicate } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, mapField, sink, reconcile, catchOp, ask, cond, parallel } from './combinators.js'
+import { op, pipe, map, mapField, sink, reconcile, catchOp, ask, cond, parallel, race } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed, aimd } from '../control/aimd.js'
 
@@ -26,6 +26,7 @@ export type OpSpec =
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
   | { tag: 'cond'; cases: { when: CondPredicate; then: OpSpec }[]; default?: OpSpec }
   | { tag: 'parallel'; ops: OpSpec[] }
+  | { tag: 'race'; ops: OpSpec[]; need?: number }
 
 // Exported (not module-private) so mcp.ts's opSpecSchema and op/introspect.ts's
 // describePipelineSchema derive their field-policy/reconcile-mode enums from
@@ -38,7 +39,7 @@ export const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merg
 // run_pipeline tool description, README's tag union prose) from this one
 // array instead of re-enumerating the tag literals, which drifted twice
 // already (#166, #158) before drifting a third time for reconcile/ask (#213).
-export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask', 'cond', 'parallel'] as const satisfies readonly OpSpec['tag'][]
+export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask', 'cond', 'parallel', 'race'] as const satisfies readonly OpSpec['tag'][]
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -59,6 +60,9 @@ export const MAX_COND_CASES = 32
 // limiter, same shape as sink.fanout), so a caller-supplied `ops` array needs
 // the same width cap for the same reason (#289).
 export const MAX_PARALLEL_BRANCHES = 32
+// race also runs every branch fully concurrently (it just settles early),
+// so it needs the identical width cap for the identical reason (#429).
+export const MAX_RACE_BRANCHES = 32
 
 function shapeLabel(s: LeafShape): string {
   if (s === 'unknown' || s === 'handle' || s === 'handle[]') return s
@@ -125,6 +129,9 @@ function shapesEqual(a: LeafShape, b: LeafShape): boolean {
  * a downstream check use" has no single right answer the way "the branch
  * that actually ran" does for cond/catch; picking one branch's shape would
  * be an arbitrary, possibly-wrong requirement on the step upstream of it.
+ * `race`'s boundary follows the identical rule to `parallel`'s (see the
+ * combined check below) -- its narrower, `need`-sized winning subset doesn't
+ * change whether every branch was declared `handle`-shaped in the first place.
  */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (!s || typeof s !== 'object') return 'unknown'
@@ -145,7 +152,12 @@ function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
     if (s.default) shapes.push(stepShape(s.default, side))
     return shapes.every((sh) => shapesEqual(sh, shapes[0])) ? shapes[0] : 'unknown'
   }
-  if (s.tag === 'parallel') {
+  if (s.tag === 'parallel' || s.tag === 'race') {
+    // race's output is an array of only its winning subset of branches
+    // (length `need`, not `ops.length`), but that doesn't change this check
+    // -- whichever branches happen to win, every one of them was already
+    // declared to output a bare `handle`, so the resulting array is
+    // `handle[]`-shaped regardless of which/how-many branches settle first.
     if (side === 'input') return 'unknown'
     if (!Array.isArray(s.ops) || !s.ops.length) return 'unknown'
     return s.ops.every((o) => stepShape(o, 'output') === 'handle') ? 'handle[]' : 'unknown'
@@ -500,6 +512,19 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       }
       return
     }
+    case 'race': {
+      if (!Array.isArray(spec.ops) || !spec.ops.length) {
+        errors.push({ path, message: 'race spec requires a non-empty `ops` array' })
+      } else if (spec.ops.length > MAX_RACE_BRANCHES) {
+        errors.push({ path, message: `race spec's \`ops\` array cannot exceed ${MAX_RACE_BRANCHES} entries (got ${spec.ops.length})` })
+      } else {
+        if (spec.need !== undefined && (!Number.isInteger(spec.need) || spec.need < 1 || spec.need > spec.ops.length)) {
+          errors.push({ path, message: `race spec's \`need\`, if present, must be an integer between 1 and \`ops\`'s length (${spec.ops.length})` })
+        }
+        spec.ops.forEach((o, i) => collectSpecErrors(o, leaves, `${path}.ops[${i}]`, errors))
+      }
+      return
+    }
     default:
       errors.push({ path, message: `unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: ${OP_SPEC_TAGS.join(', ')})` })
   }
@@ -656,6 +681,16 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
         throw new Error(`parallel spec's \`ops\` array cannot exceed ${MAX_PARALLEL_BRANCHES} entries (got ${spec.ops.length})`)
       }
       return parallel(spec.ops.map((o) => buildOpNode(o, leaves)))
+    }
+    case 'race': {
+      if (!Array.isArray(spec.ops) || !spec.ops.length) throw new Error('race spec requires a non-empty `ops` array')
+      if (spec.ops.length > MAX_RACE_BRANCHES) {
+        throw new Error(`race spec's \`ops\` array cannot exceed ${MAX_RACE_BRANCHES} entries (got ${spec.ops.length})`)
+      }
+      if (spec.need !== undefined && (!Number.isInteger(spec.need) || spec.need < 1 || spec.need > spec.ops.length)) {
+        throw new Error(`race spec's \`need\`, if present, must be an integer between 1 and \`ops\`'s length (${spec.ops.length})`)
+      }
+      return race(spec.ops.map((o) => buildOpNode(o, leaves)), { need: spec.need })
     }
     default:
       throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: ${OP_SPEC_TAGS.join(', ')})`)

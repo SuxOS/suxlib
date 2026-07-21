@@ -332,5 +332,76 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         throwFirstOrAggregate(results, 'parallel')
         return out
       })
+    case 'race':
+      // Unlike every fan-out above, this deliberately does NOT await
+      // Promise.allSettled over every branch first -- the whole point of a
+      // race is to settle before all branches finish. A manual Promise
+      // wraps node.ops.forEach, resolving/rejecting the moment the outcome
+      // is decided (quorum met, or mathematically unreachable) rather than
+      // once every branch happens to be done.
+      //
+      // A still-running losing branch's own runInline call is left to
+      // settle on its own -- its eventual node-exit trace (if any) lands
+      // after this node's, which is fine (see the map/sink/parallel cases
+      // above for why per-branch tracing usually waits for allSettled first
+      // -- that reasoning is about not truncating a *slower success* against
+      // Promise.all's early-reject, not about a race intentionally settling
+      // early). `if (done) return` at the top of each branch's callback
+      // stops it from mutating `wins`/rejecting again once the outcome is
+      // already decided, so a stray late settlement can't corrupt the
+      // already-resolved `wins` array (arrays resolve by reference) or
+      // double-settle this node's own promise.
+      return traced('race', undefined, path, runId, runSig, caps, gOpts, input, async () => {
+        const need = node.need ?? 1
+        const total = node.ops.length
+        // buildOp/validateOpSpec (src/op/spec.ts) already reject `need >
+        // ops.length` for anything built from an OpSpec, but a hand-built Op
+        // tree (a host calling the `race()` combinator directly) skips that
+        // check -- without this, every branch succeeding would still never
+        // reach `wins.length >= need`, and nothing else here would ever
+        // settle this node's promise, hanging forever.
+        if (need > total) throw new Error(`race: \`need\` (${need}) exceeds its \`ops\` array's length (${total})`)
+        // Cooperative-cancellation signal for the losing branches (#279's
+        // contract, same as everywhere else in this file): aborting this
+        // only stops a branch from *starting* its next step once the race
+        // settles -- an already in-flight leaf/sink write still runs to
+        // completion, it's never preemptively killed. Chained off the
+        // caller's own signal (if any) so an outer abort still reaches every
+        // branch, not just ones that happen to check gOpts.signal directly.
+        const raceController = new AbortController()
+        if (gOpts?.signal) {
+          if (gOpts.signal.aborted) raceController.abort()
+          else gOpts.signal.addEventListener('abort', () => raceController.abort(), { once: true })
+        }
+        const branchGOpts: RunGovernedOpts = { ...gOpts, signal: raceController.signal }
+        return new Promise((resolve, reject) => {
+          const wins: any[] = []
+          const failures: unknown[] = []
+          let settled = 0
+          let done = false
+          node.ops.forEach((branchOp, i) => {
+            runInline(branchOp, input, caps, branchGOpts, childPath(path, i), runId, runSig).then(
+              (v) => {
+                settled++
+                if (done) return
+                wins.push(v)
+                if (wins.length >= need) { done = true; raceController.abort(); resolve(wins) }
+              },
+              (e) => {
+                settled++
+                if (done) return
+                failures.push(e)
+                // Unreachable the moment even a best case (every still-pending
+                // branch succeeds) couldn't reach `need` -- no reason to wait
+                // out the remaining stragglers once that's certain.
+                if (wins.length + (total - settled) < need) {
+                  done = true; raceController.abort()
+                  reject(failures.length === 1 ? failures[0] : new AggregateError(failures, `race: only ${wins.length} of ${need} needed branches succeeded (${total} total, ${failures.length} failed)`))
+                }
+              },
+            )
+          })
+        })
+      })
   }
 }

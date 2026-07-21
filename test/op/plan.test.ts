@@ -140,6 +140,20 @@ test('planOpSpec walks every parallel branch (#289)', () => {
   expect(plan.sinkTargets).toEqual(['store', 'vault'])
 })
 
+test('planOpSpec walks every race branch (#429)', () => {
+  const spec: OpSpec = {
+    tag: 'race',
+    ops: [
+      { tag: 'sink', targets: ['store'] },
+      { tag: 'sink', targets: ['vault'] },
+    ],
+    need: 2,
+  }
+  const plan = planOpSpec(spec)
+  expect(plan.nodeCount).toBe(3) // race + 2 sinks
+  expect(plan.sinkTargets).toEqual(['store', 'vault'])
+})
+
 test('planOpSpec never builds an Op tree or otherwise executes anything -- a spec naming an unregistered leaf is fine', () => {
   const spec: OpSpec = { tag: 'leaf', name: 'not-a-real-leaf' }
   expect(() => planOpSpec(spec)).not.toThrow()

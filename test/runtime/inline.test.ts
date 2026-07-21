@@ -1,6 +1,6 @@
 import { test, expect } from 'vitest'
 import { MemoryStore } from '../../src/effects/types.js'
-import { op, pipe, map, mapField, reconcile, sink, catchOp, cond, parallel } from '../../src/op/combinators.js'
+import { op, pipe, map, mapField, reconcile, sink, catchOp, cond, parallel, race } from '../../src/op/combinators.js'
 import { fixed, aimd } from '../../src/control/aimd.js'
 import { putText, resolveText } from '../../src/handles/handle.js'
 import { runInline } from '../../src/runtime/inline.js'
@@ -237,6 +237,97 @@ test('runInline feeds parallel\'s array-of-results straight into reconcile, comp
   const text = await resolveText(store, result)
   expect(text).toContain('from-a')
   expect(text).toContain('from-b')
+})
+
+test('runInline\'s race resolves with an array holding the first branch to succeed by default (need: 1) (#429)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = race([
+    op('slow', async () => { await new Promise((r) => setTimeout(r, 20)); return 'slow' }, { kind: 'pure' }),
+    op('fast', async () => 'fast', { kind: 'pure' }),
+  ])
+  expect(await runInline(tree, 'v', caps)).toEqual(['fast'])
+})
+
+test('runInline\'s race settles once `need` branches succeed, without waiting for a still-slower branch (#429)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let slowRan = false
+  const tree = race([
+    op('a', async () => 'a', { kind: 'pure' }),
+    op('b', async () => 'b', { kind: 'pure' }),
+    op('slow', async () => { await new Promise((r) => setTimeout(r, 50)); slowRan = true; return 'slow' }, { kind: 'pure' }),
+  ], { need: 2 })
+  const result = await runInline(tree, 'v', caps)
+  expect(result.sort()).toEqual(['a', 'b'])
+  expect(slowRan).toBe(false)
+})
+
+test('runInline\'s race models a durability quorum: fan out to 3 sinks, settle once 2 have written (#429)', async () => {
+  const store = new MemoryStore()
+  const written: string[] = []
+  const caps: any = {
+    store, llm: {}, clock: { now: () => 0 },
+    sinks: {
+      a: { name: 'a', write: async (v: any) => { written.push('a'); return v } },
+      b: { name: 'b', write: async (v: any) => { written.push('b'); return v } },
+      c: { name: 'c', write: async (v: any) => { await new Promise((r) => setTimeout(r, 50)); written.push('c'); return v } },
+    },
+  }
+  const tree = race([sink('a'), sink('b'), sink('c')], { need: 2 })
+  const result = await runInline(tree, { doc: 1 }, caps)
+  expect(result).toHaveLength(2)
+  expect(written).toEqual(['a', 'b'])
+})
+
+test('runInline\'s race rejects once quorum becomes mathematically unreachable, without waiting for a still-pending branch (#429)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let thirdRan = false
+  const tree = race([
+    op('failA', async () => { throw new Error('a failed') }, { kind: 'pure' }),
+    op('failB', async () => { throw new Error('b failed') }, { kind: 'pure' }),
+    op('slowC', async () => { await new Promise((r) => setTimeout(r, 50)); thirdRan = true; return 'c' }, { kind: 'pure' }),
+  ], { need: 2 })
+  try {
+    await runInline(tree, 'v', caps)
+    expect.unreachable()
+  } catch (err) {
+    expect(err).toBeInstanceOf(AggregateError)
+    expect((err as AggregateError).errors).toHaveLength(2)
+  }
+  expect(thirdRan).toBe(false)
+})
+
+test('runInline\'s race still throws the bare single error (not an AggregateError) when only one failure makes quorum unreachable (#429)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = race([
+    op('fail', async () => { throw new Error('boom') }, { kind: 'pure' }),
+    op('ok', async () => 'v', { kind: 'pure' }),
+  ], { need: 2 })
+  await expect(runInline(tree, 'v', caps)).rejects.toThrow('boom')
+})
+
+test('runInline\'s race stops a losing pipe branch from starting its next step once quorum is met (#429)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  let secondRan = false
+  const tree = race([
+    op('fast', async () => 'fast', { kind: 'pure' }),
+    pipe(
+      op('slowFirst', async () => { await new Promise((r) => setTimeout(r, 20)); return 'v' }, { kind: 'pure' }),
+      op('second', async (v: string) => { secondRan = true; return v }, { kind: 'pure' }),
+    ),
+  ])
+  const result = await runInline(tree, 'in', caps)
+  expect(result).toEqual(['fast'])
+  // Gives the still-running losing branch's timer a chance to fire -- the
+  // internal race signal aborted the moment 'fast' won, so its pipe's second
+  // step must never start even once its first step finishes.
+  await new Promise((r) => setTimeout(r, 40))
+  expect(secondRan).toBe(false)
+})
+
+test('runInline\'s race throws instead of hanging forever when a hand-built node\'s `need` exceeds its `ops` length (#429)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = race([op('ok', async () => 'v', { kind: 'pure' })], { need: 2 })
+  await expect(runInline(tree, 'v', caps)).rejects.toThrow(/`need`.*exceeds/)
 })
 
 test('runInline rejects with OpAbortError before running any node when gOpts.signal is already aborted (#279)', async () => {

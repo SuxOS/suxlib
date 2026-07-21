@@ -326,6 +326,22 @@ describe('mcp adapter', () => {
     expect(parseResult(result)).toEqual([{ a: 1 }, { a: 1 }])
   })
 
+  it('run_pipeline: a race spec reaches buildOp through the MCP tool schema (not silently stripped), settling once `need` branches succeed (#429)', async () => {
+    const result = await client.callTool({
+      name: 'run_pipeline',
+      arguments: {
+        spec: {
+          tag: 'race',
+          ops: [{ tag: 'sink', targets: ['store'] }, { tag: 'sink', targets: ['store'] }],
+          need: 2,
+        },
+        input: { a: 1 },
+      },
+    })
+    expect(result.isError).toBeFalsy()
+    expect(parseResult(result)).toEqual([{ a: 1 }, { a: 1 }])
+  })
+
   it('run_pipeline: an ask spec reaches buildOp through the MCP tool schema (not silently stripped), degrading gracefully with no Ask capability wired (#181)', async () => {
     const result = await client.callTool({
       name: 'run_pipeline',
