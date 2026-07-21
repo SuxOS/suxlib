@@ -1,7 +1,7 @@
 import { test, expect } from 'vitest'
 import { zipSync } from 'fflate'
 import { PDFDocument } from 'pdf-lib'
-import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, MAX_SINK_TARGETS, type OpSpec, type OpSpecConcurrency } from '../../src/op/spec.js'
+import { buildOp, validateOpSpec, MAX_LEAF_RETRIES, MAX_SINK_TARGETS, MAX_COND_CASES, MAX_PARALLEL_BRANCHES, type OpSpec, type OpSpecConcurrency } from '../../src/op/spec.js'
 import { runInline } from '../../src/runtime/inline.js'
 import { MemoryStore } from '../../src/effects/types.js'
 import { putBytes, resolve, resolveText } from '../../src/handles/handle.js'
@@ -590,6 +590,20 @@ test('buildOp rejects a cond spec with an empty `cases` array, a malformed `when
   expect(() => buildOp({ tag: 'cond', cases: [{ when: { field: '__proto__', equals: 'a' }, then: { tag: 'leaf', name: 'scrub' } }] } as unknown as OpSpec)).toThrow(/when/)
 })
 
+test('buildOp bounds cond\'s `cases` width so an unbounded case list can\'t reach an unlimited build-time cost (#422)', () => {
+  const tooMany = Array.from({ length: MAX_COND_CASES + 1 }, (_, i) => ({ when: { field: 'k', equals: i }, then: { tag: 'leaf' as const, name: 'scrub' } }))
+  expect(() => buildOp({ tag: 'cond', cases: tooMany })).toThrow(new RegExp(`cannot exceed ${MAX_COND_CASES} entries`))
+  const justRight = Array.from({ length: MAX_COND_CASES }, (_, i) => ({ when: { field: 'k', equals: i }, then: { tag: 'leaf' as const, name: 'scrub' } }))
+  expect(() => buildOp({ tag: 'cond', cases: justRight })).not.toThrow()
+})
+
+test('validateOpSpec reports the same cond `cases` width cap buildOp throws (#422)', () => {
+  const tooMany = Array.from({ length: MAX_COND_CASES + 1 }, (_, i) => ({ when: { field: 'k', equals: i }, then: { tag: 'leaf' as const, name: 'scrub' } }))
+  const errors = validateOpSpec({ tag: 'cond', cases: tooMany })
+  expect(errors).toHaveLength(1)
+  expect(errors[0].message).toMatch(new RegExp(`cannot exceed ${MAX_COND_CASES} entries`))
+})
+
 test('buildOp\'s cond shape check treats the node\'s boundary as \'unknown\' when its case/default branches disagree, so it never blocks a downstream pipe step', () => {
   const spec: OpSpec = {
     tag: 'pipe',
@@ -633,6 +647,65 @@ test('validateOpSpec descends into every cond case\'s `then` and `default` even 
   expect(errors.some((e) => e.path === '$.cases[0].then' && /unknown leaf "nope-a"/.test(e.message))).toBe(true)
   expect(errors.some((e) => e.path === '$.cases[1].then' && /unknown leaf "nope-b"/.test(e.message))).toBe(true)
   expect(errors.some((e) => e.path === '$.default' && /unknown leaf "nope-default"/.test(e.message))).toBe(true)
+})
+
+test('buildOp builds a parallel node that runs every branch over the same input, collecting results in `ops` order (#289)', async () => {
+  const spec: OpSpec = {
+    tag: 'parallel',
+    ops: [
+      { tag: 'leaf', name: 'stamp' },
+      { tag: 'leaf', name: 'wrapHandle' },
+    ],
+  }
+  const store = new MemoryStore()
+  const handle = await putBytes(store, new Uint8Array([1, 2, 3]), 'application/octet-stream')
+  const result = await runInline(buildOp(spec), handle, { store, llm: {} as any, clock: { now: () => 0 }, sinks: {} })
+  expect(result).toHaveLength(2)
+  expect(result[0].r2Key).toBe(handle.r2Key)
+  expect(result[1]).toEqual({ handle })
+})
+
+test('buildOp rejects a parallel spec with an empty `ops` array', () => {
+  expect(() => buildOp({ tag: 'parallel', ops: [] } as unknown as OpSpec)).toThrow(/non-empty `ops`/)
+})
+
+test('buildOp bounds parallel\'s `ops` width so an unbounded branch list can\'t reach an unlimited build-time cost or fan-out (#289)', () => {
+  const tooMany: OpSpec[] = Array.from({ length: MAX_PARALLEL_BRANCHES + 1 }, () => ({ tag: 'leaf', name: 'scrub' }))
+  expect(() => buildOp({ tag: 'parallel', ops: tooMany })).toThrow(new RegExp(`cannot exceed ${MAX_PARALLEL_BRANCHES} entries`))
+  const justRight: OpSpec[] = Array.from({ length: MAX_PARALLEL_BRANCHES }, () => ({ tag: 'leaf', name: 'scrub' }))
+  expect(() => buildOp({ tag: 'parallel', ops: justRight })).not.toThrow()
+})
+
+test('validateOpSpec reports the same parallel `ops` errors buildOp throws, descending into every branch (#289)', () => {
+  const tooMany: OpSpec[] = Array.from({ length: MAX_PARALLEL_BRANCHES + 1 }, () => ({ tag: 'leaf', name: 'scrub' }))
+  expect(validateOpSpec({ tag: 'parallel', ops: tooMany })[0].message).toMatch(new RegExp(`cannot exceed ${MAX_PARALLEL_BRANCHES} entries`))
+
+  const spec: OpSpec = { tag: 'parallel', ops: [{ tag: 'leaf', name: 'nope-a' }, { tag: 'leaf', name: 'nope-b' }] }
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => e.path === '$.ops[0]' && /unknown leaf "nope-a"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => e.path === '$.ops[1]' && /unknown leaf "nope-b"/.test(e.message))).toBe(true)
+})
+
+test('buildOp\'s parallel-boundary shape check derives `handle[]` when every branch\'s own output is a bare `handle`, catching a downstream mismatch (#289)', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'parallel', ops: [{ tag: 'leaf', name: 'extract' }, { tag: 'leaf', name: 'extract' }] },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("parallel"\) produces handle\[\]/)
+})
+
+test('buildOp\'s parallel-boundary shape check falls back to \'unknown\' (never blocks a downstream step) when branches disagree on output shape', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      { tag: 'parallel', ops: [{ tag: 'leaf', name: 'extract' }, { tag: 'leaf', name: 'unzip' }] },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
 })
 
 test('mapField rejects `__proto__` as `arrayField`/`elementField`/`renameTo`', () => {

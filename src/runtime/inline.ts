@@ -287,5 +287,21 @@ export async function runInline(node: Op, input: any, caps: Caps, gOpts?: RunGov
         if (node.default) return runInline(node.default, input, caps, gOpts, childPath(path, 'default'), runId, runSig)
         throw new Error('cond: no case matched and no default branch was supplied')
       })
+    case 'parallel':
+      // Promise.allSettled, same race-safety reasoning as 'map'/'sink' above:
+      // a branch's own runInline call may still be mid-flight when a sibling
+      // branch throws, and Promise.all would resolve/reject before that
+      // slower branch's own node-exit trace has landed. Each branch already
+      // gets its own trace/governor treatment via its own runInline
+      // recursion (a leaf, pipe, etc. at childPath(path, i)) -- no separate
+      // per-branch traced() wrapper needed here, same as 'map's items.
+      return traced('parallel', undefined, path, runId, runSig, caps, gOpts, input, async () => {
+        const out = new Array(node.ops.length)
+        const results = await Promise.allSettled(node.ops.map(async (op, i) => {
+          out[i] = await runInline(op, input, caps, gOpts, childPath(path, i), runId, runSig)
+        }))
+        throwFirstOrAggregate(results, 'parallel')
+        return out
+      })
   }
 }

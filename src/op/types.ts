@@ -48,3 +48,9 @@ export type Op =
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
   | { tag: 'catch'; try: Op; catch: Op }
   | { tag: 'cond'; cases: { when: CondPredicate; then: Op }[]; default?: Op }
+  // Fans one input into N arbitrary op subtrees, run concurrently over the
+  // *same* piped value (unlike map's one-input-per-array-element fan-out),
+  // collecting each branch's result into an array in `ops` order -- e.g.
+  // `pipe(parallel([opA, opB, opC]), reconcile(...))` to transform one
+  // document three different ways and merge the results (#289).
+  | { tag: 'parallel'; ops: Op[] }

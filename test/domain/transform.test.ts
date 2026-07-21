@@ -435,6 +435,11 @@ test('htmlToMarkdown handles multiple sibling items each with their own nested l
   expect(md).toBe('- A\n  1. A1\n  2. A2\n- B\n  - B1')
 })
 
+test('htmlToMarkdown keeps trailing content and renders a nested <blockquote> as `> >` instead of truncating it (#411)', () => {
+  const md = htmlToMarkdown('<blockquote>Outer<blockquote>Inner</blockquote>tail</blockquote>')
+  expect(md).toBe('> Outer\n> > Inner\n> tail')
+})
+
 test('htmlToMarkdown does not double-decode doubly-encoded entities inside inline tags', () => {
   expect(dispatchTransform('<strong>&amp;#65;</strong>', 'html', 'markdown')).toBe('**&#65;**')
   expect(dispatchTransform('<p>plain &amp;amp; text</p>', 'html', 'markdown')).toBe('plain &amp; text')

@@ -13,7 +13,7 @@ import { b64ToBytes, bytesToB64 } from './base64.js'
 import { runOpSpec } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, MAX_SINK_TARGETS, validateOpSpec, type OpSpec } from '../op/spec.js'
+import { FIELD_POLICIES, OP_SPEC_TAGS, MAX_LEAF_RETRIES, MAX_MAP_CONCURRENCY, MAX_SINK_TARGETS, MAX_COND_CASES, MAX_PARALLEL_BRANCHES, validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
 import { planOpSpec } from '../op/plan.js'
 import type { Governor, SinkTarget, LeafFn } from '../op/types.js'
@@ -111,9 +111,10 @@ const opSpecSchema: z.ZodType<OpSpec> = z.lazy(() => z.union([
   z.object({ tag: z.literal('ask'), prompt: z.string(), timeout: z.string(), onTimeout: z.enum(['proceed', 'fail']) }),
   z.object({
     tag: z.literal('cond'),
-    cases: z.array(z.object({ when: condPredicateSchema, then: opSpecSchema })).min(1),
+    cases: z.array(z.object({ when: condPredicateSchema, then: opSpecSchema })).min(1).max(MAX_COND_CASES),
     default: opSpecSchema.optional(),
   }),
+  z.object({ tag: z.literal('parallel'), ops: z.array(opSpecSchema).min(1).max(MAX_PARALLEL_BRANCHES) }),
 ]))
 
 export type RegisterFileopsToolsOptions = {

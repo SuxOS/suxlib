@@ -30,3 +30,7 @@ export const catchOp = (tryOp: Op, fallbackOp: Op): Op => ({ tag: 'catch', try: 
 // match. Named `cond`, not a reserved word, unlike catchOp's `catch`.
 export const cond = (cases: { when: CondPredicate; then: Op }[], defaultOp?: Op): Op =>
   ({ tag: 'cond', cases, ...(defaultOp ? { default: defaultOp } : {}) })
+// Runs every op in `ops` concurrently over the same input, collecting results
+// into an array in `ops` order -- complements map (one op, N array elements)
+// with the opposite shape: N ops, one shared input (#289).
+export const parallel = (ops: Op[]): Op => ({ tag: 'parallel', ops })
