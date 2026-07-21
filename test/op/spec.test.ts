@@ -117,6 +117,15 @@ test('buildOp rejects a non-object `params`', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'convert', params: [] as unknown as Record<string, unknown> })).toThrow(/params/)
 })
 
+test('buildOp rejects `params` on a bare-Handle-input leaf, so a caller cannot overwrite r2Key/sha256 to read an arbitrary Store entry (#172)', () => {
+  expect(() => buildOp({ tag: 'leaf', name: 'scrub', params: { r2Key: 'cas/other-key', sha256: 'x', type: 'image/png', size: 1 } }))
+    .toThrow(/leaf "scrub": `params` cannot be used on a bare-Handle input/)
+  expect(() => buildOp({ tag: 'leaf', name: 'unzip', params: { r2Key: 'cas/other-key' } })).toThrow(/`params` cannot be used on a bare-Handle input/)
+  expect(() => buildOp({ tag: 'leaf', name: 'extract', params: { r2Key: 'cas/other-key' } })).toThrow(/`params` cannot be used on a bare-Handle input/)
+  expect(() => buildOp({ tag: 'leaf', name: 'summarize', params: { r2Key: 'cas/other-key' } })).toThrow(/`params` cannot be used on a bare-Handle input/)
+  expect(() => buildOp({ tag: 'leaf', name: 'stamp', params: { r2Key: 'cas/other-key' } })).toThrow(/`params` cannot be used on a bare-Handle input/)
+})
+
 test('buildOp rejects an unknown leaf name', () => {
   expect(() => buildOp({ tag: 'leaf', name: 'nope' })).toThrow(/unknown leaf "nope"/)
 })

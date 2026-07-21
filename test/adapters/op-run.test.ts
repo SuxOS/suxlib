@@ -284,6 +284,44 @@ test('runOpSpec: a second call sharing opts.checkpoint/store and the first call\
   expect(calls).toBe(1)
 })
 
+test('runOpSpec: a request reusing another run\'s runId but a different spec does not read that run\'s checkpointed result (#398)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const store = new MemoryStore()
+  let calls = 0
+  const leaves = {
+    victimLeaf: async (input: unknown) => { calls++; return { secret: 'victim-data', input } },
+    attackerLeaf: async (input: unknown) => { calls++; return { attacker: true, input } },
+  }
+  const victimSpec: OpSpec = { tag: 'leaf', name: 'victimLeaf' }
+  const first = await runOpSpec({ spec: victimSpec, input: { a: 1 } }, { leaves, checkpoint, store }) as { result: unknown; runId: string }
+  expect(first.result).toEqual({ secret: 'victim-data', input: { a: 1 } })
+  expect(calls).toBe(1)
+
+  // A different spec at the same structural path (a bare top-level leaf, so
+  // both runs' checkpoint entries would land at path '') reusing the
+  // victim's returned runId must re-execute, not read the victim's recorded
+  // { secret: 'victim-data', ... } value.
+  const attackerSpec: OpSpec = { tag: 'leaf', name: 'attackerLeaf' }
+  const second = await runOpSpec({ spec: attackerSpec, input: { a: 1 }, runId: first.runId }, { leaves, checkpoint, store }) as { result: unknown; runId: string }
+  expect(calls).toBe(2)
+  expect(second.result).toEqual({ attacker: true, input: { a: 1 } })
+  expect(second.runId).toBe(first.runId)
+})
+
+test('runOpSpec: a request reusing another run\'s runId and spec but different input does not read that run\'s checkpointed result (#398)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  const store = new MemoryStore()
+  let calls = 0
+  const leaves = { countedLeaf: async (input: unknown) => { calls++; return { input } } }
+  const spec: OpSpec = { tag: 'leaf', name: 'countedLeaf' }
+  const first = await runOpSpec({ spec, input: { a: 'victim' } }, { leaves, checkpoint, store }) as { result: unknown; runId: string }
+  expect(calls).toBe(1)
+
+  const second = await runOpSpec({ spec, input: { a: 'attacker' }, runId: first.runId }, { leaves, checkpoint, store }) as { result: unknown; runId: string }
+  expect(calls).toBe(2)
+  expect(second.result).toEqual({ input: { a: 'attacker' } })
+})
+
 test('runOpSpec: trace: true plus opts.checkpoint returns { result, trace, runId } together', async () => {
   const checkpoint = new MemoryCheckpoint()
   const spec: OpSpec = { tag: 'leaf', name: 'shout' }

@@ -242,6 +242,14 @@ There is no linter in this repo. Run both locally before pushing.
   regexes should keep both properties — lazy quantifiers for the double-delimiter
   pairs, and `<`/`>` excluded from every content class — rather than reverting to
   a plain `[^*]+`-style class.
+- `src/domain/transform.ts`'s YAML `parseYaml` used to have the same naive,
+  quote-unaware `[^:]+?`-style "split on the first colon" regex independently
+  copied into four places (`splitKey`, `detectBlockScalarMinIndent`'s two
+  branches, and `parseSeqItem`'s inline-key check) — a quoted mapping key
+  containing a colon (`"a: b": |`) broke block-scalar detection and seq-item
+  key parsing in each copy on its own, since fixing one didn't fix the others
+  (#401). All four now share one `splitMappingKey(body)` helper; any future
+  YAML key-parsing tweak belongs there, not re-derived at a new call site.
 - Governor convention: `runInline` retries every leaf (`LeafOpts.retries`, any
   `kind`) through `runGoverned` (`src/control/governor.ts`); `tokenBucket`/
   `circuitBreaker` gating for `effect` leaves is configured separately, via
@@ -736,4 +744,25 @@ There is no linter in this repo. Run both locally before pushing.
   already disambiguates this exact case for `TraceEvent`/`GovernorEvent`
   (#366/#380). Follow the same incremental pattern those two took (ship
   `(runId, path)` first, add `callId` disambiguation later) rather than
-  solving it preemptively.
+  solving it preemptively. Update (#398): a bare caller-supplied `runId` over
+  HTTP/MCP is guessable/replayable, and `(runId, path)` alone let a request
+  reusing another run's `runId` with a mismatched spec/input read that run's
+  recorded results wherever the two op-tree shapes coincided (an IDOR).
+  Fixed *without* changing the `Checkpoint` interface: `runInline` gained a
+  trailing `runSig` param (default `''`, threaded through every recursive
+  call exactly like `runId`), and `traced()` now calls
+  `checkpoint.get/put(runId + '\0' + runSig, path)` whenever `runSig` is
+  non-empty, else the bare `runId` (byte-identical to pre-#398 behavior).
+  Only `src/adapters/op-run.ts`'s `runOpSpec` — the actual network-exposed
+  surface — computes a real `runSig`, from a SHA-256 of the caller-supplied
+  `OpSpec` JSON plus root `input` (`canonicalize` + `JSON.stringify`, same
+  recipe as `idempotencyKey`/`memoKey`), deliberately hashing the *spec*, not
+  the built `Op` tree: a leaf spec's `params` (`spec.ts`'s `mergeParams`) is
+  closed over a generated pipe step's `fn` and never becomes an enumerable
+  field on the built tree, so two specs differing only in `params` would
+  hash identically if the tree were hashed instead. A future `sux`-side
+  durable `Checkpoint` implementation should know its `runId` argument may
+  already be this `runId\0runSig` composite, not a bare caller-supplied
+  string — don't assume it's safe to use directly as, say, a DB row key
+  without accounting for the embedded `\0` and its length (a 64-hex-char
+  SHA-256 digest tacked on).

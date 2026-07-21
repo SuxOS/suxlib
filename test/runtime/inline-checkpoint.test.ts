@@ -76,6 +76,29 @@ test('runInline resumes a partially-completed map fanout, re-running only the it
   expect(calls).toEqual([1, 2, 2])
 })
 
+test('runInline namespaces the checkpoint ledger by runSig (#398): the same runId with a different runSig misses instead of reading the other run\'s recorded value', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  let calls = 0
+  const leaf = op('id', async (n: number) => { calls++; return n + 1 }, { kind: 'pure' })
+  const caps = baseCaps(checkpoint)
+  const runId = 'shared-run-id'
+  expect(await runInline(leaf, 1, caps, undefined, '', runId, 'victim-sig')).toBe(2)
+  expect(calls).toBe(1)
+  expect(await runInline(leaf, 1, caps, undefined, '', runId, 'attacker-sig')).toBe(2)
+  expect(calls).toBe(2)
+})
+
+test('runInline: a matching runId and runSig still resumes -- checkpoint namespacing doesn\'t break legitimate resume (#398)', async () => {
+  const checkpoint = new MemoryCheckpoint()
+  let calls = 0
+  const leaf = op('id', async (n: number) => { calls++; return n + 1 }, { kind: 'pure' })
+  const caps = baseCaps(checkpoint)
+  const runId = 'shared-run-id'
+  expect(await runInline(leaf, 1, caps, undefined, '', runId, 'same-sig')).toBe(2)
+  expect(await runInline(leaf, 1, caps, undefined, '', runId, 'same-sig')).toBe(2)
+  expect(calls).toBe(1)
+})
+
 test('runInline checkpoints a sink target independently of its siblings, so a resumed fanout only redoes the target that never finished', async () => {
   const checkpoint = new MemoryCheckpoint()
   const logCalls: any[] = []; let vaultAttempts = 0
