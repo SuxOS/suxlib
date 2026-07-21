@@ -1,6 +1,6 @@
-import type { Op, LeafFn, LeafOpts, Concurrency } from './types.js'
+import type { Op, LeafFn, LeafOpts, Concurrency, CondPredicate } from './types.js'
 import type { ReconcileOpts, FieldPolicy } from './reconcile.js'
-import { op, pipe, map, mapField, sink, reconcile, catchOp, ask } from './combinators.js'
+import { op, pipe, map, mapField, sink, reconcile, catchOp, ask, cond } from './combinators.js'
 import { resolveLeaf, mergeLeaves, LEAF_SHAPES, type LeafShape, type LeafFieldShape } from './registry.js'
 import { fixed, aimd } from '../control/aimd.js'
 
@@ -24,6 +24,7 @@ export type OpSpec =
   | { tag: 'reconcile'; opts: ReconcileOpts }
   | { tag: 'catch'; try: OpSpec; catch: OpSpec }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
+  | { tag: 'cond'; cases: { when: CondPredicate; then: OpSpec }[]; default?: OpSpec }
 
 // Exported (not module-private) so mcp.ts's opSpecSchema and op/introspect.ts's
 // describePipelineSchema derive their field-policy/reconcile-mode enums from
@@ -36,7 +37,7 @@ export const RECONCILE_MODES = ['faithful-union', 'last-write-wins', 'field-merg
 // run_pipeline tool description, README's tag union prose) from this one
 // array instead of re-enumerating the tag literals, which drifted twice
 // already (#166, #158) before drifting a third time for reconcile/ask (#213).
-export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask'] as const satisfies readonly OpSpec['tag'][]
+export const OP_SPEC_TAGS = ['leaf', 'pipe', 'map', 'mapField', 'sink', 'reconcile', 'catch', 'ask', 'cond'] as const satisfies readonly OpSpec['tag'][]
 
 // Retries/concurrency caps for adapter-triggered runs: generous enough for a
 // real multi-step job, tight enough that a bad spec can't turn one request
@@ -101,7 +102,10 @@ function shapesEqual(a: LeafShape, b: LeafShape): boolean {
  * `try`/`catch` branches agree on a shape (shapesEqual) -- since either
  * branch could run at runtime, a mismatched pair collapses to 'unknown'
  * rather than guessing which branch a downstream step should be checked
- * against, same permissive fallback as an unrepresentable map/mapField case.
+ * against, same permissive fallback as an unrepresentable map/mapField case. A
+ * `cond` node's own boundary follows the identical rule one level wider: only
+ * representable when every case's `then` (and `default`, if present) agree on
+ * a shape, since any one of them could run at runtime.
  */
 function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (!s || typeof s !== 'object') return 'unknown'
@@ -115,6 +119,12 @@ function stepShape(s: OpSpec, side: 'input' | 'output'): LeafShape {
   if (s.tag === 'catch') {
     const tryShape = stepShape(s.try, side); const catchShape = stepShape(s.catch, side)
     return shapesEqual(tryShape, catchShape) ? tryShape : 'unknown'
+  }
+  if (s.tag === 'cond') {
+    if (!Array.isArray(s.cases) || !s.cases.length) return 'unknown'
+    const shapes = s.cases.map((c) => stepShape(c.then, side))
+    if (s.default) shapes.push(stepShape(s.default, side))
+    return shapes.every((sh) => shapesEqual(sh, shapes[0])) ? shapes[0] : 'unknown'
   }
   return 'unknown'
 }
@@ -252,6 +262,24 @@ const isValidSinkTarget = (t: unknown): boolean => {
   if (targetOpts.heavy !== undefined && typeof targetOpts.heavy !== 'boolean') return false
   if (targetOpts.memo !== undefined && typeof targetOpts.memo !== 'boolean') return false
   return true
+}
+
+const isCondPrimitive = (v: unknown): boolean => v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+
+// A cond case's `when` predicate is either `{ field?, equals }` or `{ field?, in }` --
+// exactly one of the two, never both/neither -- checked against a JSON scalar
+// resolved off the piped value (never eval'd code, per #196's own framing).
+// `field`, when present, is validated the same way mapField's arrayField/elementField
+// are (isBadFieldName): reading `__proto__`/`constructor`/`prototype` off an object
+// isn't a write-side pollution vector, but it's not a meaningful field lookup either.
+const isValidCondPredicate = (p: unknown): boolean => {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return false
+  const o = p as { field?: unknown; equals?: unknown; in?: unknown }
+  if (o.field !== undefined && isBadFieldName(o.field)) return false
+  const hasEquals = 'equals' in o; const hasIn = 'in' in o
+  if (hasEquals === hasIn) return false
+  if (hasEquals) return isCondPrimitive(o.equals)
+  return Array.isArray(o.in) && o.in.every(isCondPrimitive)
 }
 
 /**
@@ -421,8 +449,23 @@ function collectSpecErrors(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>
       if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') errors.push({ path, message: 'ask spec\'s `onTimeout` must be "proceed" or "fail"' })
       return
     }
+    case 'cond': {
+      if (!Array.isArray(spec.cases) || !spec.cases.length) {
+        errors.push({ path, message: 'cond spec requires a non-empty `cases` array' })
+      } else {
+        spec.cases.forEach((c, i) => {
+          if (!c || typeof c !== 'object' || !isValidCondPredicate(c.when)) {
+            errors.push({ path: `${path}.cases[${i}]`, message: 'cond case\'s `when` must be `{ field?, equals }` or `{ field?, in }` (exactly one of `equals`/`in`, each a JSON scalar or array of scalars, `field` not `__proto__`/`constructor`/`prototype`)' })
+          }
+          if (!c || !c.then) errors.push({ path: `${path}.cases[${i}]`, message: 'cond case requires a `then`' })
+          else collectSpecErrors(c.then, leaves, `${path}.cases[${i}].then`, errors)
+        })
+      }
+      if (spec.default !== undefined) collectSpecErrors(spec.default, leaves, `${path}.default`, errors)
+      return
+    }
     default:
-      errors.push({ path, message: `unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)` })
+      errors.push({ path, message: `unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: ${OP_SPEC_TAGS.join(', ')})` })
   }
 }
 
@@ -557,7 +600,18 @@ function buildOpNode(spec: OpSpec, leaves: Readonly<Record<string, LeafFn>>): Op
       if (spec.onTimeout !== 'proceed' && spec.onTimeout !== 'fail') throw new Error('ask spec\'s `onTimeout` must be "proceed" or "fail"')
       return ask(spec.prompt, { timeout: spec.timeout, onTimeout: spec.onTimeout })
     }
+    case 'cond': {
+      if (!Array.isArray(spec.cases) || !spec.cases.length) throw new Error('cond spec requires a non-empty `cases` array')
+      const cases = spec.cases.map((c) => {
+        if (!c || !isValidCondPredicate(c.when)) {
+          throw new Error('cond case\'s `when` must be `{ field?, equals }` or `{ field?, in }` (exactly one of `equals`/`in`, each a JSON scalar or array of scalars, `field` not `__proto__`/`constructor`/`prototype`)')
+        }
+        if (!c.then) throw new Error('cond case requires a `then`')
+        return { when: c.when, then: buildOpNode(c.then, leaves) }
+      })
+      return cond(cases, spec.default ? buildOpNode(spec.default, leaves) : undefined)
+    }
     default:
-      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: leaf, pipe, map, mapField, sink, reconcile, catch, ask)`)
+      throw new Error(`unsupported op spec tag "${(spec as { tag?: unknown }).tag}" (allowed: ${OP_SPEC_TAGS.join(', ')})`)
   }
 }

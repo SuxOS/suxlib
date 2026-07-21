@@ -541,6 +541,100 @@ test('buildOp\'s shape check catches a downstream mismatch when a catch node\'s 
   expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("catch"\) produces handle/)
 })
 
+test('buildOp builds a cond node that routes on the piped value, running the first matching case\'s `then` branch (#196)', async () => {
+  const { store } = caps()
+  const spec: OpSpec = {
+    tag: 'cond',
+    cases: [
+      { when: { field: 'kind', equals: 'a' }, then: { tag: 'sink', targets: ['a'] } },
+      { when: { field: 'kind', equals: 'b' }, then: { tag: 'sink', targets: ['b'] } },
+    ],
+  }
+  const tree = buildOp(spec)
+  const written: string[] = []
+  const sinks = {
+    a: { name: 'a', write: async (v: any) => { written.push(`a:${JSON.stringify(v)}`); return v } },
+    b: { name: 'b', write: async (v: any) => { written.push(`b:${JSON.stringify(v)}`); return v } },
+  }
+  await runInline(tree, { kind: 'b' }, { store, llm: {} as any, clock: { now: () => 0 }, sinks })
+  expect(written).toEqual(['b:{"kind":"b"}'])
+})
+
+test('buildOp\'s cond node falls back to `default` when no case matches, and throws with no `default` (#196)', async () => {
+  const { store } = caps()
+  const withDefault: OpSpec = {
+    tag: 'cond',
+    cases: [{ when: { field: 'kind', equals: 'a' }, then: { tag: 'sink', targets: ['a'] } }],
+    default: { tag: 'sink', targets: ['fallback'] },
+  }
+  const written: string[] = []
+  const sinks = {
+    a: { name: 'a', write: async (v: any) => v },
+    fallback: { name: 'fallback', write: async (v: any) => { written.push('fallback'); return v } },
+  }
+  const runCaps = { store, llm: {} as any, clock: { now: () => 0 }, sinks }
+  await runInline(buildOp(withDefault), { kind: 'z' }, runCaps)
+  expect(written).toEqual(['fallback'])
+
+  const withoutDefault: OpSpec = {
+    tag: 'cond',
+    cases: [{ when: { field: 'kind', equals: 'a' }, then: { tag: 'sink', targets: ['a'] } }],
+  }
+  await expect(runInline(buildOp(withoutDefault), { kind: 'z' }, runCaps)).rejects.toThrow(/no case matched/)
+})
+
+test('buildOp rejects a cond spec with an empty `cases` array, a malformed `when`, or a missing `then`', () => {
+  expect(() => buildOp({ tag: 'cond', cases: [] } as unknown as OpSpec)).toThrow(/non-empty `cases`/)
+  expect(() => buildOp({ tag: 'cond', cases: [{ when: { field: 'k', equals: 'a', in: ['a'] } as any, then: { tag: 'leaf', name: 'scrub' } }] } as unknown as OpSpec)).toThrow(/when/)
+  expect(() => buildOp({ tag: 'cond', cases: [{ when: { equals: 'a' } }] } as unknown as OpSpec)).toThrow(/requires a `then`/)
+  expect(() => buildOp({ tag: 'cond', cases: [{ when: { field: '__proto__', equals: 'a' }, then: { tag: 'leaf', name: 'scrub' } }] } as unknown as OpSpec)).toThrow(/when/)
+})
+
+test('buildOp\'s cond shape check treats the node\'s boundary as \'unknown\' when its case/default branches disagree, so it never blocks a downstream pipe step', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      {
+        tag: 'cond',
+        cases: [{ when: { field: 'k', equals: 'a' }, then: { tag: 'leaf', name: 'unzip' } }],
+        default: { tag: 'leaf', name: 'scrub' },
+      },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).not.toThrow()
+})
+
+test('buildOp\'s cond shape check catches a downstream mismatch when every case/default branch agrees on a bare-`handle` output', () => {
+  const spec: OpSpec = {
+    tag: 'pipe',
+    steps: [
+      {
+        tag: 'cond',
+        cases: [{ when: { field: 'k', equals: 'a' }, then: { tag: 'leaf', name: 'convert', params: { from: 'json', to: 'yaml' } } }],
+        default: { tag: 'leaf', name: 'extract' },
+      },
+      { tag: 'leaf', name: 'unwrapHandle' },
+    ],
+  }
+  expect(() => buildOp(spec)).toThrow(/pipe step 1 \("unwrapHandle"\) expects \{handle\} input, but step 0 \("cond"\) produces handle/)
+})
+
+test('validateOpSpec descends into every cond case\'s `then` and `default` even when a sibling case also errors (#196)', () => {
+  const spec: OpSpec = {
+    tag: 'cond',
+    cases: [
+      { when: { field: 'k', equals: 'a' }, then: { tag: 'leaf', name: 'nope-a' } },
+      { when: { field: 'k', equals: 'b' }, then: { tag: 'leaf', name: 'nope-b' } },
+    ],
+    default: { tag: 'leaf', name: 'nope-default' },
+  }
+  const errors = validateOpSpec(spec)
+  expect(errors.some((e) => e.path === '$.cases[0].then' && /unknown leaf "nope-a"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => e.path === '$.cases[1].then' && /unknown leaf "nope-b"/.test(e.message))).toBe(true)
+  expect(errors.some((e) => e.path === '$.default' && /unknown leaf "nope-default"/.test(e.message))).toBe(true)
+})
+
 test('mapField rejects `__proto__` as `arrayField`/`elementField`/`renameTo`', () => {
   expect(() => buildOp({ tag: 'mapField', arrayField: '__proto__', elementField: 'handle', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/arrayField/)
   expect(() => buildOp({ tag: 'mapField', arrayField: 'entries', elementField: '__proto__', op: { tag: 'leaf', name: 'stamp' }, concurrency: 2 })).toThrow(/elementField/)

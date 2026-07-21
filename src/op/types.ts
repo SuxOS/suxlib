@@ -28,6 +28,16 @@ export interface SinkOpts { retries?: number; heavy?: boolean; memo?: boolean }
 // gets retries: 0, without composing two separate sink() nodes via pipe.
 export type SinkFanoutTarget = string | { name: string; opts?: SinkOpts }
 export type LeafFn = (input: any, caps: Caps, idempotencyKey?: string) => Promise<any>
+// A constrained, declarative predicate language for `cond` (#196) -- deliberately
+// not arbitrary injected code, since a predicate can arrive over an unauthenticated
+// adapter call (POST /op/run) the same way an OpSpec leaf name/params can. `field`
+// addresses a top-level key of the piped value; omitted, it compares the piped
+// value itself (the only option for a primitive input) -- exactly one of
+// `equals`/`in` is checked against that resolved value.
+export type CondPrimitive = string | number | boolean | null
+export type CondPredicate =
+  | { field?: string; equals: CondPrimitive }
+  | { field?: string; in: CondPrimitive[] }
 export type Op =
   | { tag: 'leaf'; name: string; fn: LeafFn; opts: LeafOpts }
   | { tag: 'pipe'; steps: Op[] }
@@ -37,3 +47,4 @@ export type Op =
   | { tag: 'sink'; targets: SinkFanoutTarget[]; opts?: SinkOpts }
   | { tag: 'ask'; prompt: string; timeout: string; onTimeout: 'proceed' | 'fail' }
   | { tag: 'catch'; try: Op; catch: Op }
+  | { tag: 'cond'; cases: { when: CondPredicate; then: Op }[]; default?: Op }

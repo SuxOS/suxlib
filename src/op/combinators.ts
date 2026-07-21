@@ -1,4 +1,4 @@
-import type { Op, LeafFn, LeafOpts, SinkOpts, SinkFanoutTarget, Concurrency } from './types.js'
+import type { Op, LeafFn, LeafOpts, SinkOpts, SinkFanoutTarget, Concurrency, CondPredicate } from './types.js'
 import type { ReconcileOpts } from './reconcile.js'
 export const op = (name: string, fn: LeafFn, opts: LeafOpts): Op => ({ tag: 'leaf', name, fn, opts })
 export const pipe = (...steps: Op[]): Op => ({ tag: 'pipe', steps })
@@ -24,3 +24,9 @@ export const ask = (prompt: string, o: { timeout: string; onTimeout: 'proceed' |
 // whole pipe -- closes #183. Named `catchOp`, not `catch`, since `catch` is a reserved word and
 // can't be a const binding -- the Op tag itself is still 'catch'.
 export const catchOp = (tryOp: Op, fallbackOp: Op): Op => ({ tag: 'catch', try: tryOp, catch: fallbackOp })
+// Data-driven success-path routing, complementing catch's error-path routing (#196):
+// evaluates each case's `when` predicate against the piped value in order, running
+// the first match's `then` branch; falls through to `default` (or throws) when none
+// match. Named `cond`, not a reserved word, unlike catchOp's `catch`.
+export const cond = (cases: { when: CondPredicate; then: Op }[], defaultOp?: Op): Op =>
+  ({ tag: 'cond', cases, ...(defaultOp ? { default: defaultOp } : {}) })
