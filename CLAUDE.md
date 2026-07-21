@@ -468,7 +468,15 @@ There is no linter in this repo. Run both locally before pushing.
   landed `releaseCancelled` code — `git merge-base --is-ancestor 3f7ecaa
   origin/main` (exit 1) caught that it's only on the stale, closed-unmerged
   `bot/issue-build-29707704140` branch. Dropped both again, unbuilt, not
-  superseded.
+  superseded. Update (2026-07-21): a fourth, unrelated instance of "a
+  follow-up issue describing a not-yet-landed prerequisite" — #417 (extract
+  `http.ts`'s and `cli.ts`'s `wrapped = trace || checkpoint` output-unwrap
+  duplication into a shared helper) names a `cli.ts` code path that doesn't
+  exist on `main` yet: that duplication is only introduced by #408's own
+  still-open PR (#416, checked via `gh pr diff 416`), not present in
+  `cli.ts`'s current `pipeline run` action. Dropped #417 as blocked (not
+  superseded) rather than building #408 first speculatively — same
+  don't-reimplement-the-prerequisite reasoning as #309/#242 above.
 - Ask convention: the `ask` op node's `timeout` (`src/op/types.ts`) is a raw
   string, not milliseconds — `runInline` (`src/runtime/inline.ts`) passes it
   through uninterpreted to `caps.ask.request(prompt, timeout)` rather than
@@ -778,4 +786,16 @@ There is no linter in this repo. Run both locally before pushing.
   already be this `runId\0runSig` composite, not a bare caller-supplied
   string — don't assume it's safe to use directly as, say, a DB row key
   without accounting for the embedded `\0` and its length (a 64-hex-char
-  SHA-256 digest tacked on).
+  SHA-256 digest tacked on). Update (#409): a cheap read-only "has this run
+  finished" query now exists — `checkpointKey(runId, runSig)`
+  (`src/runtime/inline.ts`, exported so `traced()`'s own `\0`-namespacing
+  isn't re-derived at a second call site) plus `runOpSpecStatus`
+  (`src/adapters/op-run.ts`, mirrors `runIdentity`'s spec+input hash to apply
+  the same #398 IDOR guard to a status query) back `POST /op/run/status`,
+  `check_pipeline_status`, and `pipeline status`. Deliberately scoped to only
+  ever answer `{ done: false }` vs `{ done: true, result }` — the harder
+  in-progress/crashed/never-started distinction the issue also raised still
+  needs a real `Checkpoint` interface extension (an explicit in-progress
+  marker `put` at node-*enter*, not just node-exit) touching every
+  implementation and every `traced()` call site; that's a deliberately
+  separate, unscoped follow-up, not attempted here.

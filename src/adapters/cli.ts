@@ -12,7 +12,7 @@ import { archiveCreate, archiveExtract, safeExtractPath, ARCHIVE_MIME, ARCHIVE_F
 import { pdfShrink, pdfPageCount } from '../domain/pdf.js'
 import { sanitizeImage, redactText, REDACT_TYPES, type RedactType } from '../domain/sanitize.js'
 import { dispatchTransform, type Format } from '../domain/transform.js'
-import { runOpSpec, type OpRunOpts } from './op-run.js'
+import { runOpSpec, runOpSpecStatus, type OpRunOpts } from './op-run.js'
 import { mergeLeaves } from '../op/registry.js'
 import { validateOpSpec, type OpSpec } from '../op/spec.js'
 import { describePipelineSchema } from '../op/introspect.js'
@@ -402,6 +402,28 @@ pipelineCmd
     const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown }
     if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
     console.log(JSON.stringify(planOpSpec(parsed.spec as OpSpec), null, 2))
+  })
+
+/** Cheaply checks whether a previously checkpointed `pipeline run --config <...>`
+ * call has finished, without re-executing it (#409) -- mirrors `POST /op/run/status`
+ * (http.ts) / `check_pipeline_status` (mcp.ts). Needs the exact same spec-file `pipeline
+ * run` was given (to recompute runSig, the same #398 guard `pipeline run` itself
+ * applies) and the `--run-id` it printed to stderr; `--config` must resolve to the same
+ * OpRunOpts (or at least the same `checkpoint`/`store`) the original run used. */
+pipelineCmd
+  .command('status')
+  .description('Check whether a checkpointed run (started via `pipeline run --config <...>`) has finished, without re-executing it')
+  .argument('<spec-file>', 'the exact JSON file: { spec: OpSpec, input } the run used')
+  .requiredOption('--run-id <id>', 'the runId `pipeline run` printed to stderr when it started the checkpointed run')
+  .option('-c, --config <path>', 'path to a JS/TS module (default export) supplying an OpRunOpts object with a `checkpoint` capability -- same module `pipeline run` used')
+  .action(async (specFile: string, opts: { runId: string; config?: string }) => {
+    const parsed = JSON.parse(readFileSync(specFile, 'utf8')) as { spec?: unknown; input?: unknown }
+    if (!parsed.spec || typeof parsed.spec !== 'object') throw new Error('spec file must contain a `spec` (an op-tree JSON description)')
+    const input = resolveFileRefs(parsed.input, dirname(resolve(specFile)))
+    const runOpts = opts.config ? { ...cliOpRunOpts, ...(await loadOpRunOptsConfig(opts.config)) } : cliOpRunOpts
+    if (!runOpts.checkpoint) throw new Error('pipeline status requires a --config module supplying a `checkpoint` capability')
+    const status = await runOpSpecStatus({ spec: parsed.spec as OpSpec, input, runId: opts.runId }, { checkpoint: runOpts.checkpoint, store: runOpts.store })
+    console.log(JSON.stringify(status))
   })
 
 /** Re-exported for tests: the actual dispatch logic is `dispatchTransform` in

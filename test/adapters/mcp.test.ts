@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { registerFileopsTools } from '../../src/adapters/mcp.js'
-import { MemoryStore } from '../../src/effects/types.js'
+import { MemoryStore, MemoryCheckpoint } from '../../src/effects/types.js'
 import { b64ToBytes, bytesToB64 } from '../../src/adapters/base64.js'
 
 const b64 = (s: string) => btoa(s)
@@ -33,7 +33,7 @@ describe('mcp adapter', () => {
 
   it('lists the expected tools', async () => {
     const { tools } = await client.listTools()
-    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline', 'describe_pipeline', 'validate_pipeline', 'plan_pipeline'].sort())
+    expect(tools.map((t) => t.name).sort()).toEqual(['archive_create', 'archive_extract', 'pdf_shrink', 'pdf_page_count', 'sanitize_image', 'sanitize_text', 'transform', 'run_pipeline', 'check_pipeline_status', 'describe_pipeline', 'validate_pipeline', 'plan_pipeline'].sort())
   })
 
   it('transform: happy path json -> yaml', async () => {
@@ -599,5 +599,54 @@ describe('mcp adapter: persistent op-run cache/governors', () => {
 
     await describeClient.close()
     await describeServer.close()
+  })
+})
+
+describe('mcp adapter: check_pipeline_status (#409)', () => {
+  let client: Client
+  let server: McpServer
+
+  beforeEach(async () => {
+    server = new McpServer({ name: 'test-no-checkpoint', version: '0.0.0' })
+    registerFileopsTools(server)
+    client = new Client({ name: 'test-no-checkpoint-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+  })
+
+  afterEach(async () => {
+    await client.close()
+    await server.close()
+  })
+
+  it('requires opts.opRunCheckpoint to be configured', async () => {
+    const result = await client.callTool({
+      name: 'check_pipeline_status',
+      arguments: { spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 }, runId: 'x' },
+    })
+    expect(result.isError).toBe(true)
+    const content = result.content as Array<{ type: string; text?: string }>
+    expect(content?.[0]?.text).toMatch(/opRunCheckpoint/)
+  })
+
+  it('reports { done: false } for a runId with no recorded checkpoint entry, and { done: true, result } once run_pipeline has finished', async () => {
+    const checkpointServer = new McpServer({ name: 'test-checkpoint', version: '0.0.0' })
+    registerFileopsTools(checkpointServer, { opRunCheckpoint: new MemoryCheckpoint(), opRunLeaves: { shout: async (input) => input } })
+    const checkpointClient = new Client({ name: 'test-checkpoint-client', version: '0.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([checkpointServer.connect(serverTransport), checkpointClient.connect(clientTransport)])
+
+    const spec = { tag: 'leaf', name: 'shout' }
+    const neverRan = await checkpointClient.callTool({ name: 'check_pipeline_status', arguments: { spec, input: { a: 1 }, runId: 'never-ran' } })
+    expect(parseResult(neverRan)).toEqual({ done: false })
+
+    const runResult = await checkpointClient.callTool({ name: 'run_pipeline', arguments: { spec, input: { a: 1 } } })
+    const { runId } = parseResult(runResult) as { runId: string }
+
+    const status = await checkpointClient.callTool({ name: 'check_pipeline_status', arguments: { spec, input: { a: 1 }, runId } })
+    expect(parseResult(status)).toEqual({ done: true, result: { a: 1 } })
+
+    await checkpointClient.close()
+    await checkpointServer.close()
   })
 })

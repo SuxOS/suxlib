@@ -18,7 +18,7 @@ import { MemoryStore } from '../effects/types.js'
 import type { Caps, Governor, SinkTarget, LeafFn } from '../op/types.js'
 import { buildOp, type OpSpec } from '../op/spec.js'
 import { SINK_REGISTRY } from '../op/sinks.js'
-import { runInline } from '../runtime/inline.js'
+import { runInline, checkpointKey } from '../runtime/inline.js'
 import type { RunGovernedOpts } from '../control/governor.js'
 import { canonicalize } from '../control/retry.js'
 import type { TraceEvent } from '../control/trace.js'
@@ -286,4 +286,39 @@ export async function runOpSpec({ spec, input, trace, runId }: OpRunRequest, opt
     return trace ? { result: dehydrated, trace: events, runId: effectiveRunId } : { result: dehydrated, runId: effectiveRunId }
   }
   return trace ? { result: dehydrated, trace: events } : dehydrated
+}
+
+export type OpRunStatusRequest = { spec: OpSpec; input: unknown; runId: string }
+export type OpRunStatusOpts = { checkpoint: Checkpoint; store?: Store }
+export type OpRunStatus = { done: true; result: unknown } | { done: false }
+
+/**
+ * Cheap "has this checkpointed run finished, and if so what did it return"
+ * query (#409) -- reads the exact root-node entry `runOpSpec`'s call into
+ * runInline already leaves behind via `traced()` (src/runtime/inline.ts),
+ * without re-executing (or even building) the op tree at all. `spec`/`input`
+ * must be the same ones the original run used: recomputing `runIdentity`
+ * here (rather than trusting a bare caller-supplied `runId`) is what closes
+ * the same #398 IDOR class runOpSpec itself guards against -- a status
+ * request naming a stranger's `runId` alongside a mismatched spec/input
+ * misses the ledger entirely rather than reading that run's result.
+ *
+ * Deliberately narrow: `Checkpoint.get`/`put` only distinguish "done" from
+ * "no entry yet" (src/effects/types.ts), so this can only ever answer `{
+ * done: false }` for a run that's still in progress, crashed mid-run, or
+ * never started -- there is no separate in-progress marker to report on.
+ * Giving those cases distinct answers needs a real `Checkpoint` interface
+ * extension (touching every implementation and every `traced()` call site),
+ * which is out of scope here -- see #409's own issue text.
+ *
+ * `opts.store`, when supplied, dehydrates a Handle-shaped recorded result
+ * back to base64 the same way `runOpSpec` does -- omit it only when the
+ * original run's result is known to contain no Handles, or the caller wants
+ * the raw (still-Handle-shaped) value back.
+ */
+export async function runOpSpecStatus({ spec, input, runId }: OpRunStatusRequest, opts: OpRunStatusOpts): Promise<OpRunStatus> {
+  const runSig = await runIdentity(spec, input)
+  const recorded = await opts.checkpoint.get(checkpointKey(runId, runSig), '')
+  if (!recorded) return { done: false }
+  return { done: true, result: opts.store ? await dehydrate(opts.store, recorded.value) : recorded.value }
 }

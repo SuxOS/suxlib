@@ -1,11 +1,35 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { zipSync } from 'fflate'
 import { archiveCreate } from '../../src/domain/archive.js'
 import { extractArchiveTo, main, pipelineRunCmd, transform } from '../../src/adapters/cli.js'
 import { bytesToB64 } from '../../src/adapters/base64.js'
+import { runOpSpec } from '../../src/adapters/op-run.js'
+import type { OpSpec } from '../../src/op/spec.js'
+import type { Checkpoint } from '../../src/effects/types.js'
+
+// Self-contained (no import) so it works regardless of where tmpDir() places
+// the config file on disk -- a relative import inside the written module
+// would resolve against the tmp directory, not this repo. Node caches a
+// dynamic import() by resolved URL, so two `main()`/runOpSpec calls sharing
+// the same configPath get the identical `checkpoint` object back, letting a
+// test seed a checkpoint entry directly and then read it back via `pipeline
+// status` (or vice versa) without needing `pipeline run` to expose runId.
+const checkpointConfigModule =
+  'export default { checkpoint: (() => {\n' +
+  '  const m = new Map()\n' +
+  '  return {\n' +
+  '    async get(runId, path) { return m.get(runId)?.get(path) },\n' +
+  '    async put(runId, path, value) {\n' +
+  '      let byPath = m.get(runId)\n' +
+  '      if (!byPath) { byPath = new Map(); m.set(runId, byPath) }\n' +
+  '      byPath.set(path, { done: true, value })\n' +
+  '    },\n' +
+  '  }\n' +
+  '})() }\n'
 
 // extractArchiveTo exercises the CLI's actual filesystem-writing extract path —
 // the real attack surface the zip-slip guard protects, as opposed to
@@ -573,6 +597,43 @@ describe('cli `pipeline plan` (real CLI entry point)', () => {
     expect(printed.maxRetryMultiplier).toBe(3 + 1) // extract retries:2 -> 3, stamp default -> 1
     expect(printed.usesLlm).toBe(true)
     expect(printed.llmLeaves).toEqual(['extract'])
+    logSpy.mockRestore()
+  })
+})
+
+describe('cli `pipeline status` (real CLI entry point)', () => {
+  it('requires a --config module supplying a checkpoint capability', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    writeFileSync(specPath, JSON.stringify({ spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 } }))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    process.exitCode = 0
+    await main(['node', 'suxlib-fileops', 'pipeline', 'status', specPath, '--run-id', 'x'], { leaves: { shout: async (input) => input } })
+    expect(process.exitCode).toBe(1)
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/checkpoint/))
+    process.exitCode = 0
+    errSpy.mockRestore()
+  })
+
+  it('reports { done: false } for a runId with no recorded checkpoint entry, and { done: true, result } for a run seeded directly via runOpSpec sharing the same checkpoint instance (#409)', async () => {
+    const work = tmpDir()
+    const specPath = join(work, 'spec.json')
+    const configPath = join(work, 'op-run.config.mjs')
+    const spec: OpSpec = { tag: 'leaf', name: 'shout' }
+    writeFileSync(specPath, JSON.stringify({ spec, input: { a: 1 } }))
+    writeFileSync(configPath, checkpointConfigModule)
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await main(['node', 'suxlib-fileops', 'pipeline', 'status', specPath, '--run-id', 'never-ran', '--config', configPath], { leaves: { shout: async (input) => input } })
+    expect(process.exitCode).toBeFalsy()
+    expect(JSON.parse(logSpy.mock.calls[0][0] as string)).toEqual({ done: false })
+
+    const configModule = (await import(pathToFileURL(resolve(configPath)).href)) as { default: { checkpoint: Checkpoint } }
+    await runOpSpec({ spec, input: { a: 1 }, runId: 'known-run-id' }, { leaves: { shout: async (input) => input }, checkpoint: configModule.default.checkpoint })
+
+    await main(['node', 'suxlib-fileops', 'pipeline', 'status', specPath, '--run-id', 'known-run-id', '--config', configPath], { leaves: { shout: async (input) => input } })
+    expect(process.exitCode).toBeFalsy()
+    expect(JSON.parse(logSpy.mock.calls[1][0] as string)).toEqual({ done: true, result: { a: 1 } })
     logSpy.mockRestore()
   })
 })

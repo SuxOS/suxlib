@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import handler, { type Env } from '../../src/adapters/http.js'
-import { MemoryStore } from '../../src/effects/types.js'
+import { MemoryStore, MemoryCheckpoint } from '../../src/effects/types.js'
 
 function post(path: string, body: unknown, headers: Record<string, string> = {}, env?: Env): Promise<Response> {
   return handler.fetch(
@@ -287,6 +287,30 @@ describe('http adapter', () => {
     const body = (await res.json()) as { error: string }
     expect(body.error).toMatch(/aborted/)
     expect(secondRan).toBe(false)
+  })
+
+  it('POST /op/run/status: requires env.opRunCheckpoint to be configured', async () => {
+    const res = await post('op/run/status', { spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 }, runId: 'x' })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { error: string }).error).toMatch(/opRunCheckpoint/)
+  })
+
+  it('POST /op/run/status: reports { done: false } for a runId with no recorded checkpoint entry', async () => {
+    const env: Env = { opRunCheckpoint: new MemoryCheckpoint() }
+    const res = await post('op/run/status', { spec: { tag: 'leaf', name: 'shout' }, input: { a: 1 }, runId: 'never-ran' }, {}, env)
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ done: false })
+  })
+
+  it('POST /op/run/status: reports { done: true, result } for a finished checkpointed run (#409)', async () => {
+    const env: Env = { opRunCheckpoint: new MemoryCheckpoint(), opRunLeaves: { shout: async (input) => input } }
+    const spec = { tag: 'leaf', name: 'shout' }
+    const runRes = await post('op/run', { spec, input: { a: 1 } }, {}, env)
+    const { runId } = (await runRes.json()) as { runId: string }
+
+    const statusRes = await post('op/run/status', { spec, input: { a: 1 }, runId }, {}, env)
+    expect(statusRes.status).toBe(200)
+    expect(await statusRes.json()).toEqual({ done: true, result: { a: 1 } })
   })
 
   it('GET /op/schema: reports the built-in leaf registry, sink targets, reconcile modes, and field policies', async () => {

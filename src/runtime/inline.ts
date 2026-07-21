@@ -81,6 +81,17 @@ let traceCallSeq = 0
 // buildOp's mergeParams closes a leaf spec's `params` over the piped value,
 // so those params never appear as an enumerable field on the built tree) and
 // root input.
+// \0 can't appear in a caller-supplied runId/runSig (a UUID or hex digest),
+// so this can't collide with an unnamespaced key -- and when runSig is ''
+// (the default for every caller that doesn't opt in), this reduces to the
+// bare `runId` used before #398, unchanged. Exported so a cheap status query
+// (src/adapters/op-run.ts's runOpSpecStatus, #409) can address the exact
+// same root-node ((runId, runSig), '') entry traced() itself writes, without
+// re-deriving this namespacing rule at a second call site.
+export function checkpointKey(runId: string, runSig: string): string {
+  return runSig ? `${runId}\0${runSig}` : runId
+}
+
 async function traced<T>(tag: string, name: string | undefined, path: string, runId: string, runSig: string, caps: Caps, gOpts: RunGovernedOpts | undefined, fn: (callId: string) => Promise<T>): Promise<T> {
   // Cooperative-cancellation checkpoint (#279): every node runInline
   // dispatches -- leaf, pipe step, map/mapField item, reconcile, sink
@@ -88,11 +99,7 @@ async function traced<T>(tag: string, name: string | undefined, path: string, ru
   // so one check here is equivalent to a check at every one of those sites.
   if (gOpts?.signal?.aborted) throw new OpAbortError()
   const checkpoint = caps.checkpoint
-  // \0 can't appear in a caller-supplied runId/runSig (a UUID or hex
-  // digest), so this can't collide with an unnamespaced key -- and when
-  // runSig is '' (the default for every caller that doesn't opt in), this
-  // reduces to the bare `runId` used before #398, unchanged.
-  const checkpointRunId = checkpoint && runSig ? `${runId}\0${runSig}` : runId
+  const checkpointRunId = checkpointKey(runId, runSig)
   if (checkpoint) {
     const recorded = await checkpoint.get(checkpointRunId, path)
     if (recorded) return recorded.value as T
