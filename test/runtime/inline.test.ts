@@ -327,7 +327,16 @@ test('runInline\'s race stops a losing pipe branch from starting its next step o
 test('runInline\'s race throws instead of hanging forever when a hand-built node\'s `need` exceeds its `ops` length (#429)', async () => {
   const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
   const tree = race([op('ok', async () => 'v', { kind: 'pure' })], { need: 2 })
-  await expect(runInline(tree, 'v', caps)).rejects.toThrow(/`need`.*exceeds/)
+  await expect(runInline(tree, 'v', caps)).rejects.toThrow(/`need`.*integer between/)
+})
+
+test('runInline\'s race throws instead of hanging forever when a hand-built node\'s `need` is below 1 and every branch fails (#444)', async () => {
+  const caps: any = { store: new MemoryStore(), llm: {}, clock: { now: () => 0 }, sinks: {} }
+  const tree = race([
+    op('failA', async () => { throw new Error('a') }, { kind: 'pure' }),
+    op('failB', async () => { throw new Error('b') }, { kind: 'pure' }),
+  ], { need: 0 })
+  await expect(runInline(tree, 'v', caps)).rejects.toThrow(/`need`.*integer between/)
 })
 
 test('runInline rejects with OpAbortError before running any node when gOpts.signal is already aborted (#279)', async () => {
