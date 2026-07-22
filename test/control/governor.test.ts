@@ -211,12 +211,16 @@ test('releases the half-open probe slot before the retry backoff sleep, not afte
   breaker.onFailure(0) // -> open
   breaker.allow(100)   // cooldown elapsed -> half-open
 
-  let releaseSleep!: () => void
+  let releaseSleep: (() => void) | undefined
   const blockingSleep = () => new Promise<void>(resolve => { releaseSleep = resolve })
   const failing = async () => { throw new Error('still down') }
 
   const run = runGoverned('leaf', { kind: 'effect', retries: 1 }, failing, null, caps(100), { circuitBreaker: breaker }, { sleep: blockingSleep })
-  await new Promise(resolve => setTimeout(resolve, 0)) // let the probe fail and reach the backoff sleep
+  // runGoverned awaits a real crypto.subtle.digest (idempotencyKey) before
+  // the first attempt, so one setTimeout(0) tick isn't guaranteed to get the
+  // probe failed and parked at the backoff sleep under load -- poll until the
+  // sleep has actually been entered (releaseSleep assigned) instead.
+  while (!releaseSleep) await new Promise(resolve => setTimeout(resolve, 0))
 
   // The probe already failed and released its slot -- a concurrent call should be able to
   // reserve a new probe immediately, without waiting for the sleeping attempt to finish.
@@ -483,13 +487,21 @@ test('concurrent memo calls sharing a key singleflight into one fn execution ins
   let resolveFn: (v: string) => void
   const fn = async () => { calls++; return new Promise<string>((resolve) => { resolveFn = resolve }) }
   const c = { ...caps(), cache: new MemoryCache() }
-  const p1 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
-  const p2 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
-  const p3 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
-  // memoKey does real async crypto.subtle.digest work before fn is reachable
-  // -- poll until fn has actually started rather than assuming a fixed
-  // number of microtask ticks is enough.
-  while (calls < 1) await new Promise((r) => setTimeout(r, 0))
+  const events: any[] = []
+  const onEvent = (e: any) => events.push(e)
+  const p1 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, { ...noSleep, onEvent })
+  const p2 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, { ...noSleep, onEvent })
+  const p3 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, { ...noSleep, onEvent })
+  // Each caller runs its own async memoKey (real crypto.subtle.digest) +
+  // cache.get prefix before it can join the in-flight promise, so settling
+  // fn as soon as it has started (calls === 1) races the other callers'
+  // arrival -- a caller landing after the settle cascade has cleared the
+  // in-flight entry re-runs fn and waits on a promise nobody settles (the
+  // 5s-timeout CI flake at #311's failure-path sibling below). A joiner
+  // emits memo-hit synchronously at join time and the cache can't be
+  // populated before fn settles, so two memo-hit events mean both other
+  // callers have genuinely joined; only then is it safe to settle.
+  while (calls < 1 || events.filter((e) => e.kind === 'memo-hit').length < 2) await new Promise((r) => setTimeout(r, 0))
   resolveFn!('ok')
   const [r1, r2, r3] = await Promise.all([p1, p2, p3])
   expect(calls).toBe(1)
@@ -501,9 +513,17 @@ test('a concurrent memo dedup rejects every joined caller when the in-flight cal
   let rejectFn: (e: Error) => void
   const fn = async () => { calls++; return new Promise<string>((_resolve, reject) => { rejectFn = reject }) }
   const c = { ...caps(), cache: new MemoryCache() }
-  const p1 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
-  const p2 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, noSleep)
-  while (calls < 1) await new Promise((r) => setTimeout(r, 0))
+  const events: any[] = []
+  const onEvent = (e: any) => events.push(e)
+  const p1 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, { ...noSleep, onEvent })
+  const p2 = runGoverned('shrink', { kind: 'pure', memo: true }, fn, { a: 1 }, c, undefined, { ...noSleep, onEvent })
+  // Wait for p2's memo-hit (it joins synchronously with that event) before
+  // injecting the failure: rejecting as soon as fn starts races p2's async
+  // memoKey/cache.get prefix, and because a failure is deliberately not
+  // cached and the settle cascade clears the in-flight entry, a p2 arriving
+  // late re-runs fn -- whose fresh promise nobody rejects -- and hangs until
+  // the 5s test timeout (the flake that broke main CI on this test).
+  while (calls < 1 || !events.some((e) => e.kind === 'memo-hit')) await new Promise((r) => setTimeout(r, 0))
   rejectFn!(new Error('boom'))
   await expect(p1).rejects.toThrow('boom')
   await expect(p2).rejects.toThrow('boom')
