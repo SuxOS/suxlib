@@ -1,12 +1,12 @@
 name: Issue build
 
-# Collate + build stage: clusters queued-for-build issues (n issues -> m PRs, never n->1;
-# confidence-pure), fans out one build session + PR per cluster. confidence:high clusters get
-# `automerge`, the rest `needs-review`. Batch schedule replaces per-issue triggering (org budget
-# redesign — see SuxOS/.github docs/design/budget-and-cadence.md); workflow_dispatch drains the
-# queue on demand. Runs on the Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN). PRs flow
-# into the existing automerge/merge-queue. suxlib has no `typecheck`/`lint` npm scripts — `npm
-# run build` is `tsc --noEmit`, doubling as the typecheck (see package.json).
+# Collate + build stage: selects buildable open issues directly (eligibility = not-draft AND
+# not-hold; no confidence:* taxonomy, no queued-for-build/needs-review lanes — that handoff was
+# removed in the three-loop rework), always builds >=1 PR per run, never 0. PRs auto-merge on
+# green. Batch schedule replaces per-issue triggering (org budget redesign — see SuxOS/.github
+# docs/design/budget-and-cadence.md); workflow_dispatch drains the queue on demand. Runs on the
+# Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN). suxlib has no `typecheck`/`lint` npm
+# scripts — `npm run build` is `tsc --noEmit`, doubling as the typecheck (see package.json).
 # Reusable workflow: SuxOS/.github/.github/workflows/issue-build.yml
 
 on:
