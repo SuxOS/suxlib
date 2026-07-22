@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# Detached scratch worktrees (parallel-mutator isolation) — never committed
+.scratch-worktrees/
