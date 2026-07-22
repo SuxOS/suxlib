@@ -12,7 +12,7 @@ name: Fixer
 
 on:
   schedule:
-    - cron: "17 * * * *" # hourly, deep scope, offset from sibling repos
+    - cron: "17 6 */3 * *" # Fixer Cadence v2: warm-tier every 3rd day ambitious-idea sweep
   workflow_dispatch:
 
 jobs:
