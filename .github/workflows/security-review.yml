@@ -7,12 +7,25 @@ name: Security review (no-dumb-shit bot)
 # Reusable workflow: SuxOS/.github/.github/workflows/security-review.yml
 # Inert until CLAUDE_CODE_OAUTH_TOKEN is set (see the reusable's own preflight).
 
+# pull_request_target is added ONLY to route Dependabot dep-bump PRs through a
+# secret-bearing base-repo context: GitHub withholds secrets (incl.
+# CLAUDE_CODE_OAUTH_TOKEN) from Dependabot pull_request runs, so the review goes inert
+# and this REQUIRED gate fails CLOSED forever on every dep bump (SuxOS/.github#621/#622).
+# The job `if` routes each PR to EXACTLY ONE trigger — dependabot[bot] →
+# pull_request_target, everyone else → pull_request — so the review never double-runs and
+# no untrusted human PR reaches the privileged context.
+
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
   security-review:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]')
     permissions:
       contents: read
       pull-requests: write
@@ -20,5 +33,5 @@ jobs:
       id-token: write
     uses: SuxOS/.github/.github/workflows/security-review.yml@main
     with:
-      allowed-bots: "suxbot[bot]"
+      allowed-bots: "suxbot[bot],dependabot[bot]"
     secrets: inherit
