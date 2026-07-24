@@ -174,3 +174,7 @@ npm run build    # tsc --noEmit (strict mode, type-check only — no dist/ outpu
 Tests mirror source under `test/**` (one test file per source file). Both commands must
 pass before merging — see `.github/workflows/ci.yml` and `CLAUDE.md` for the full
 contributor workflow.
+
+A pinned `nix develop` devShell (`flake.nix`) provides a reproducible `nodejs_22` +
+`typescript` toolchain for contributors and CI alike — `direnv allow` (via `.envrc`)
+loads it automatically on `cd`.
