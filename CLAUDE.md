@@ -96,83 +96,39 @@ There is no linter in this repo. Run both locally before pushing.
   against current `main` for the relevant path (`git diff main <branch> --
   <path>`) to turn a from-scratch design task into a verify-and-adapt one. Don't
   merge/cherry-pick it wholesale though — it may predate a feature that's since
-  landed on `main` (see #143/#162), so reimplement against current `main` using
-  it as a reference, not a patch. When several sibling stale branches exist for
-  the same issue (multiple prior batches each attempted it independently),
-  they can diverge in actual design/naming — and a since-filed follow-up issue
-  for the "next increment" may describe function/line details from a sibling
-  attempt that wasn't the one ultimately merged (#143's own follow-ups, #145
-  and #161, cite a `validatePipeShapes` name/lines that don't match the
-  `shapeCompatible`/`stepShape` implementation that actually landed from a
-  different sibling branch) — verify a follow-up issue's cited names/lines
-  against current code rather than trusting them verbatim.
-  Update (#409): a stale branch's CI failure doesn't always mean its core
-  logic is broken — `bot/issue-build-29820298284` (PR #419, closed unmerged)
-  implemented #409 correctly but failed `Test & build` on a parse error
-  ("Identifier `checkpointConfigModule` has already been declared") because
-  a *different*, since-merged PR (#416) had independently added an
-  identically-named test helper to the same file. Read the actual CI log
-  before writing off a whole stale branch as unusable — a same-file test-
-  scaffolding collision between two sibling batches is a different failure
-  class than a real logic bug, and here it meant reusing #416's already-
-  landed helper (dropping the branch's own duplicate copy) instead of
-  redesigning anything.
+  landed on `main`, so reimplement against current `main` using it as a
+  reference, not a patch. Sibling stale branches for the same issue (multiple
+  prior batches, each attempted independently) can diverge in actual
+  design/naming — verify a follow-up issue's cited names/lines against current
+  code rather than trusting them verbatim, and read a stale branch's actual CI
+  log before writing the whole branch off (a same-file test-scaffolding
+  collision with a different, since-merged PR is a different failure class
+  than a real logic bug in the branch itself).
 - **A follow-up issue can be filed against a prerequisite that hasn't merged
-  yet.** #242 (trace snapshot budget guard, follow-up to #234) and #250/#251
-  (follow-ups to #247's sink governance) were all still queued as buildable
-  while #234 and #247 themselves sat unmerged in their own open PRs (#241,
-  #249) — so the feature/field the follow-up describes (`trace: 'full'`,
-  `SinkOpts`, `sink.fanout(names, opts?)`) doesn't exist on `main` at all yet.
-  Before building a follow-up issue, grep current `main` for the symbol it
-  names; if absent, check whether the prerequisite issue is still open with
-  an unmerged PR and drop the follow-up as blocked (not superseded) rather
-  than reimplementing the prerequisite yourself and risking duplicate/
-  conflicting work when that PR lands. Update (#267): don't stop at "still
-  unmerged" — check *why* with `gh pr checks <prereq-pr>` /
-  `gh run view <run-id> --log-failed`. #241 (#234) and #249 (#247) are each
-  stuck on one concrete, fixable CI failure, not flakiness: #241 fails
-  `security-review` with exactly the finding #242 itself describes
-  (`snapshotValue()` has no byte/node-count budget); #249 fails `Test &
-  build` because the sink-governance change broke per-target trace emission
-  for sink fanout
-  (`test/runtime/inline-trace.test.ts > runInline traces a sink fanout`). A
-  batch that lands #234 or #247 should fix that PR's own failure as part of
-  the same change (folding #242's budget guard into #241's work, fixing the
-  trace regression as part of #249's work) — that closes the follow-up issue
-  as a side effect instead of every future batch re-claiming and re-dropping
-  #242/#251 as a no-op forever. Update: #247 landed this way, but via a
-  *different* PR than the one this note originally named — #249 itself was
-  closed unmerged; #281 ("feat: per-file --mtime for CLI archive create;
-  gate sink writes through runGoverned") is the PR that actually fixed the
-  trace regression and merged, closing #247 (and #246). #251 (per-target
-  sink.fanout opts) built cleanly on top once #247 landed. #234/#241 (the
-  `trace: 'full'` snapshotValue budget guard, #242's prerequisite) were
-  still open/stuck as of this note — don't assume a prerequisite's PR number
-  stays fixed once you go looking; re-check via `gh pr list --search
-  "<issue>" --state all` rather than trusting a previously-recorded PR
-  number.
-- Update (2026-07-21, #414): the #320/#337 `security-review` missing-script
-  infra gap (extensively documented above) is now RESOLVED — closed both
-  issues after confirming the 10 most recent `security-review` workflow runs
-  on this repo all pass or fail on a genuine CONFIRMED critical/high
-  verdict, with zero occurrences of the
-  `.suxos-ci/scripts/classify-security-noverdict.sh: No such file or
-  directory` error. Stop re-checking #320/#337-blocked PRs for this specific
-  cause — if a `security-review` check fails going forward, read its actual
-  log output; it's almost certainly a real finding to address, not the old
-  infra gap. If the missing-script error ever reappears, it needs a fresh
-  issue, not a reopen of these two (their history is long and mostly moot).
+  yet** — the feature/field it describes may not exist on `main` at all. Grep
+  current `main` for the symbol the follow-up names; if absent, check whether
+  the prerequisite issue is still open with an unmerged PR (`gh pr checks
+  <prereq-pr>` / `gh run view <run-id> --log-failed` to see *why*, not just
+  *that* it's unmerged) and drop the follow-up as blocked (not superseded)
+  rather than reimplementing the prerequisite yourself. A batch that lands the
+  prerequisite should fix that PR's own blocking CI failure as part of the
+  same change where feasible — that closes the follow-up as a side effect
+  instead of every future batch re-claiming and re-dropping it as a no-op
+  forever. Don't assume a prerequisite's PR number stays fixed once you go
+  looking; re-check via `gh pr list --search "<issue>" --state all`.
 - **A suxbot-filed issue about the low-tier dispatcher re-selecting a
-  specific blocked issue (e.g. #313 on #264) is usually fixable directly
-  from suxlib, without touching `SuxOS/.github`'s reusable
-  `issue-build.yml`**: just `gh issue edit <n> --add-label hold` (or
-  `needs-human`) on the offending issue. Both labels are already an EXPAND
-  exclusion signal this task's own instructions honor ("not already
-  labelled `building`/`hold`/`needs-human`"), so the batch dispatcher almost
-  certainly honors them the same way — confirmed by #320/#337 themselves,
-  which stopped being re-claimed once labelled `needs-human` (#314). Check
-  this before assuming a dispatcher-loop meta-issue needs a cross-repo code
-  change.
+  specific blocked issue is usually fixable directly from suxlib, without
+  touching `SuxOS/.github`'s reusable `issue-build.yml`**: just `gh issue edit
+  <n> --add-label hold` (or `needs-human`) on the offending issue. Both labels
+  are already an EXPAND exclusion signal this task's own instructions honor
+  ("not already labelled `building`/`hold`/`needs-human`"), so the batch
+  dispatcher almost certainly honors them the same way. Check this before
+  assuming a dispatcher-loop meta-issue needs a cross-repo code change.
+- Detailed, dated case-by-case history behind the three bullets above (which
+  issues, which PRs, which CI runs, resolved on which date) lives in
+  `docs/issue-triage-archive.md`, not here — append new triage narrative there,
+  not to this file, so this file stays durable conventions rather than a
+  growing journal.
 
 ## Consumers
 
@@ -416,92 +372,11 @@ There is no linter in this repo. Run both locally before pushing.
   `mapField` item-level `node.concurrency.acquire()` calls (`src/runtime/
   inline.ts:58,72`) — a different, unnamed limiter from `governor.ts`'s
   per-leaf one, out of #297's stated scope, so a map item queued behind a
-  full fan-out limiter still can't be cancelled early. Update: #303 (open PR
-  #308) and #234 (open PR #241) are both stuck on the *same* org-level infra
-  gap #320 tracks — `.suxos-ci/scripts/classify-security-noverdict.sh` is
-  missing from the reusable `security-review` workflow, so it fails closed
-  on every PR that hits it regardless of diff content. #309 (proposing
-  `runGoverned`'s catch use a neutral-release outcome, matching #303's fix)
-  and #242 (a snapshot-byte budget guard on #234's `trace: 'full'` feature)
-  are follow-ups to those two still-unmerged PRs — grepped `Concurrency`
-  (`src/op/types.ts`) and `src/control/trace.ts` as of this note and neither
-  `releaseCancelled()`/`releaseNeutral()` nor `snapshotValue`/`traceSnapshots`
-  exist on `main` yet. Don't reimplement either prerequisite speculatively to
-  unblock its follow-up — a prior stale branch (`bot/issue-build-29707704140`,
-  PR #304, closed unmerged) already found #303 actually landed the method as
-  `releaseCancelled()`, not the `releaseNeutral()` name #309 itself guesses,
-  so building the follow-up first risks a name mismatch/duplicate interface
-  member once the real PR lands. Drop #309/#242 as blocked (not superseded)
-  until #308/#241 merge, and re-check `gh pr checks 308`/`241` rather than
-  assuming the infra gap is still open by the time either issue is next
-  claimed. Update (2026-07-20): re-checked per the above — both still fail
-  `security-review` on the identical missing-script error, so #309/#242 were
-  dropped again unbuilt. #172 (bare-Handle `params` guard)/PR #173 is a third,
-  independent instance of the same #320 gap blocking an otherwise-complete,
-  ready-to-merge fix — with the gap still open, assume *any* issue that looks
-  freshly buildable may already have a stuck-but-still-OPEN PR against it;
-  `gh pr list --search "<issue>" --state all` before building, not just for
-  closed/superseded branches. #320 itself was labeled `needs-human` after two
-  consecutive daily batches independently rediscovered it as unfixable from
-  suxlib (the script and its home repo, SuxOS/.github, aren't reachable from
-  here at all) — nothing left for a builder to do on it short of that label,
-  so stop requeuing it until a human restores the upstream script. Update
-  (2026-07-20, later batch): #309/#242 re-checked again via `gh pr checks
-  308`/`241` — both still fail `security-review` on the same missing-script
-  error, so both stayed dropped, unbuilt. Gotcha that nearly caused a bad
-  build this round: `git log origin/main --oneline --all | grep <name>` can
-  match a commit that only exists on an unmerged PR's remote-tracking ref
-  (`--all` walks every ref, not just `main`) — `git show <sha>` on that
-  commit then looks exactly like real, landed code (full diff, real file
-  contents), with nothing in the output itself flagging it as unmerged. This
-  is exactly how a prior run first mis-confirmed #303's `releaseCancelled()`
-  naming (correctly, since that stale branch was later confirmed against
-  main) but a *different* run could just as easily use the same command to
-  wrongly conclude a still-open PR's commit is already on `main` — always
-  cross-check with `git merge-base HEAD origin/main` (or `git log
-  origin/main` without `--all`) before trusting a symbol/commit found via
-  `--all` actually exists on `main`, not just on some branch. #337 (the
-  second, distinct security-review failure mode — shallow checkout / no
-  merge-base — filed to track the gap left after #320's fix) was dropped a
-  second time this round for the same reason #320 was: the root cause lives
-  entirely inside `SuxOS/.github`'s reusable `security-review.yml`, which
-  this repo's own `.github/workflows/security-review.yml` only ever
-  `uses:` with no fetch-depth override available to it — labeled
-  `needs-human` on this, its second independent confirmation, same
-  two-strikes precedent as #320. #324 (streaming/chunked domain+Store path)
-  and #326 (TS/tsconfig convergence with `sux`) were dropped again too: #324
-  names its own need for a design pass before implementation, and #326
-  requires a coordinated change in the `sux` repo, which isn't reachable
-  from a suxlib-only session — neither is a fit for a low-priority batch
-  regardless of turn/time budget available. Update (2026-07-20, this batch):
-  #242/#309 re-checked once more via `gh pr checks 241`/`308` — both
-  prerequisite PRs (#241 for #234, #308 for #303) are still open and still
-  fail `security-review` on the identical #320 missing-script error, and
-  `grep -rn "snapshotValue\|traceSnapshots\|releaseCancelled" src/` still
-  comes up empty on `origin/main`, so both stay dropped, unbuilt, not
-  superseded. #324/#326 hit their *sixth* consecutive drop this round, each
-  for the same structural reason every prior batch found (#324 needs a
-  design pass a low-tier batch can't do; #326 needs the `sux` repo, which
-  is never checked out in this session — confirmed again via `find /
-  -maxdepth 3 -iname sux`, nothing). That clears the same "repeated
-  independent confirmation" bar #320/#337 were labeled `needs-human` under,
-  and #314 (filed after #313 hit the identical dispatcher-reselects-a-
-  permanently-blocked-issue pattern for #264) confirms directly: labelling
-  the offending issue `hold`/`needs-human` is the actual fix, since both
-  labels are already an EXPAND exclusion signal this task's own instructions
-  honor, so the low-tier dispatcher almost certainly does too. Labelled
-  both `needs-human` this batch rather than dropping a seventh time. Update
-  (2026-07-20, batch building #351/#350/#352): #242/#309 re-checked yet again
-  — `gh pr checks 241`/`308` both still fail `security-review` on the
-  identical `.suxos-ci/scripts/classify-security-noverdict.sh: No such file
-  or directory` error, and `grep -rn "snapshotValue\|releaseCancelled" src/`
-  is still empty on real `origin/main`. Nearly got fooled the same way this
-  note already warns about: `git log --oneline --all | grep <name>` (the
-  `--all` walks every ref, not just `main`) surfaced `3f7ecaa` looking like
-  landed `releaseCancelled` code — `git merge-base --is-ancestor 3f7ecaa
-  origin/main` (exit 1) caught that it's only on the stale, closed-unmerged
-  `bot/issue-build-29707704140` branch. Dropped both again, unbuilt, not
-  superseded. Update (#429): the `race` op-tree combinator (settles once
+  full fan-out limiter still can't be cancelled early. (A long multi-batch
+  triage saga about #320/#337's `security-review` infra gap once blocking
+  #303/#234's follow-ups #309/#242 lived here — both #320/#337 are since
+  resolved; see `docs/issue-triage-archive.md` for the history.) Update
+  (#429): the `race` op-tree combinator (settles once
   `need`-of-`ops.length` branches succeed) is the first node whose own
   cancellation isn't just "propagate the caller's `gOpts.signal` downward" --
   it also needs to *originate* an abort once its own outcome (quorum met, or
