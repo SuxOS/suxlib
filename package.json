@@ -9,15 +9,25 @@
     "./adapters/mcp": "./src/adapters/mcp.ts",
     "./adapters/otel": "./src/adapters/otel.ts"
   },
-  "bin": { "suxlib-fileops": "./bin/fileops.mjs" },
-  "scripts": { "test": "vitest run", "build": "tsc -p tsconfig.json --noEmit" },
-  "devDependencies": { "typescript": "^5.6.0", "vitest": "^4.1.10", "tsx": "^4.19.2", "@types/node": "^26.1.1" },
+  "bin": {
+    "suxlib-fileops": "./bin/fileops.mjs"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10"
+  },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "commander": "^15.0.0",
     "fflate": "^0.8.2",
     "pdf-lib": "^1.17.1",
-    "commander": "^15.0.0",
-    "zod": "^3.23.8",
-    "@modelcontextprotocol/sdk": "^1.12.0"
+    "zod": "^4.4.3"
   },
   "overrides": {
     "@hono/node-server": "^2.0.5"
